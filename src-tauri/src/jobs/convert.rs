@@ -101,7 +101,7 @@ fn build_args(info: &MediaInfo, input: &Path, temp: &Path, target: &Target, plan
             if plan == ConvertPlan::Remux {
                 args.extend([os("-c"), os("copy")]);
                 let hevc = info.video.as_ref().is_some_and(|v| v.codec == "hevc");
-                if hevc && matches!(target, Target::Mov) {
+                if hevc && matches!(target, Target::Mov | Target::Mp4) {
                     // QuickTime and Windows only recognise HEVC tagged hvc1.
                     args.extend([os("-tag:v"), os("hvc1")]);
                 }
@@ -265,6 +265,25 @@ mod tests {
             plan_convert(&info("mp4", Some("h264"), &["mp3"]), Target::Mov).unwrap(),
             ConvertPlan::ReencodeVideo
         );
+    }
+
+    fn args_text(info: &MediaInfo, target: Target, plan: ConvertPlan) -> String {
+        build_args(info, Path::new("in"), Path::new("tmp"), &target, plan)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn hevc_remux_is_tagged_hvc1_for_mp4_and_mov() {
+        let hevc = info("mkv", Some("hevc"), &["aac"]);
+        for target in [Target::Mp4, Target::Mov] {
+            let a = args_text(&hevc, target.clone(), ConvertPlan::Remux);
+            assert!(a.contains("-c copy -tag:v hvc1 "), "{target:?}: {a}");
+        }
+        let h264 = info("mkv", Some("h264"), &["aac"]);
+        assert!(!args_text(&h264, Target::Mp4, ConvertPlan::Remux).contains("hvc1"));
     }
 
     #[test]
