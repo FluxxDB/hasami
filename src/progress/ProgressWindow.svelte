@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { JobEvent } from '../lib/jobs';
-  import { formatBytes, progressLine } from './format';
+  import { formatBytes, formatFps, progressLine } from './format';
   import { initialState, reduce, type Kind } from './state';
 
   interface Props {
@@ -44,7 +44,7 @@
   const percent = $derived(Math.floor(Math.min(1, Math.max(0, view.fraction)) * 100));
   const planText = $derived(
     view.kind === 'compress'
-      ? ['≤ 20 MB', ...(view.target ? [`${view.target.width}×${view.target.height}`, `${view.target.fps} fps`] : [])].join(' · ')
+      ? ['≤ 20 MB', ...(view.target ? [`${view.target.width}×${view.target.height}`, `${formatFps(view.target.fps)} fps`] : [])].join(' · ')
       : view.ext
         ? `.${view.ext}`
         : '',

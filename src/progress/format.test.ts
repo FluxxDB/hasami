@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatEta, formatPercent, progressLine } from './format';
+import { formatBytes, formatEta, formatFps, formatPercent, progressLine } from './format';
 
 describe('formatBytes', () => {
   it('uses decimal units and drops decimals at three digits', () => {
@@ -49,5 +49,14 @@ describe('progressLine', () => {
   });
   it('omits the pass for single-pass jobs and the eta when unknown', () => {
     expect(progressLine({ pass: 1, passes: 1, fraction: 0.5, etaS: null })).toBe('50%');
+  });
+});
+
+describe('formatFps', () => {
+  it('keeps at most two decimals and drops trailing zeros', () => {
+    expect(formatFps(29.97002997)).toBe('29.97');
+    expect(formatFps(60)).toBe('60');
+    expect(formatFps(23.976)).toBe('23.98');
+    expect(formatFps(12.5)).toBe('12.5');
   });
 });

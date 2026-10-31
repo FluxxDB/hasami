@@ -12,6 +12,11 @@ export function formatBytes(bytes: number): string {
   return `${text} ${units[unit]}`;
 }
 
+/** Frame rate with at most two decimals and no trailing zeros: 29.97002997 → "29.97", 60 → "60". */
+export function formatFps(fps: number): string {
+  return String(Number(fps.toFixed(2)));
+}
+
 /** "m:ss", or "h:mm:ss" past an hour. Rounds up. */
 export function formatEta(seconds: number): string {
   const total = Math.max(0, Math.ceil(seconds));
