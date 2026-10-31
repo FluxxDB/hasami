@@ -138,3 +138,18 @@ pub fn max_volume_db(file: &Path, n: usize) -> f64 {
         .and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok())
         .unwrap_or_else(|| panic!("no max_volume in volumedetect output:\n{stderr}"))
 }
+
+/// 2 s of 320x180 VP9 video with one Opus track, in a WebM container.
+pub fn fixture_webm_vp9_opus(dir: &Path) -> PathBuf {
+    let out = out_path(dir, "clip_vp9.webm");
+    ffmpeg(&[
+        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "500k",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "libopus", "-ac", "2",
+        "-t", "2",
+        s(&out),
+    ]);
+    out
+}
