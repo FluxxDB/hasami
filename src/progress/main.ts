@@ -1,4 +1,5 @@
 import { mount } from 'svelte';
+import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import '../lib/theme.css';
 import { cancelJob, confirmLowRes, onJobEvent } from '../lib/jobs';
@@ -39,7 +40,12 @@ async function start() {
     props: {
       kind,
       ext,
-      listen: onJobEvent,
+      // Rust buffers job events until this window is listening; tell it once the listener is attached.
+      listen: (cb) =>
+        onJobEvent(cb).then((off) => {
+          invoke('progress_ready').catch((err) => console.error('progress_ready failed', err));
+          return off;
+        }),
       onCancel: (id) => void cancelJob(id),
       onConfirm: (id, proceed) => void confirmLowRes(id, proceed),
       onClose: () => void win.close(),

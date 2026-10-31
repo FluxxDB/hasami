@@ -1,6 +1,6 @@
 import type { JobEvent } from '../lib/jobs';
 
-export type Kind = 'compress' | 'convert';
+export type Kind = 'compress' | 'convert' | 'trim';
 
 export type Phase =
   | 'waiting' // window open, no job started yet

@@ -21,7 +21,7 @@ export type JobEvent =
       input_bytes: number;
       // Optional display hints. Not part of the Plan 1 Rust contract; the window
       // falls back to its `?kind=` query when they are absent (see state.ts).
-      kind?: 'compress' | 'convert';
+      kind?: 'compress' | 'convert' | 'trim';
       ext?: string;
       width?: number;
       height?: number;

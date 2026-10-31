@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Core permissions for Hasami windows",
   "windows": ["*"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-start-dragging"
+  ]
 }

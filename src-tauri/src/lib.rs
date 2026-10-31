@@ -10,17 +10,19 @@ pub mod media;
 pub mod shell_menu;
 pub mod verify;
 
-/// Build the Tauri app. No windows are declared in `tauri.conf.json`; later tasks create them
-/// at runtime. For now, with no windows to show, exit immediately instead of idling.
+/// Entry point. Explorer launches `hasami.exe <verb> <files…>`; the first launch becomes the app
+/// and later launches join it (see [`app`]).
 pub fn run() {
-    tauri::Builder::default()
-        .build(tauri::generate_context!())
-        .expect("error while building Hasami")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Ready = event {
-                if tauri::Manager::webview_windows(app_handle).is_empty() {
-                    app_handle.exit(0);
-                }
-            }
-        });
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match cli::parse_args(&args) {
+        Ok(cli::Action::Register | cli::Action::Unregister) => {
+            // TODO(Task 10): run the shell-menu register/unregister here, then return without
+            // starting Tauri, so no window opens and nothing joins a running instance.
+        }
+        Ok(action) => app::run(action),
+        Err(e) => {
+            eprintln!("hasami: {e}");
+            std::process::exit(2);
+        }
+    }
 }
