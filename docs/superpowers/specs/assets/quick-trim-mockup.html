@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hasami — Quick Trim, branding theme</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --void: #080808;
+    --black: #000000;
+    --charcoal: #171617;
+    --smoke: #262525;
+    --graphite: #393939;
+    --bone: #fcfcfc;
+    --linen: #f3efef;
+    --ash: #d4d2d2;
+    --pebble: #b5b2b2;
+    --iron: #525252;
+    --red: #d43545;          /* arterial red, muted */
+    --a1: #7fa58c;           /* audio track 1 */
+    --a2: #c9a063;           /* audio track 2 */
+    --line: #1f1e1f;          /* structural divider, between charcoal and smoke */
+    --sans: Inter, "Neue Haas Grotesk Display", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    --serif: "Instrument Serif", "Editorial New", "Playfair Display", serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--void); color: var(--bone); }
+  body {
+    font-family: var(--sans);
+    font-size: 13px;
+    letter-spacing: -0.017em;
+    -webkit-font-smoothing: antialiased;
+    padding: 40px 24px 72px;
+  }
+  ::selection { background: var(--bone); color: var(--void); }
+
+  .cap { text-transform: uppercase; letter-spacing: 0.071em; font-size: 11px; }
+
+  .page { max-width: 1320px; margin: 0 auto; }
+  .page > h2 {
+    margin: 0 0 10px; font-weight: 700; font-size: 42px; line-height: 1.05;
+    letter-spacing: -0.04em; text-transform: uppercase;
+  }
+  .page > h2 em { font-family: var(--serif); font-weight: 400; text-transform: none; letter-spacing: -0.02em; color: var(--ash); font-size: 40px; }
+  .page > p.sub { color: var(--pebble); margin: 0 0 32px; font-size: 14px; max-width: 70ch; line-height: 1.5; }
+
+  /* ---------- window ---------- */
+  .win {
+    width: 1280px; border-radius: 8px; overflow: hidden; background: var(--void);
+    border: 1px solid var(--smoke);
+  }
+
+  .topbar {
+    height: 54px; display: flex; align-items: center; gap: 16px;
+    padding: 0 10px 0 18px; border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+  .brand b { font-weight: 700; font-size: 15px; letter-spacing: -0.03em; }
+  .brand em { font-family: var(--serif); font-size: 17px; color: var(--pebble); letter-spacing: -0.01em; }
+  .vsep { width: 1px; height: 22px; background: var(--smoke); }
+  .file { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .file .name { font-size: 13px; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; }
+  .file .name .edited { color: var(--pebble); }
+  .file .meta { color: var(--pebble); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .spacer { flex: 1; }
+
+  .toggle { display: flex; align-items: center; gap: 9px; color: var(--ash); white-space: nowrap; }
+  .switch { width: 28px; height: 16px; border-radius: 100px; border: 1px solid var(--iron); position: relative; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 8px; height: 8px; border-radius: 50%; background: var(--pebble); }
+  .link { color: var(--bone); padding: 6px 4px; text-decoration: underline; text-decoration-color: var(--iron); text-underline-offset: 4px; white-space: nowrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;
+    padding: 10px 16px; border-radius: 8px; color: var(--bone); background: transparent;
+    border: 1px solid var(--ash);
+  }
+  .btn.primary { border-color: var(--red); }
+  .btn svg { flex: none; }
+  .winctl { display: flex; gap: 2px; margin-left: 6px; }
+  .winctl span { width: 34px; height: 28px; display: grid; place-items: center; color: var(--pebble); border-radius: 3px; }
+
+  /* viewer */
+  .viewer { height: 424px; background: var(--black); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding-top: 18px; }
+  .frame {
+    width: 608px; aspect-ratio: 16/9; position: relative; overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(0,0,0,0) 55%, rgba(0,0,0,.85) 100%),
+      radial-gradient(60% 50% at 70% 35%, rgba(255,170,90,.55) 0%, rgba(255,120,60,0) 70%),
+      linear-gradient(160deg, #2b3f6b 0%, #1b2440 38%, #4a2a3a 62%, #1a1420 100%);
+  }
+  .frame::before {
+    content: ""; position: absolute; left: -10%; right: -10%; bottom: -20%; height: 55%;
+    background: linear-gradient(180deg, #3a2c35 0%, #17121a 100%);
+    transform: perspective(300px) rotateX(38deg); transform-origin: bottom;
+  }
+  .frame::after {
+    content: ""; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+    border: 1.5px solid rgba(252,252,252,.7); border-radius: 50%;
+  }
+  .transport { width: 608px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+  .tc { font-variant-numeric: tabular-nums; font-size: 14px; letter-spacing: 0; }
+  .tc.dim { color: var(--pebble); text-align: right; }
+  .tbtns { display: flex; gap: 6px; align-items: center; }
+  .ibtn { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--ash); }
+  .ibtn.play { width: 42px; height: 42px; background: var(--graphite); color: var(--bone); box-shadow: rgba(255,255,255,.2) 0 2px 5px 0 inset; }
+  .speed { margin-left: 10px; color: var(--bone); border: 1px solid var(--iron); padding: 3px 6px; border-radius: 3px; font-variant-numeric: tabular-nums; }
+  .tcwrap { display: flex; align-items: center; }
+
+  /* timeline toolbar */
+  .tlbar { height: 42px; display: flex; align-items: center; gap: 4px; padding: 0 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .tool { height: 28px; padding: 0 9px; display: flex; align-items: center; gap: 7px; border-radius: 3px; color: var(--pebble); white-space: nowrap; }
+  .tool.on { color: var(--bone); background: var(--smoke); }
+  .tool .k { color: var(--iron); color: #8a8787; }
+  .kept { color: var(--pebble); font-variant-numeric: tabular-nums; margin-right: 14px; }
+  .kept b { color: var(--bone); font-weight: 500; }
+  .zoom { display: flex; align-items: center; gap: 8px; color: var(--pebble); }
+  .zoom .rail { width: 90px; height: 1px; background: var(--iron); position: relative; }
+  .zoom .rail::after { content: ""; position: absolute; left: 0; top: 0; height: 1px; width: 40%; background: var(--ash); }
+  .zoom .rail i { position: absolute; left: 40%; top: -5px; width: 11px; height: 11px; margin-left: -5px; border-radius: 50%; background: var(--bone); }
+
+  /* timeline */
+  .timeline { display: grid; grid-template-columns: 200px 1fr; }
+  .heads { border-right: 1px solid var(--line); background: var(--charcoal); }
+  .ruler-head { height: 28px; border-bottom: 1px solid var(--line); }
+  .head { height: 64px; display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+  .head .row { display: flex; align-items: center; gap: 10px; }
+  .tag { font-weight: 700; color: var(--pebble); width: 20px; }
+  .tname { flex: 1; color: var(--bone); }
+  .mute { width: 24px; height: 22px; border-radius: 3px; display: grid; place-items: center; color: var(--ash); border: 1px solid var(--iron); }
+  .vol { display: flex; align-items: center; gap: 10px; padding-left: 30px; }
+  .vol .rail { flex: 1; height: 1px; background: var(--iron); position: relative; }
+  .vol .rail .fill { position: absolute; left: 0; top: 0; height: 1px; background: var(--ash); }
+  .vol .rail i { position: absolute; top: -5px; width: 11px; height: 11px; margin-left: -5px; border-radius: 50%; background: var(--bone); }
+  .vol .db { color: var(--pebble); font-size: 11px; letter-spacing: 0.04em; width: 54px; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .lanes { position: relative; overflow: hidden; background: #0b0b0b; }
+  .ruler { height: 28px; position: relative; border-bottom: 1px solid var(--line); background: var(--void); }
+  .tick { position: absolute; bottom: 0; width: 1px; background: #2c2b2c; height: 5px; }
+  .tick.major { height: 11px; background: var(--iron); }
+  .tick span { position: absolute; left: 5px; bottom: 9px; font-size: 10px; color: var(--pebble); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; white-space: nowrap; }
+  .lane { position: relative; height: 64px; border-bottom: 1px solid var(--line); }
+
+  .clip { position: absolute; top: 6px; bottom: 6px; border-radius: 3px; overflow: hidden; }
+  .clip.video { background: #111; box-shadow: inset 0 0 0 1px var(--graphite); display: flex; }
+  .clip.video .thumb { flex: 0 0 auto; height: 100%; width: 72px; border-right: 1px solid rgba(0,0,0,.7); filter: saturate(.85); }
+  .clip .label {
+    position: absolute; left: 7px; bottom: 4px; font-size: 10px; letter-spacing: 0.02em; color: var(--bone);
+    text-shadow: 0 1px 2px rgba(0,0,0,.95); white-space: nowrap;
+  }
+  .clip.audio { background: color-mix(in srgb, var(--c) 15%, #0b0b0b); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 38%, transparent); }
+  .clip.audio svg { color: color-mix(in srgb, var(--c) 88%, #0b0b0b); }
+  .clip.audio svg { position: absolute; inset: 5px 0 15px 0; width: 100%; height: calc(100% - 20px); }
+  .clip.audio .label { color: color-mix(in srgb, var(--c) 55%, var(--bone)); text-shadow: none; }
+  .clip.sel { box-shadow: inset 0 0 0 1.5px var(--bone); }
+  .clip.audio.sel { background: color-mix(in srgb, var(--c) 28%, #0b0b0b); }
+  .clip.audio.sel svg { color: color-mix(in srgb, var(--c) 45%, var(--bone)); }
+  .clip.audio.sel .label { color: var(--bone); }
+  .chip { width: 8px; height: 8px; border-radius: 2px; background: var(--c); flex: none; }
+
+  .gap-silence { position: absolute; top: 6px; bottom: 6px; border-radius: 3px; border: 1px dashed #3a3939; }
+  .gap-silence span { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); color: var(--pebble); white-space: nowrap; }
+
+  .overhang { position: absolute; top: 0; bottom: 0; right: 0; background: repeating-linear-gradient(135deg, rgba(8,8,8,.78) 0 5px, rgba(8,8,8,.5) 5px 10px); }
+  .video-end { position: absolute; top: 28px; bottom: 0; width: 1px; background: var(--ash); opacity: .55; }
+  .video-end-label { position: absolute; top: 34px; color: var(--ash); white-space: nowrap; }
+  .playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--red); pointer-events: none; }
+  .playhead::before {
+    content: ""; position: absolute; top: 0; left: -6px; width: 13px; height: 14px; background: var(--red);
+    clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+  }
+
+  .statusbar { height: 32px; display: flex; align-items: center; gap: 20px; padding: 0 16px; border-top: 1px solid var(--line); color: var(--pebble); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .statusbar b { color: var(--bone); font-weight: 500; }
+
+  /* progress window */
+  .row2 { display: grid; grid-template-columns: 440px 1fr; gap: 48px; margin-top: 56px; align-items: start; width: 1280px; }
+  .mini { width: 440px; border-radius: 8px; border: 1px solid var(--smoke); background: var(--void); overflow: hidden; }
+  .mini .bar { height: 40px; display: flex; align-items: center; padding: 0 6px 0 16px; border-bottom: 1px solid var(--line); }
+  .mini .body { padding: 20px 20px 18px; display: flex; flex-direction: column; gap: 14px; }
+  .mini .fname { font-size: 14px; }
+  .mini .sizes { color: var(--pebble); font-variant-numeric: tabular-nums; }
+  .mini .sizes b { color: var(--bone); font-weight: 500; }
+  .prog { height: 2px; background: var(--smoke); position: relative; }
+  .prog i { position: absolute; left: 0; top: 0; bottom: 0; width: 38%; background: var(--bone); }
+  .mini .foot { display: flex; align-items: center; justify-content: space-between; color: var(--pebble); font-variant-numeric: tabular-nums; }
+  .mini .btn { padding: 8px 14px; }
+
+  .notes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px 40px; }
+  .note h3 { font-size: 14px; font-weight: 500; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .note p { margin: 0; color: var(--pebble); font-size: 13px; line-height: 1.5; }
+
+  .pals { width: 1280px; margin-top: 40px; }
+  .pals-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
+  .pals-head h3 { margin: 0; font-size: 14px; font-weight: 500; letter-spacing: -0.01em; }
+  .pals-head .cap { color: var(--pebble); }
+  .pal-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .pal { border: 1px solid var(--smoke); border-radius: 8px; padding: 16px; cursor: pointer; transition: border-color .15s ease-out; }
+  .pal:hover { border-color: var(--iron); }
+  .pal.selected { border-color: var(--bone); }
+  .pal .sw { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .pal .sw i { display: block; height: 22px; border-radius: 3px; background: color-mix(in srgb, var(--c) 15%, #0b0b0b); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 38%, transparent);
+    background-image: repeating-linear-gradient(90deg, color-mix(in srgb, var(--c) 88%, #0b0b0b) 0 1.6px, transparent 1.6px 3px);
+    -webkit-mask: linear-gradient(#000,#000); background-size: 100% 60%; background-position: center; background-repeat: no-repeat; }
+  .pal h4 { margin: 0 0 4px; font-size: 13px; font-weight: 500; }
+  .pal p { margin: 0; color: var(--pebble); font-size: 12px; line-height: 1.5; }
+  .row2 { margin-top: 48px !important; }
+  .scaler { transform-origin: top left; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h2>Quick Trim <em>with colored audio</em></h2>
+  <p class="sub">The red is pulled back from #fe1e34 to a duller #d43545, and each audio track now has its own muted color. Click a palette under the editor to try it on the timeline.</p>
+
+  <div class="scaler" id="scaler">
+  <div class="win">
+    <div class="topbar">
+      <div class="brand"><b>HASAMI</b><em>quick trim</em></div>
+      <div class="vsep"></div>
+      <div class="file">
+        <div class="name">Replay 2026-10-09 23-40-17.mp4 <span class="dot"></span><span class="cap edited">Edited</span></div>
+        <div class="meta cap">1920×1080 · 60 fps · HEVC · 2 audio tracks · 2:00 · 412 MB</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="toggle cap"><span class="switch"></span>Fit to 20 MB</div>
+      <span class="link cap">Export audio</span>
+      <span class="btn cap">Export + save raw
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 9 9 3M4 3h5v5"/></svg></span>
+      <span class="btn primary cap">Quick export
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 9 9 3M4 3h5v5"/></svg></span>
+      <div class="winctl">
+        <span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 6h10" stroke="currentColor"/></svg></span>
+        <span><svg width="12" height="12" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor"/></svg></span>
+        <span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor"/></svg></span>
+      </div>
+    </div>
+
+    <div class="viewer">
+      <div class="frame"></div>
+      <div class="transport">
+        <div class="tcwrap"><span class="tc">00:00:21:43</span><span class="speed cap">2×</span></div>
+        <div class="tbtns">
+          <span class="ibtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20 9 12l10-8v16Z"/><path d="M5 19V5"/></svg></span>
+          <span class="ibtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></span>
+          <span class="ibtn play"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15a.5.5 0 0 0 .77.42l11.5-7.5a.5.5 0 0 0 0-.84L7.77 4.08A.5.5 0 0 0 7 4.5Z"/></svg></span>
+          <span class="ibtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+          <span class="ibtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 4 10 8-10 8V4Z"/><path d="M19 5v14"/></svg></span>
+        </div>
+        <span class="tc dim">00:00:44:00</span>
+      </div>
+    </div>
+
+    <div class="tlbar">
+      <span class="tool on cap"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15"/><path d="m5 8 4 4"/><path d="m12 15 4 4"/></svg>Snap</span>
+      <span class="tool on cap"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Linked</span>
+      <div class="vsep" style="margin:0 8px;height:18px"></div>
+      <span class="tool cap"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>Cut <span class="k">Ctrl+B</span></span>
+      <span class="tool"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></span>
+      <span class="tool"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></span>
+      <div class="spacer"></div>
+      <span class="kept cap"><b>0:44</b> kept of 2:00</span>
+      <div class="zoom">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"/></svg>
+        <div class="rail"><i></i></div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14M12 5v14"/></svg>
+      </div>
+    </div>
+
+    <div class="timeline">
+      <div class="heads">
+        <div class="ruler-head"></div>
+        <div class="head"><div class="row"><span class="tag cap">V1</span><span class="tname cap">Video</span></div></div>
+        <div class="head">
+          <div class="row"><span class="tag cap">A1</span><i class="chip" style="--c:var(--a1)"></i><span class="tname cap">Game</span>
+            <span class="mute"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5Z"/><path d="M16 9a5 5 0 0 1 0 6"/></svg></span></div>
+          <div class="vol"><div class="rail"><div class="fill" style="width:72%"></div><i style="left:72%"></i></div><span class="db">0.0 dB</span></div>
+        </div>
+        <div class="head">
+          <div class="row"><span class="tag cap">A2</span><i class="chip" style="--c:var(--a2)"></i><span class="tname cap">Mic</span>
+            <span class="mute"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5Z"/><path d="M16 9a5 5 0 0 1 0 6"/></svg></span></div>
+          <div class="vol"><div class="rail"><div class="fill" style="width:58%"></div><i style="left:58%"></i></div><span class="db">−6.0 dB</span></div>
+        </div>
+      </div>
+      <div class="lanes">
+        <div class="ruler" id="ruler"></div>
+        <div class="lane" id="laneV"></div>
+        <div class="lane" id="laneA1"></div>
+        <div class="lane" id="laneA2"></div>
+        <div class="video-end" style="left:880px"></div>
+        <span class="video-end-label cap" style="left:888px">Video ends</span>
+        <div class="playhead" style="left:434px"></div>
+      </div>
+    </div>
+
+    <div class="statusbar cap">
+      <span>3 cuts · 1 selected</span>
+      <span>Quick export ≈ <b>151 MB</b> at source quality · Fit to 20 MB: <b>≤ 20 MB</b></span>
+      <span class="spacer"></span>
+      <span>Space play · J/K/L shuttle · ←/→ frame · Del delete · Ctrl+Z undo</span>
+    </div>
+  </div>
+
+  <div class="pals">
+    <div class="pals-head"><h3>Audio colors</h3><span class="cap">Click to preview on the timeline</span></div>
+    <div class="pal-row">
+      <div class="pal selected" data-choice="sage-ochre" data-a1="#7fa58c" data-a2="#c9a063" onclick="pickPal(this)">
+        <div class="sw"><i style="--c:#7fa58c"></i><i style="--c:#c9a063"></i></div>
+        <h4>Sage + ochre</h4><p>Each track gets its own hue. Warm and cool, so Game and Mic are easy to tell apart.</p></div>
+      <div class="pal" data-choice="all-sage" data-a1="#7fa58c" data-a2="#7fa58c" onclick="pickPal(this)">
+        <div class="sw"><i style="--c:#7fa58c"></i><i style="--c:#7fa58c"></i></div>
+        <h4>All sage</h4><p>Every audio track is one green, like DaVinci, only quieter.</p></div>
+      <div class="pal" data-choice="blue-mauve" data-a1="#7f9cc4" data-a2="#b08bb3" onclick="pickPal(this)">
+        <div class="sw"><i style="--c:#7f9cc4"></i><i style="--c:#b08bb3"></i></div>
+        <h4>Dusty blue + mauve</h4><p>Cooler and calmer, and further from the red playhead.</p></div>
+      <div class="pal" data-choice="teal-amber" data-a1="#4fa8a2" data-a2="#d89a3e" onclick="pickPal(this)">
+        <div class="sw"><i style="--c:#4fa8a2"></i><i style="--c:#d89a3e"></i></div>
+        <h4>Teal + amber</h4><p>The most saturated option: louder and closer to game-UI color.</p></div>
+    </div>
+  </div>
+
+  <div class="row2">
+    <div class="mini">
+      <div class="bar">
+        <div class="brand"><b style="font-size:13px">HASAMI</b><em style="font-size:15px">compress</em></div>
+        <div class="spacer"></div>
+        <div class="winctl"><span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 6h10" stroke="currentColor"/></svg></span><span><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor"/></svg></span></div>
+      </div>
+      <div class="body">
+        <div class="fname">[CLIPPED] Replay 2026-10-09 23-40-17.mp4</div>
+        <div class="sizes cap"><b>412 MB</b> → ≤ 20 MB · 1280×720 · 60 fps</div>
+        <div class="prog"><i></i></div>
+        <div class="foot cap"><span>Pass 1 of 2 · 38% · about 0:24 left</span><span class="btn cap">Cancel</span></div>
+      </div>
+    </div>
+    <div class="notes">
+      <div class="note"><h3>Small progress window</h3><p>Opens for right-click Compress and Convert, then closes itself when done. It shows the size going in, the target, and the resolution Hasami picked to stay under 20 MB.</p></div>
+      <div class="note"><h3>Where the red goes</h3><p>Still only three places: the playhead, the Quick export border, and the "edited" dot. It's now a duller red that doesn't fight the audio colors. A selected clip still gets a bone-white outline.</p></div>
+      <div class="note"><h3>Type</h3><p>Small text is uppercase and letter-spaced, like gallery signage. The serif italic appears only in the wordmark ("quick trim", "compress"). Fonts here are free stand-ins; the doc's Kmr Waldenburg and Editorial New are paid faces.</p></div>
+      <div class="note"><h3>No chrome</h3><p>No gradients, no filled buttons, no glows. Buttons are hairline-bordered and marked with an arrow. The video sits on pure black so the frame is the brightest thing on screen.</p></div>
+    </div>
+  </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const PX = 20, secs = 54;
+  const ruler = document.getElementById('ruler');
+  for (let s = 0; s <= secs; s++) {
+    const t = document.createElement('div'); const major = s % 5 === 0;
+    t.className = 'tick' + (major ? ' major' : ''); t.style.left = (s*PX) + 'px';
+    if (major) { const sp = document.createElement('span'); sp.textContent = '0:' + String(s).padStart(2,'0'); t.appendChild(sp); }
+    ruler.appendChild(t);
+  }
+  let seed = 7; const rnd = () => (seed = (seed*16807) % 2147483647) / 2147483647;
+  const thumbs = [
+    'linear-gradient(160deg,#2b3f6b,#4a2a3a 60%,#17121a)',
+    'linear-gradient(170deg,#3a4f7a,#20263f 50%,#3b2a2f)',
+    'linear-gradient(150deg,#5a3a2a,#2a1d26 55%,#121018)',
+    'linear-gradient(165deg,#24324f,#3d2b44 50%,#1a1520)',
+    'linear-gradient(155deg,#6b4a2b,#3a2530 50%,#141018)',
+    'linear-gradient(175deg,#1f3a4a,#253045 50%,#191622)'
+  ];
+  function videoClip(lane, from, to, label, sel) {
+    const c = document.createElement('div');
+    c.className = 'clip video' + (sel ? ' sel' : '');
+    c.style.left = (from*PX+1) + 'px'; c.style.width = ((to-from)*PX-2) + 'px';
+    const n = Math.ceil((to-from)*PX/72);
+    for (let i=0;i<n;i++){ const th=document.createElement('div'); th.className='thumb'; th.style.background=thumbs[Math.floor(rnd()*thumbs.length)]; c.appendChild(th); }
+    const l = document.createElement('div'); l.className='label'; l.textContent = label; c.appendChild(l);
+    lane.appendChild(c);
+  }
+  function wave(w, h, loud, color) {
+    const bars = Math.floor(w/3); let d = '';
+    for (let i=0;i<bars;i++){
+      const env = loud ? (0.35 + 0.65*Math.abs(Math.sin(i/9))*rnd()) : (rnd() < .22 ? 0.25 + 0.7*rnd() : 0.04 + 0.08*rnd());
+      const bh = Math.max(1, env*h); const y = (h-bh)/2;
+      d += `<rect x="${i*3}" y="${y.toFixed(1)}" width="1.6" height="${bh.toFixed(1)}"/>`;
+    }
+    return `<svg viewBox="0 0 ${bars*3} ${h}" preserveAspectRatio="none" fill="${color}">${d}</svg>`;
+  }
+  function audioClip(lane, from, to, label, sel, loud, overhangFrom) {
+    const c = document.createElement('div');
+    c.className = 'clip audio' + (sel ? ' sel' : '');
+    const w = (to-from)*PX-2;
+    c.style.left = (from*PX+1) + 'px'; c.style.width = w + 'px';
+    c.style.setProperty('--c', lane.id === 'laneA1' ? 'var(--a1)' : 'var(--a2)');
+    c.innerHTML = wave(w, 44, loud, 'currentColor') + `<div class="label cap">${label}</div>`;
+    if (overhangFrom != null) { const o = document.createElement('div'); o.className='overhang'; o.style.width = ((to-overhangFrom)*PX) + 'px'; c.appendChild(o); }
+    lane.appendChild(c);
+  }
+  const V = document.getElementById('laneV'), A1 = document.getElementById('laneA1'), A2 = document.getElementById('laneA2');
+  const name = 'Replay 2026-10-09 23-40-17.mp4';
+  videoClip(V, 0, 12, name, false); videoClip(V, 12, 31, name, true); videoClip(V, 31, 44, name, false);
+  audioClip(A1, 0, 12, 'Game', false, true); audioClip(A1, 12, 31, 'Game', true, true); audioClip(A1, 31, 44, 'Game', false, true);
+  audioClip(A2, 0, 12, 'Mic', false, false);
+  const g = document.createElement('div'); g.className='gap-silence'; g.style.left=(12*PX+1)+'px'; g.style.width=(7*PX-2)+'px'; g.innerHTML='<span class="cap">Silence</span>'; A2.appendChild(g);
+  audioClip(A2, 19, 31, 'Mic', true, false);
+  audioClip(A2, 31, 52, 'Mic', false, false, 44);
+
+
+  window.pickPal = function(el){
+    document.querySelectorAll('.pal').forEach(p => p.classList.remove('selected'));
+    el.classList.add('selected');
+    document.documentElement.style.setProperty('--a1', el.dataset.a1);
+    document.documentElement.style.setProperty('--a2', el.dataset.a2);
+  };
+  const sc = document.getElementById('scaler');
+  function fit(){ const avail = Math.min(window.innerWidth - 48, 1320); const s = Math.min(1, avail/1280); sc.style.transform = `scale(${s})`; sc.style.height = (sc.scrollHeight*s)+'px'; }
+  window.addEventListener('resize', fit); fit();
+})();
+</script>
+</body>
+</html>

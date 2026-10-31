@@ -1,0 +1,8 @@
+# Brainstorming / tooling scratch
+.superpowers/
+.gstack/
+graphify-out/
+**/graphify-out/
+
+# Windows download markers copied through WSL
+*:Zone.Identifier
