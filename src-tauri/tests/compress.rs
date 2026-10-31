@@ -302,6 +302,52 @@ fn compress_cancel_leaves_original() {
 }
 
 #[test]
+fn compress_cancel_during_pass_2_removes_temp() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_big_h264(dir.path(), 4);
+    let bytes = fs::read(&input).unwrap();
+    let temp = dir.path().join(".big_h264.mp4.hasami-tmp");
+
+    let cancel = CancelToken::new();
+    let mut temp_existed = false;
+    let result = compress(&paths(), &input, false, &cancel, &mut |p| {
+        if p.pass == 2 && !cancel.is_cancelled() {
+            // Pass 2 is writing the temp file now, so a leftover would be detectable.
+            temp_existed = temp.exists();
+            cancel.cancel();
+        }
+    });
+
+    assert!(matches!(result, Err(JobError::Cancelled)), "{result:?}");
+    assert!(temp_existed, "the temp file should exist while pass 2 runs");
+    assert_eq!(fs::read(&input).unwrap(), bytes, "original bytes unchanged");
+    assert_eq!(
+        names(dir.path()),
+        vec!["big_h264.mp4"],
+        "no temp file remains"
+    );
+}
+
+#[test]
+fn compress_unreadable_input_is_plain_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("not a video.mp4");
+    fs::write(&input, b"this is not a video").unwrap();
+
+    let (result, _) = run(&input, false);
+
+    match result {
+        Err(e) => assert_eq!(
+            e.to_string(),
+            "Hasami couldn't read this video. The original was not changed."
+        ),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert_eq!(fs::read(&input).unwrap(), b"this is not a video");
+    assert_eq!(names(dir.path()), vec!["not a video.mp4"]);
+}
+
+#[test]
 fn six_track_mix_keeps_level() {
     let dir = tempfile::tempdir().unwrap();
     let input = common::fixture_six_tracks(dir.path());

@@ -27,6 +27,11 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_FACTOR: f64 = 0.9;
 /// Shown when every retry was still over the limit.
 const NEVER_FIT: &str = "Couldn't get this video under 20 MB. The original was not changed.";
+/// Shown when the input can't be probed (unreadable, not media, or no duration).
+const UNREADABLE: &str = "Hasami couldn't read this video. The original was not changed.";
+/// Shown when an encoded result fails verification for a reason other than its size.
+const DIDNT_CHECK_OUT: &str =
+    "Couldn't compress this video: the result didn't check out. The original was not changed.";
 /// Where pass 1 writes its (discarded) output. The crate is Windows-only.
 const NULL_OUTPUT: &str = "NUL";
 
@@ -65,7 +70,7 @@ fn compress_in(
     on_progress: &mut dyn FnMut(JobProgress),
     work_root: &Path,
 ) -> Result<JobOutcome, JobError> {
-    let info = probe(paths, input)?;
+    let info = probe(paths, input).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
     let plan = match plan_compress(&info)? {
         CompressDecision::AlreadySmall => {
             return Ok(JobOutcome::Unchanged {
@@ -103,7 +108,8 @@ fn compress_in(
             info.duration_s,
             Some(SIZE_LIMIT_BYTES),
         )?)
-    })?;
+    })
+    .map_err(plain_verify_error)?;
 
     // Last chance to back out; once the commit starts it runs to completion or rolls back.
     if cancel.is_cancelled() {
@@ -148,6 +154,15 @@ fn encode_until_fits<T>(
             }
             other => return other,
         }
+    }
+}
+
+/// Replace a verification failure's technical text with plain language for the user.
+/// (`TooLarge` never gets here: [`encode_until_fits`] turns it into its own message.)
+fn plain_verify_error(e: JobError) -> JobError {
+    match e {
+        JobError::Verify(_) => JobError::Message(DIDNT_CHECK_OUT.to_owned()),
+        other => other,
     }
 }
 
@@ -218,6 +233,20 @@ impl Encode<'_> {
         }
     }
 
+    /// `-ac` value: mono when the plan asks for it, stereo when tracks are mixed or a track has
+    /// more than two channels, otherwise none (keep the source's mono or stereo).
+    fn channels(&self) -> Option<&'static str> {
+        let mixed = self.info.audio.len() > 1;
+        let surround = self.info.audio.iter().any(|a| a.channels > 2);
+        if self.plan.audio_mono {
+            Some("1")
+        } else if mixed || surround {
+            Some("2")
+        } else {
+            None
+        }
+    }
+
     /// ffmpeg arguments for `pass` (after the options `run_ffmpeg` adds itself).
     fn args(&self, pass: Pass) -> Vec<OsString> {
         let mut a = Args::default();
@@ -248,7 +277,7 @@ impl Encode<'_> {
         }
 
         if pass == Pass::First {
-            a.add(["-an", "-f", "mp4", NULL_OUTPUT]);
+            a.add(["-an", "-f", "null", NULL_OUTPUT]);
             return a.0;
         }
 
@@ -266,15 +295,10 @@ impl Encode<'_> {
             }
         }
         if !self.info.audio.is_empty() {
-            let channels = if self.plan.audio_mono { "1" } else { "2" };
-            a.add([
-                "-c:a",
-                "aac",
-                "-b:a",
-                &self.audio_bps().to_string(),
-                "-ac",
-                channels,
-            ]);
+            a.add(["-c:a", "aac", "-b:a", &self.audio_bps().to_string()]);
+            if let Some(channels) = self.channels() {
+                a.add(["-ac", channels]);
+            }
         }
 
         a.add(["-movflags", "+faststart", "-f", "mp4"])
@@ -481,7 +505,7 @@ mod tests {
         assert_eq!(
             a,
             "-i in.mkv -map 0:0 -vf scale=1280:720,fps=30 -c:v libx264 -preset medium -b:v 1000000 \
-             -pix_fmt yuv420p -pass 1 -passlogfile logs/x264 -an -f mp4 NUL"
+             -pix_fmt yuv420p -pass 1 -passlogfile logs/x264 -an -f null NUL"
         );
     }
 
@@ -522,8 +546,32 @@ mod tests {
         let a = args(&info(false, 1), &plan(false), 0.9, Pass::Final);
         assert_eq!(
             a,
-            "-i in.mkv -map 0:1 -c:a aac -b:a 115200 -ac 2 -movflags +faststart -f mp4 .out.mp4.hasami-tmp"
+            "-i in.mkv -map 0:1 -c:a aac -b:a 115200 -movflags +faststart -f mp4 .out.mp4.hasami-tmp"
         );
+    }
+
+    #[test]
+    fn single_track_is_only_downmixed_from_surround() {
+        let mut src = info(true, 1);
+        for (channels, want) in [(1, None), (2, None), (6, Some("2"))] {
+            src.audio[0].channels = channels;
+            let a = args(&src, &plan(false), 1.0, Pass::Final);
+            let got = a.split(" -ac ").nth(1).map(|rest| &rest[..1]);
+            assert_eq!(got, want, "{channels} channels: {a}");
+        }
+    }
+
+    #[test]
+    fn verify_failures_other_than_size_read_as_plain_language() {
+        let wrong = JobError::Verify(VerifyError::WrongDuration {
+            expected_s: 13.0,
+            actual_s: 12.34,
+        });
+        assert_eq!(plain_verify_error(wrong).to_string(), DIDNT_CHECK_OUT);
+        assert!(matches!(
+            plain_verify_error(JobError::Cancelled),
+            JobError::Cancelled
+        ));
     }
 
     /// Write a small `.mkv` (so it is never "already small") into `dir`.
