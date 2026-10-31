@@ -80,6 +80,19 @@
 4. **The source deleted or renamed in Explorer while it's open:** the export fails with "Hasami couldn't read this video." and nothing else is touched. Test in Task 7.
 5. **A very long input (e.g. a 2-hour recording):** thumbnails stay ≤ 300, peaks ≤ 200,000 values per track, and audio is streamed, never decoded whole into memory. Tests in Task 2 (pure sizing functions) and Task 10 (the engine uses `<audio>` elements).
 
+## Task Dependencies
+
+Tasks 1–6 are independent of each other.
+
+| Task | Needs |
+|---|---|
+| 7 | 1, 5, 6 |
+| 8 | 2, 5, 7 |
+| 9 | 3, 4 |
+| 10 | 9 |
+| 11 | 8, 10 |
+| 12 | all |
+
 ---
 
 ## File Structure
