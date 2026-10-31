@@ -12,6 +12,7 @@
   import { PlaybackEngine } from './engine';
   import { fitZoom } from './geometry';
   import { keyToCommand, type Command } from './keys';
+  import { proxyUpfront, watchFirstFrame } from './preview';
   import type { EditorStore } from './store.svelte';
   import { EngineSync } from './sync';
 
@@ -55,6 +56,8 @@
   let tracks: { index: number; src: string }[] = [];
   /** Whether the open clip has already gone to its H.264 proxy (so another failure is final). */
   let proxied = false;
+  /** Stops the first-frame watchdog on the original (preview.ts); a no-op when none is running. */
+  let stopWatch = () => {};
 
   $effect(() => {
     if (!video) return;
@@ -69,6 +72,7 @@
     engine = e;
     sync = sy;
     return () => {
+      stopWatch();
       sy.destroy();
       e.destroy();
       void ctx?.close();
@@ -102,29 +106,41 @@
     if (sy) untrack(() => sy.shuttle(s));
   });
 
-  function isHevc(m: EditorMedia): boolean {
-    return /^(hevc|h265)$/i.test(m.video?.codec ?? '');
-  }
-
-  /** Loads the clip's picture and tracks, or starts a proxy when this webview can't decode it. */
+  /**
+   * Loads the clip's picture and tracks. The original plays directly whenever this webview may
+   * decode it; it goes to the proxy up front only when the webview can't play its codec at all,
+   * and later on a decode error (`onVideoError`) or when no first frame shows up (preview.ts).
+   */
   function openPreview(e: PlaybackEngine, m: EditorMedia) {
+    stopWatch();
     tracks = m.tracks
       .flatMap((t) => (!t.empty && t.file ? [{ index: t.index, src: api.src(t.file) }] : []))
       .filter((t) => t.src !== '');
     proxied = false;
     e.pause(); // a new clip never starts playing by itself
     const src = m.video ? api.src(m.path) : '';
-    const undecodable = isHevc(m) && video?.canPlayType('video/mp4; codecs="hvc1"') === '';
+    const v = video;
+    const undecodable = !!v && proxyUpfront(m.video?.codec, (t) => v.canPlayType(t));
     if (forceProxy || (src && undecodable)) {
       e.load('', tracks);
       makeProxy(e, m);
     } else {
       e.load(src, tracks);
+      if (src && v) stopWatch = watchFirstFrame(v, () => onNoFrame(e, m));
     }
+  }
+
+  /** The original loaded but never showed a frame (a decoder that fails silently): use the proxy. */
+  function onNoFrame(e: PlaybackEngine, m: EditorMedia) {
+    if (proxied || store.media?.session !== m.session) return;
+    console.warn('The video showed no picture here; preparing a preview');
+    e.load('', tracks);
+    makeProxy(e, m);
   }
 
   /** Between clips: stop, and let go of the previous clip's files so its session can delete them. */
   function closePreview(e: PlaybackEngine) {
+    stopWatch();
     tracks = [];
     proxied = false;
     e.pause();
@@ -133,6 +149,7 @@
 
   function makeProxy(e: PlaybackEngine, m: EditorMedia) {
     if (proxied) return;
+    stopWatch();
     proxied = true;
     store.proxyFraction = 0;
     const current = () => store.media?.session === m.session;
