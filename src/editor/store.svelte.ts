@@ -244,7 +244,7 @@ export class EditorStore {
       return;
     }
     if (seq !== this.openSeq || this.currentPath !== path) {
-      this.closeSession(media.session); // moved on while it opened
+      void this.closeSession(media.session); // moved on while it opened
       return;
     }
     this.load(media);
@@ -267,7 +267,7 @@ export class EditorStore {
 
   /** Leaves the current clip and opens the next queued file; with none left, the summary shows. */
   async advance(): Promise<void> {
-    this.leave();
+    void this.leave();
     this.queue.index += 1;
     const next = this.currentPath;
     if (next) await this.openFile(next);
@@ -320,8 +320,8 @@ export class EditorStore {
     this.busy = true;
     try {
       if (this.edited && !(await this.ask('discard'))) return;
-      // The session's ffmpeg runs let go of the file before it's recycled.
-      this.leave();
+      // The session's ffmpeg runs (thumbnails, waveforms) let go of the file before it's recycled.
+      await this.leave();
       if (this.exporting(path)) {
         // Its Export audio is still queued or running: recycle it once that finishes (`finish`).
         this.log.push({ action: 'discard', input: path, state: 'waiting' });
@@ -419,10 +419,13 @@ export class EditorStore {
     }
   }
 
-  /** Lets go of the open clip: its session closes and nothing of it stays on screen. */
-  private leave(): void {
+  /**
+   * Lets go of the open clip: nothing of it stays on screen, and its session closes (resolves
+   * once the Rust side has stopped its work; only Discard needs to wait for that).
+   */
+  private leave(): Promise<void> {
     this.openSeq += 1; // an open still in flight is no longer wanted
-    if (this.media) this.closeSession(this.media.session);
+    const closed = this.media ? this.closeSession(this.media.session) : Promise.resolve();
     this.media = null;
     this.history = initHistory(createTimeline(0, DEFAULT_FPS, []));
     this.endLive();
@@ -434,10 +437,11 @@ export class EditorStore {
     this.proxyFraction = null;
     this.error = null;
     this.notice = null;
+    return closed;
   }
 
-  private closeSession(session: number): void {
-    api.close(session).catch((err) => console.error('editor_close failed', err));
+  private closeSession(session: number): Promise<void> {
+    return api.close(session).catch((err) => console.error('editor_close failed', err));
   }
 
   /** Records `next` as an undo step (a no-op edit that returns the same timeline records nothing). */

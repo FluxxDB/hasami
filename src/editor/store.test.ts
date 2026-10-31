@@ -618,6 +618,19 @@ describe('EditorStore queue and exports', () => {
     expect(s.media?.path).toBe(FILES[1]);
   });
 
+  it('discard waits for the session to close before recycling the file', async () => {
+    const s = await queued();
+    let closed!: () => void;
+    vi.mocked(api.close).mockImplementationOnce(() => new Promise<void>((r) => (closed = r)));
+    const discarding = s.discard();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(api.discard).not.toHaveBeenCalled();
+    closed();
+    await discarding;
+    expect(api.discard).toHaveBeenCalledWith(FILES[0]);
+  });
+
   it('discard of an edited clip asks first', async () => {
     const s = await queued();
     s.seek(12);
