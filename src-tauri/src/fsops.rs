@@ -115,10 +115,21 @@ pub fn with_extension(original: &Path, ext: &str) -> PathBuf {
 /// On any error the original is back at its own path with its own bytes and the
 /// temp file is deleted.
 pub fn commit_replace(temp: &Path, original: &Path, final_path: &Path) -> Result<(), FsError> {
+    commit_replace_with(temp, original, final_path, &recycle)
+}
+
+/// `commit_replace` with the recycle step injectable, so the rollback paths can
+/// be tested deterministically.
+fn commit_replace_with(
+    temp: &Path,
+    original: &Path,
+    final_path: &Path,
+    recycle: &dyn Fn(&Path) -> Result<(), FsError>,
+) -> Result<(), FsError> {
     let result = if same_path(final_path, original) {
-        replace_in_place(temp, original, final_path)
+        replace_in_place(temp, original, final_path, recycle)
     } else {
-        replace_with_new_name(temp, original, final_path)
+        replace_with_new_name(temp, original, final_path, recycle)
     };
     if result.is_err() {
         // Best effort; if the temp already moved away this is a harmless no-op.
@@ -129,7 +140,12 @@ pub fn commit_replace(temp: &Path, original: &Path, final_path: &Path) -> Result
 
 /// Output has the same path as the original: park the original, move the new
 /// file in, then recycle the parked original.
-fn replace_in_place(temp: &Path, original: &Path, final_path: &Path) -> Result<(), FsError> {
+fn replace_in_place(
+    temp: &Path,
+    original: &Path,
+    final_path: &Path,
+    recycle: &dyn Fn(&Path) -> Result<(), FsError>,
+) -> Result<(), FsError> {
     let old = free_old_path(original)?;
 
     std::fs::rename(original, &old).map_err(FsError::from_io)?;
@@ -150,13 +166,17 @@ fn replace_in_place(temp: &Path, original: &Path, final_path: &Path) -> Result<(
     }
 
     if let Err(e) = recycle(&old) {
+        if !old.exists() {
+            // The original is already gone, so the replacement is complete.
+            return Ok(());
+        }
         // Undo: discard the new file and restore the original so the user's
         // folder looks exactly as it did before.
         if std::fs::remove_file(final_path).is_ok() && std::fs::rename(&old, original).is_ok() {
             return Err(e);
         }
         return Err(FsError::new(format!(
-            "Couldn't move the old file to the Recycle Bin. The original is saved as \"{}\".",
+            "Couldn't move the original to the Recycle Bin. It is saved as \"{}\".",
             old.display()
         )));
     }
@@ -165,21 +185,48 @@ fn replace_in_place(temp: &Path, original: &Path, final_path: &Path) -> Result<(
 
 /// Output has a different name (e.g. new extension): move the new file in, then
 /// recycle the original.
-fn replace_with_new_name(temp: &Path, original: &Path, final_path: &Path) -> Result<(), FsError> {
+fn replace_with_new_name(
+    temp: &Path,
+    original: &Path,
+    final_path: &Path,
+    recycle: &dyn Fn(&Path) -> Result<(), FsError>,
+) -> Result<(), FsError> {
     // `rename` silently overwrites on Windows; never let it eat someone's file.
     if final_path.exists() {
         return Err(FsError::new(
             "Couldn't save the new file because a file with that name already exists.",
         ));
     }
+    // Find out now, before anything moves, whether the original can be deleted.
+    ensure_deletable(original)?;
+
     std::fs::rename(temp, final_path).map_err(FsError::from_io)?;
 
     if let Err(e) = recycle(original) {
+        if !original.exists() {
+            // The original is already gone, so the replacement is complete.
+            return Ok(());
+        }
         // Original is untouched; remove the new file so nothing is half-done.
         let _ = std::fs::remove_file(final_path);
         return Err(e);
     }
     Ok(())
+}
+
+/// Probe with the same access the Recycle Bin needs (DELETE, sharing everything
+/// else): fails with a sharing violation if another program holds the file
+/// without allowing deletion.
+fn ensure_deletable(path: &Path) -> Result<(), FsError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const DELETE: u32 = 0x0001_0000;
+    const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4; // READ | WRITE | DELETE
+    std::fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(SHARE_ALL)
+        .open(path)
+        .map(|_| ())
+        .map_err(FsError::from_io)
 }
 
 /// `.<name>.hasami-old`, or a numbered variant if a leftover from an earlier
@@ -198,22 +245,72 @@ fn free_old_path(original: &Path) -> Result<PathBuf, FsError> {
     Err(FsError::new("Couldn't replace the file because too many leftover backup files are in the folder."))
 }
 
+const RECYCLE_FAILED: &str = "Couldn't move the original to the Recycle Bin.";
+
 /// Send a file to the Recycle Bin without showing any Windows dialog.
 ///
-/// `trash` on Windows uses `IFileOperation` with `FOF_NO_UI | FOF_ALLOWUNDO |
-/// FOF_WANTNUKEWARNING`: no progress, confirmation or error UI, and a file that
-/// would be permanently deleted (instead of recycled) fails rather than vanishing.
+/// Calls `IFileOperation` directly with `FOF_NO_UI | FOF_ALLOWUNDO |
+/// FOFX_RECYCLEONDELETE` and deliberately without `FOF_WANTNUKEWARNING` (which
+/// `trash` hard-codes and which pops a dialog when a file cannot be recycled).
+/// When recycling is impossible (file too big for the bin, drive without a
+/// bin) Windows deletes permanently and silently, as the user chose.
 pub fn recycle(path: &Path) -> Result<(), FsError> {
-    // trash 5.2 `unwrap()`s CoCreateInstance; don't let that take the app down.
-    let outcome = std::panic::catch_unwind(|| trash::delete(path));
-    match outcome {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(FsError::with_source(
-            "Couldn't move the old file to the Recycle Bin.",
-            e,
-        )),
-        Err(_) => Err(FsError::new("Couldn't move the old file to the Recycle Bin.")),
+    recycle_impl(path).map_err(|e| FsError::with_source(RECYCLE_FAILED, e))
+}
+
+fn recycle_impl(path: &Path) -> windows::core::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{Error, PCWSTR};
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, RPC_E_CHANGED_MODE};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE,
+        FOF_ALLOWUNDO, FOF_NO_UI,
+    };
+
+    if !path.exists() {
+        return Err(Error::from(ERROR_FILE_NOT_FOUND));
     }
+    let absolute = std::path::absolute(path).map_err(|e| Error::new(
+        windows::core::HRESULT::from_win32(e.raw_os_error().unwrap_or(0) as u32),
+        "could not resolve path",
+    ))?;
+    let wide: Vec<u16> = absolute.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+    // Initialise COM for this call; undo it only if we are the ones who did.
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let _com = if hr == RPC_E_CHANGED_MODE {
+        // Thread already runs COM in another mode; usable as is, nothing to undo.
+        ComGuard(false)
+    } else {
+        hr.ok()?;
+        ComGuard(true)
+    };
+
+    unsafe {
+        let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+        op.SetOperationFlags(FOF_NO_UI | FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE)?;
+        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)?;
+        op.DeleteItem(&item, None)?;
+        op.PerformOperations()?;
+        if op.GetAnyOperationsAborted()?.as_bool() {
+            return Err(Error::new(
+                windows::Win32::Foundation::E_ABORT,
+                "the operation was aborted",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -325,6 +422,7 @@ mod tests {
 
         assert_eq!(fs::read(&original).unwrap(), b"new");
         assert_eq!(fs::read(&leftover).unwrap(), b"leftover");
+        assert!(!sibling_with_suffix(&original, ".hasami-old2").exists());
     }
 
     #[cfg(windows)]
@@ -371,12 +469,96 @@ mod tests {
             .open(&original)
             .unwrap();
 
-        assert!(commit_replace(&temp, &original, &final_path).is_err());
+        let err = commit_replace(&temp, &original, &final_path).unwrap_err();
+        assert!(err.message.contains("another program"), "{}", err.message);
 
         drop(lock);
         assert_eq!(fs::read(&original).unwrap(), b"precious");
         assert!(!final_path.exists());
         assert!(!temp.exists());
+    }
+
+    fn failing_recycle(_: &Path) -> Result<(), FsError> {
+        Err(FsError::new(RECYCLE_FAILED))
+    }
+
+    /// Recycler that deletes the file and then still reports failure.
+    fn delete_then_fail(p: &Path) -> Result<(), FsError> {
+        fs::remove_file(p).unwrap();
+        Err(FsError::new(RECYCLE_FAILED))
+    }
+
+    #[test]
+    fn in_place_restores_original_when_second_rename_fails() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-r1.mp4");
+        let temp = temp_path_for(&original); // never created, so the rename fails
+        fs::write(&original, b"precious").unwrap();
+
+        assert!(commit_replace(&temp, &original, &original).is_err());
+
+        assert_eq!(fs::read(&original).unwrap(), b"precious");
+        assert!(!sibling_with_suffix(&original, ".hasami-old").exists());
+    }
+
+    #[test]
+    fn in_place_rolls_back_when_recycle_fails() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-r2.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"precious").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        let err = commit_replace_with(&temp, &original, &original, &failing_recycle).unwrap_err();
+        assert!(err.message.contains("Recycle Bin"), "{}", err.message);
+
+        assert_eq!(fs::read(&original).unwrap(), b"precious");
+        assert!(!temp.exists());
+        assert!(!sibling_with_suffix(&original, ".hasami-old").exists());
+    }
+
+    #[test]
+    fn in_place_counts_as_done_if_original_already_gone() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-r3.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        commit_replace_with(&temp, &original, &original, &delete_then_fail).unwrap();
+
+        assert_eq!(fs::read(&original).unwrap(), b"new");
+    }
+
+    #[test]
+    fn new_name_rolls_back_when_recycle_fails() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-r4.mkv");
+        let final_path = with_extension(&original, "mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&original, b"precious").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        assert!(commit_replace_with(&temp, &original, &final_path, &failing_recycle).is_err());
+
+        assert_eq!(fs::read(&original).unwrap(), b"precious");
+        assert!(!final_path.exists());
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn new_name_counts_as_done_if_original_already_gone() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-r5.mkv");
+        let final_path = with_extension(&original, "mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&original, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        commit_replace_with(&temp, &original, &final_path, &delete_then_fail).unwrap();
+
+        assert_eq!(fs::read(&final_path).unwrap(), b"new");
+        assert!(!original.exists());
     }
 
     #[test]
