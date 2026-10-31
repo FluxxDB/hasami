@@ -52,6 +52,21 @@ impl FsError {
         }
     }
 
+    /// Like [`FsError::stranded`], for when Hasami can't be sure where the
+    /// original went (recycling reported a failure, or something unexpected is
+    /// still at its name). The new file is kept either way.
+    pub(crate) fn stranded_unsure(temp: &Path, source: Option<io::Error>) -> Self {
+        FsError {
+            message: format!(
+                "Couldn't finish saving the new file. It's saved as \"{}\". The original may be in the Recycle Bin.",
+                temp.display()
+            ),
+            original_intact: false,
+            kept_new_file: Some(temp.to_path_buf()),
+            source: source.map(|e| Box::new(e) as _),
+        }
+    }
+
     /// Wrap an I/O error, choosing the wording from what went wrong.
     fn from_io(err: io::Error) -> Self {
         // Windows: 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION,
@@ -197,17 +212,22 @@ fn replace_in_place(
     // can't be looked at may be an original that is already on its way out
     // (delete-pending while another program holds it); the non-replacing
     // rename below can't harm it, so carry on and keep the new file.
-    if let Err(e) = recycle(original) {
+    let recycled = recycle(original);
+    if let Err(e) = recycled {
         if presence(original) == Presence::Present {
             // Nothing moved: the original is untouched.
             return Err(e);
         }
-        // The original is gone (or going) anyway; finish the replacement.
+        // The original is gone (or going) anyway; finish the replacement,
+        // without claiming to know it is in the Recycle Bin.
+        return rename_with_retry(rename, temp, final_path)
+            .map_err(|e| FsError::stranded_unsure(temp, Some(e)));
     }
     if presence(original) == Presence::Present {
         // Recycling reported success, yet something is still at the path. A
-        // rename now would fail at best; stop here and leave it alone.
-        return Err(FsError::new("Couldn't replace the file."));
+        // rename would fail at best. The original has probably gone to the
+        // Recycle Bin, so keep the new file too and stop.
+        return Err(FsError::stranded_unsure(temp, None));
     }
 
     // From here the original is in the Recycle Bin, so the new file must never
@@ -258,11 +278,58 @@ enum Presence {
     Unknown,
 }
 
+/// Look at `path` by opening it with no access rights (sharing everything, not
+/// following links). `std::fs::symlink_metadata` can't be used: on a sharing or
+/// access error it falls back to a directory listing, which still shows a
+/// delete-pending file (FAT/exFAT/SMB, or any legacy delete) as present.
 fn presence(path: &Path) -> Presence {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Presence::Present,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Presence::Absent,
-        Err(_) => Presence::Unknown,
+    use std::ffi::c_void;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_STANDARD_INFO, OPEN_EXISTING,
+    };
+
+    let Ok(wide) = verbatim_wide(path) else {
+        return Presence::Unknown;
+    };
+    let opened = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    };
+    let handle = match opened {
+        Ok(handle) => handle,
+        // 2 = ERROR_FILE_NOT_FOUND, 3 = ERROR_PATH_NOT_FOUND. Anything else,
+        // including access denied on a delete-pending file, is unknown.
+        Err(e) => {
+            return match win32_io_error(e).raw_os_error() {
+                Some(2) | Some(3) => Presence::Absent,
+                _ => Presence::Unknown,
+            }
+        }
+    };
+    let mut info = FILE_STANDARD_INFO::default();
+    let queried = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            &mut info as *mut FILE_STANDARD_INFO as *mut c_void,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    match queried {
+        Ok(()) if !info.DeletePending => Presence::Present,
+        _ => Presence::Unknown,
     }
 }
 
@@ -299,16 +366,18 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 
     let (from, to) = (verbatim_wide(from)?, verbatim_wide(to)?);
     unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }
-        .map_err(|e| {
-            // Win32 errors arrive as HRESULTs (0x8007xxxx); hand back the plain
-            // Windows error code so `raw_os_error` matches what std::fs reports.
-            let hr = e.code().0 as u32;
-            if hr & 0xFFFF_0000 == 0x8007_0000 {
-                io::Error::from_raw_os_error((hr & 0xFFFF) as i32)
-            } else {
-                io::Error::other(e)
-            }
-        })
+        .map_err(win32_io_error)
+}
+
+/// Win32 errors arrive as HRESULTs (0x8007xxxx); hand back the plain Windows
+/// error code so `raw_os_error` matches what std::fs reports.
+fn win32_io_error(e: windows::core::Error) -> io::Error {
+    let hr = e.code().0 as u32;
+    if hr & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((hr & 0xFFFF) as i32)
+    } else {
+        io::Error::other(e)
+    }
 }
 
 /// Absolute, `\\?\`-prefixed, NUL-terminated UTF-16 form of `path`, so paths
@@ -673,10 +742,13 @@ mod tests {
         let pretend = |_: &Path| -> Result<(), FsError> { Ok(()) };
         let err = commit_replace_with(&temp, &original, &original, &pretend, &never_rename, &presence)
             .unwrap_err();
-        assert!(err.original_intact);
+        // Recycling claimed success, so the original may well be in the Bin: keep the new file.
+        assert!(!err.original_intact);
+        assert_eq!(err.kept_new_file.as_deref(), Some(temp.as_path()));
+        assert!(err.message.contains("may be in the Recycle Bin"), "{}", err.message);
 
         assert_eq!(fs::read(&original).unwrap(), b"precious");
-        assert_eq!(names(dir.path()), vec!["hasami-test-survivor.mp4"]);
+        assert_eq!(fs::read(&temp).unwrap(), b"new");
     }
 
     #[test]
@@ -849,22 +921,86 @@ mod tests {
         assert!(!temp.exists());
     }
 
+    /// Put `path` into the legacy delete-pending state FAT/exFAT/SMB always use
+    /// (and NTFS without POSIX semantics): another program holds a share-delete
+    /// handle, and a second handle sets `FileDispositionInfo` (class 4) and
+    /// closes. The returned holder keeps the name in place until it is dropped.
+    #[cfg(windows)]
+    fn make_delete_pending(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+        };
+        const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+        const DELETE: u32 = 0x0001_0000;
+
+        let holder = fs::OpenOptions::new().read(true).share_mode(SHARE_ALL).open(path).unwrap();
+        let deleter = fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(SHARE_ALL)
+            .open(path)
+            .unwrap();
+        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        unsafe {
+            SetFileInformationByHandle(
+                HANDLE(deleter.as_raw_handle()),
+                FileDispositionInfo,
+                &info as *const FILE_DISPOSITION_INFO as *const std::ffi::c_void,
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+            .unwrap();
+        }
+        drop(deleter);
+        holder
+    }
+
     #[cfg(windows)]
     #[test]
     fn a_delete_pending_file_never_counts_as_present() {
-        use std::os::windows::fs::OpenOptionsExt;
-
         let dir = test_dir();
         let f = dir.path().join("hasami-test-pending.mp4");
         fs::write(&f, b"x").unwrap();
         assert_eq!(presence(&f), Presence::Present);
-        // Another program's handle that allows deletion, as the thumbnailer and indexer use.
-        let held = fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2 | 0x4).open(&f).unwrap();
-        fs::remove_file(&f).unwrap();
-        // Absent with POSIX delete semantics, Unknown (access denied) with the old ones.
-        assert_ne!(presence(&f), Presence::Present);
-        drop(held);
+        assert_eq!(presence(&dir.path().join("nope.mp4")), Presence::Absent);
+        assert_eq!(presence(&dir.path().join("no-dir").join("nope.mp4")), Presence::Absent);
+
+        let holder = make_delete_pending(&f);
+        // The trap this guards against: std still reports the file as there.
+        assert!(fs::symlink_metadata(&f).is_ok(), "std's fallback sees the pending entry");
+        assert_eq!(presence(&f), Presence::Unknown);
+        drop(holder);
         assert_eq!(presence(&f), Presence::Absent);
+    }
+
+    /// The re-review case end to end, with the real presence check and rename:
+    /// recycling leaves the original delete-pending while another program
+    /// holds it. Deterministic outcome: the holder stays open for the whole
+    /// commit, so every rename attempt is refused and the new file is kept.
+    #[cfg(windows)]
+    #[test]
+    fn in_place_keeps_the_new_file_when_the_original_is_left_delete_pending() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-pending2.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        let holder = std::cell::RefCell::new(None);
+        let pending_recycle = |p: &Path| -> Result<(), FsError> {
+            *holder.borrow_mut() = Some(make_delete_pending(p));
+            Ok(())
+        };
+        let err = commit_replace_with(&temp, &original, &original, &pending_recycle, &rename_no_replace, &presence)
+            .unwrap_err();
+
+        assert_eq!(err.kept_new_file.as_deref(), Some(temp.as_path()));
+        assert!(!err.original_intact);
+        assert_eq!(fs::read(&temp).unwrap(), b"new", "the new file survives");
+        drop(holder.borrow_mut().take());
+        assert!(!original.exists(), "the original was really deleted");
+        assert_eq!(fs::read(&temp).unwrap(), b"new");
     }
 
     #[test]
