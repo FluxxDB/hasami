@@ -1,0 +1,94 @@
+// TypeScript mirror of the editor's Rust commands and event (src-tauri/src/app.rs, Task 8).
+// Field names stay snake_case, exactly as the Rust structs serialise them. `EditorEvent` is serde
+// `#[serde(tag = "type")]`, so it's a union discriminated on `type`.
+//
+// Mock mode (`editor.html?mock=1`, or any page opened outside Tauri) answers every call from
+// mock.ts instead, so the window can be built and looked at in a plain browser.
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type { ExportRequest } from './timeline';
+
+export const EDITOR_EVENT = 'hasami://editor';
+
+export interface EditorMedia {
+  session: number;
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  duration_s: number;
+  bit_rate: number | null;
+  video: { width: number; height: number; fps: number; codec: string } | null;
+  tracks: { index: number; empty: boolean; file: string | null }[];
+}
+
+export interface Peaks {
+  /** Values per second. */
+  rate: number;
+  /** Each in 0..1. */
+  values: number[];
+}
+
+export interface Thumb {
+  /** Seconds into the source. */
+  t: number;
+  file: string;
+}
+
+export type EditorEvent =
+  | { type: 'Files'; paths: string[] }
+  | { type: 'ExportStarted'; id: number; input: string }
+  | { type: 'ExportProgress'; id: number; fraction: number }
+  | { type: 'ExportDone'; id: number; input: string; output: string; bytes: number }
+  | { type: 'ExportFailed'; id: number; input: string; message: string; original_intact: boolean }
+  | { type: 'ProxyProgress'; session: number; fraction: number };
+
+export interface EditorApi {
+  files(): Promise<string[]>;
+  open(path: string): Promise<EditorMedia>;
+  peaks(session: number, index: number): Promise<Peaks>;
+  thumbs(session: number): Promise<Thumb[]>;
+  proxy(session: number): Promise<string>;
+  exportClip(request: ExportRequest): Promise<number>;
+  discard(path: string): Promise<void>;
+  close(session: number): Promise<void>;
+  ready(): Promise<void>;
+  onEvent(cb: (e: EditorEvent) => void): Promise<() => void>;
+  /** A URL the webview can load for a local file (the asset protocol). */
+  src(path: string): string;
+}
+
+const tauriApi: EditorApi = {
+  files: () => invoke('editor_files'),
+  open: (path) => invoke('editor_open', { path }),
+  peaks: (session, index) => invoke('editor_peaks', { session, index }),
+  thumbs: (session) => invoke('editor_thumbs', { session }),
+  proxy: (session) => invoke('editor_proxy', { session }),
+  exportClip: (request) => invoke('editor_export', { request }),
+  discard: (path) => invoke('editor_discard', { path }),
+  close: (session) => invoke('editor_close', { session }),
+  ready: () => invoke('editor_ready'),
+  onEvent: (cb) => listen<EditorEvent>(EDITOR_EVENT, (e) => cb(e.payload)),
+  src: (path) => convertFileSrc(path),
+};
+
+export const isMock =
+  typeof window !== 'undefined' &&
+  (new URLSearchParams(window.location.search).has('mock') || !('__TAURI_INTERNALS__' in window));
+
+// The mock is loaded on demand so the shipped bundle never runs it.
+const backend: Promise<EditorApi> = isMock ? import('./mock').then((m) => m.mockApi) : Promise.resolve(tauriApi);
+
+export const api: EditorApi = {
+  files: () => backend.then((b) => b.files()),
+  open: (path) => backend.then((b) => b.open(path)),
+  peaks: (session, index) => backend.then((b) => b.peaks(session, index)),
+  thumbs: (session) => backend.then((b) => b.thumbs(session)),
+  proxy: (session) => backend.then((b) => b.proxy(session)),
+  exportClip: (request) => backend.then((b) => b.exportClip(request)),
+  discard: (path) => backend.then((b) => b.discard(path)),
+  close: (session) => backend.then((b) => b.close(session)),
+  ready: () => backend.then((b) => b.ready()),
+  onEvent: (cb) => backend.then((b) => b.onEvent(cb)),
+  // Mock thumbnails are data: URIs; anything else has no file behind it in a browser.
+  src: (path) => (isMock ? (/^(data|blob):/.test(path) ? path : '') : tauriApi.src(path)),
+};

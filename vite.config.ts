@@ -20,6 +20,7 @@ export default defineConfig({
       input: {
         // Multi-page: the Tauri app opens each window from its own HTML entry.
         progress: resolve(root, 'progress.html'),
+        editor: resolve(root, 'editor.html'),
       },
     },
   },
