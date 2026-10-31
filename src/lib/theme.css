@@ -1,0 +1,93 @@
+/* Hasami design tokens (spec section 9). Fonts are bundled; nothing loads from the network. */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/inter-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/inter-latin-500-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/inter-latin-700-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/instrument-serif-latin-400-italic.woff2') format('woff2');
+}
+
+:root {
+  --void: #080808;
+  --black: #000000;
+  --charcoal: #171617;
+  --smoke: #262525;
+  --graphite: #393939;
+  --bone: #fcfcfc;
+  --ash: #d4d2d2;
+  --pebble: #b5b2b2;
+  --iron: #525252;
+  --red: #d43545;
+  --line: #1f1e1f;
+
+  --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --serif: 'Instrument Serif', 'Times New Roman', serif;
+
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--void);
+  color: var(--bone);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Small uppercase label. Never below 11px. */
+.cap {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.071em;
+}
+
+::selection {
+  background: var(--graphite);
+  color: var(--bone);
+}
+
+:focus-visible {
+  outline: 1.5px solid var(--bone);
+  outline-offset: 2px;
+}
+
+/* Themed scrollbars (WebView2 is Chromium). */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--void);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--smoke);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--graphite);
+}

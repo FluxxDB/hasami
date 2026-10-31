@@ -6,3 +6,12 @@ graphify-out/
 
 # Windows download markers copied through WSL
 *:Zone.Identifier
+
+# Build outputs and dependencies
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Bundled ffmpeg (fetched by scripts/fetch-ffmpeg.ps1)
+src-tauri/binaries/*.exe
