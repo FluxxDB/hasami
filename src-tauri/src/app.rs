@@ -1,50 +1,68 @@
-//! Tauri setup, single-instance batch collection, progress window and commands (Task 9).
+//! Tauri setup, single-instance batch collection, the progress and editor windows, and commands.
 //!
 //! Explorer launches one `hasami.exe <verb> <file>` per selected file. The first process becomes
 //! the app; every later launch hands its argv over through the single-instance plugin and exits.
-//! Actions that arrive within [`COLLECT_WINDOW`] of each other become one `enqueue` per kind.
+//! Actions that arrive within [`COLLECT_WINDOW`] of each other become one `enqueue` per kind, and
+//! the Trim files among them open the Quick Trim editor (or join the one already open).
 //!
 //! A single dispatcher thread owns the moving parts. Its decisions (batching, when to open the
-//! progress window, buffering events until the window listens, when to exit) live in the pure
-//! [`Flow`] struct, which turns inputs into [`Effect`]s; the dispatcher only carries them out.
+//! progress and editor windows, where each job event goes, buffering events until a window
+//! listens, when to exit) live in the pure [`Flow`] struct, which turns inputs into [`Effect`]s;
+//! the dispatcher only carries them out.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::cli::{self, Action};
 use crate::compress::{plan_compress, CompressDecision};
+use crate::editor::media::{make_proxy, peaks, prepare, thumbnails, Peaks, PreparedMedia, Thumb};
+use crate::editor::request::ExportRequest;
+use crate::editor::session::{process_running, sweep_stale, EditorSessions};
+use crate::fsops;
 use crate::jobs::compress::compress;
 use crate::jobs::convert::convert;
-use crate::jobs::queue::{JobEvent, JobKind, JobQueue, JobRunner, JobSpec, CANCELLED};
+use crate::jobs::export::export;
+use crate::jobs::queue::{ExportJob, JobEvent, JobKind, JobQueue, JobRunner, JobSpec, CANCELLED};
 use crate::jobs::{JobError, JobOutcome, JobProgress};
 use crate::media::run::CancelToken;
 use crate::media::{probe, FfmpegPaths};
 
-/// Tauri event that carries every [`JobEvent`].
+/// Tauri event that carries every [`JobEvent`] to the progress window.
 pub const JOB_EVENT: &str = "hasami://job";
+/// Tauri event that carries every [`EditorEvent`] to the editor window.
+pub const EDITOR_EVENT: &str = "hasami://editor";
 /// Launches closer together than this are combined into one batch.
 pub const COLLECT_WINDOW: Duration = Duration::from_millis(400);
 const PROGRESS_LABEL: &str = "progress";
-/// Temporary, until Quick Trim lands in Plan 2.
-const TRIM_NOTICE: &str = "Quick Trim arrives in the next version";
+const EDITOR_LABEL: &str = "editor";
 /// Every job fails with this when the bundled ffmpeg/ffprobe can't be found.
 const TOOLS_MISSING: &str = "Hasami's video tools are missing. Reinstall Hasami.";
 
+// What the editor's commands answer when they fail.
+const OPEN_FAILED: &str = "Couldn't open this clip in the editor.";
+const SESSION_GONE: &str = "This clip is no longer open in the editor.";
+const NO_SUCH_TRACK: &str = "This audio track has no sound to show.";
+const PEAKS_FAILED: &str = "Couldn't read this audio track.";
+const THUMBS_FAILED: &str = "Couldn't make the timeline pictures for this clip.";
+const PROXY_FAILED: &str = "Couldn't prepare a preview of this clip.";
+const EXPORT_WONT_START: &str = "Couldn't start the export.";
+const DISCARD_FAILED: &str = "Couldn't move this clip to the Recycle Bin.";
+const COMMAND_FAILED: &str = "Something went wrong.";
+
 /// The one place that decides what runs a job.
-fn job_runner() -> Box<dyn JobRunner> {
-    let paths = FfmpegPaths::resolve()
-        .map_err(|e| eprintln!("hasami: {e}"))
-        .ok();
+fn job_runner(paths: Option<FfmpegPaths>) -> Box<dyn JobRunner> {
     Box::new(MediaRunner { paths })
 }
 
-/// Runs compress and convert jobs with the bundled ffmpeg.
+/// Runs compress, convert and export jobs with the bundled ffmpeg.
 struct MediaRunner {
     paths: Option<FfmpegPaths>,
 }
@@ -61,9 +79,11 @@ impl JobRunner for MediaRunner {
         match &spec.kind {
             JobKind::Compress => compress(paths, &spec.input, confirmed, cancel, progress),
             JobKind::Convert(target) => convert(paths, &spec.input, target.clone(), cancel, progress),
+            JobKind::Export(job) => export(paths, &job.0, cancel, progress),
         }
     }
 
+    /// Only compress knows its output size up front.
     fn preview(&self, spec: &JobSpec) -> Option<(u32, u32, f64)> {
         if spec.kind != JobKind::Compress {
             return None;
@@ -81,13 +101,18 @@ pub fn run(action: Action) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let first = resolve_paths(action, &cwd);
 
+    let paths = FfmpegPaths::resolve().map_err(|e| eprintln!("hasami: {e}")).ok();
+    // Editor work folders left by a crashed or killed Hasami.
+    let _ = thread::Builder::new()
+        .name("hasami-sweep".into())
+        .spawn(|| sweep_stale(&std::env::temp_dir(), process_running));
     let (tx, rx) = mpsc::channel::<Msg>();
     let queue_tx = tx.clone();
     // Counts events the queue has emitted, so the dispatcher knows when it has seen them all.
     let emitted = Arc::new(AtomicU64::new(0));
     let queue_emitted = emitted.clone();
     let queue = Arc::new(JobQueue::new(
-        job_runner(),
+        job_runner(paths.clone()),
         Box::new(move |event| {
             queue_emitted.fetch_add(1, Ordering::SeqCst);
             let _ = queue_tx.send(Msg::Job(event));
@@ -96,6 +121,13 @@ pub fn run(action: Action) {
 
     let setup_tx = tx.clone();
     let setup_queue = queue.clone();
+    let state = AppState {
+        queue,
+        tx,
+        paths,
+        sessions: Mutex::new(EditorSessions::new()),
+        editor_files: Mutex::new(Vec::new()),
+    };
     tauri::Builder::default()
         // Must be the first plugin: a second instance forwards its argv here and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
@@ -110,12 +142,31 @@ pub fn run(action: Action) {
                 Err(e) => eprintln!("hasami: ignoring launch {argv:?}: {e}"),
             }
         }))
-        .manage(AppState { queue, tx })
-        .invoke_handler(tauri::generate_handler![cancel_job, confirm_low_res, progress_ready])
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            cancel_job,
+            confirm_low_res,
+            progress_ready,
+            editor_files,
+            editor_open,
+            editor_peaks,
+            editor_thumbs,
+            editor_proxy,
+            editor_export,
+            editor_discard,
+            editor_close,
+            editor_ready,
+        ])
         .on_window_event(|window, event| {
-            if window.label() == PROGRESS_LABEL && matches!(event, WindowEvent::Destroyed) {
-                let _ = window.state::<AppState>().tx.send(Msg::WindowDestroyed);
+            if !matches!(event, WindowEvent::Destroyed) {
+                return;
             }
+            let msg = match window.label() {
+                PROGRESS_LABEL => Msg::WindowDestroyed,
+                EDITOR_LABEL => Msg::EditorDestroyed,
+                _ => return,
+            };
+            let _ = window.state::<AppState>().tx.send(msg);
         })
         .setup(move |app| {
             let _ = setup_tx.send(Msg::Action(first));
@@ -133,12 +184,14 @@ pub fn run(action: Action) {
         })
         .build(tauri::generate_context!())
         .expect("error while building Hasami")
-        .run(|_app, event| {
+        .run(|app, event| match event {
             // Closing the last window must not end the process while jobs remain; the dispatcher
             // calls `exit` (which carries a code) once the queue has drained.
-            if let RunEvent::ExitRequested { code: None, api, .. } = event {
-                api.prevent_exit();
-            }
+            RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+            // Waits (briefly) for the editor's cleanup, and catches a clip that finished opening
+            // after the editor closed.
+            RunEvent::Exit => lock(&app.state::<AppState>().sessions).close_all(),
+            _ => {}
         });
 }
 
@@ -156,6 +209,22 @@ fn resolve_paths(action: Action, cwd: &Path) -> Action {
 struct AppState {
     queue: Arc<JobQueue>,
     tx: Sender<Msg>,
+    /// `None` when the bundled tools are missing; every job and editor command then says so.
+    paths: Option<FfmpegPaths>,
+    sessions: Mutex<EditorSessions>,
+    /// The files the current editor window was opened with; later ones arrive as `Files` events.
+    editor_files: Mutex<Vec<String>>,
+}
+
+impl AppState {
+    fn tools(&self) -> Result<&FfmpegPaths, String> {
+        self.paths.as_ref().ok_or_else(|| TOOLS_MISSING.to_owned())
+    }
+}
+
+/// A mutex that stays usable after a panic elsewhere while it was held.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 enum Msg {
@@ -163,6 +232,86 @@ enum Msg {
     Job(JobEvent),
     ProgressReady,
     WindowDestroyed,
+    EditorReady,
+    EditorDestroyed,
+    /// An event from an editor command (proxy progress) for the editor window.
+    Editor(EditorEvent),
+    /// Enqueue an export and send back its job id. Enqueued by the dispatcher so it stays the only
+    /// thread that enqueues (see [`Dispatcher::settled`]).
+    Export(Box<ExportRequest>, Sender<u64>),
+}
+
+/// What the editor window is told. Mirrored in `src/editor/api.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type")]
+pub enum EditorEvent {
+    /// More files from a later Trim launch, to add to the editor's queue.
+    Files { paths: Vec<String> },
+    ExportStarted { id: u64, input: String },
+    /// `fraction` covers the whole export, across all its passes.
+    ExportProgress { id: u64, fraction: f64 },
+    ExportDone { id: u64, input: String, output: String, bytes: u64 },
+    ExportFailed { id: u64, input: String, message: String, original_intact: bool },
+    ProxyProgress { session: u64, fraction: f64 },
+}
+
+/// A clip opened in the editor, as `editor_open` returns it. Paths are absolute; the page turns
+/// them into asset URLs with `convertFileSrc`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EditorMediaDto {
+    pub session: u64,
+    pub path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub duration_s: f64,
+    pub bit_rate: Option<u64>,
+    pub video: Option<EditorVideoDto>,
+    pub tracks: Vec<EditorTrackDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EditorVideoDto {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub codec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EditorTrackDto {
+    pub index: usize,
+    pub empty: bool,
+    /// The extracted audio; `None` when the track is empty.
+    pub file: Option<String>,
+}
+
+impl EditorMediaDto {
+    fn new(session: u64, input: &Path, media: &PreparedMedia) -> Self {
+        let info = &media.info;
+        Self {
+            session,
+            path: input.display().to_string(),
+            file_name: input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            size_bytes: info.size_bytes,
+            duration_s: info.duration_s,
+            bit_rate: info.bit_rate,
+            video: info.video.as_ref().map(|v| EditorVideoDto {
+                width: v.width,
+                height: v.height,
+                fps: v.fps,
+                codec: v.codec.clone(),
+            }),
+            tracks: media
+                .tracks
+                .iter()
+                .map(|t| EditorTrackDto {
+                    index: t.index,
+                    empty: t.empty,
+                    file: t.file.as_ref().map(|f| f.display().to_string()),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -179,6 +328,165 @@ fn confirm_low_res(id: u64, proceed: bool, state: State<'_, AppState>) {
 #[tauri::command]
 fn progress_ready(state: State<'_, AppState>) {
     let _ = state.tx.send(Msg::ProgressReady);
+}
+
+/// The text shown for `e`: its own when it is written for people, `fallback` otherwise. The
+/// details go to stderr either way.
+fn plain(e: &JobError, fallback: &str) -> String {
+    eprintln!("hasami: {fallback} {e:?}");
+    match e {
+        JobError::Cancelled | JobError::Message(_) | JobError::Fs(_) | JobError::Encode { .. } => e.to_string(),
+        _ => fallback.to_owned(),
+    }
+}
+
+/// Run `work` on a blocking thread, away from the main thread and the async workers: editor
+/// commands run ffmpeg and may wait on the sessions lock.
+async fn blocking<T: Send + 'static>(
+    app: AppHandle,
+    work: impl FnOnce(&AppHandle, &AppState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || work(&app, &app.state::<AppState>()))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("hasami: an editor command panicked: {e}");
+            Err(COMMAND_FAILED.to_owned())
+        })
+}
+
+/// The files the editor window was opened with.
+#[tauri::command]
+fn editor_files(state: State<'_, AppState>) -> Vec<String> {
+    lock(&state.editor_files).clone()
+}
+
+/// Open `path` in a new session and let the page load its files through the asset protocol.
+#[tauri::command]
+async fn editor_open(app: AppHandle, path: String) -> Result<EditorMediaDto, String> {
+    blocking(app, move |app, state| {
+        let paths = state.tools()?;
+        let input = PathBuf::from(path);
+        // Prepared without holding the lock, so closing the editor never waits on it.
+        let reservation = lock(&state.sessions).reserve(&input);
+        let prepared = prepare(paths, &input, &reservation.work_dir, &reservation.cancel);
+        let media = lock(&state.sessions).finish(reservation.id, prepared).map_err(|e| plain(&e, OPEN_FAILED))?;
+        let (session, work_dir) = (reservation.id, reservation.work_dir);
+        let scope = app.asset_protocol_scope();
+        if let Err(e) = scope.allow_file(&input).and_then(|()| scope.allow_directory(&work_dir, true)) {
+            eprintln!("hasami: could not allow {} in the asset scope: {e}", input.display());
+            lock(&state.sessions).close(session);
+            return Err(OPEN_FAILED.to_owned());
+        }
+        Ok(EditorMediaDto::new(session, &input, &media))
+    })
+    .await
+}
+
+/// Waveform of audio track `index` (ffmpeg's `0:a:<index>`) of a session. Stops when the session
+/// closes.
+#[tauri::command]
+async fn editor_peaks(app: AppHandle, session: u64, index: usize) -> Result<Peaks, String> {
+    blocking(app, move |_, state| {
+        let paths = state.tools()?;
+        let (file, duration_s, cancel) = {
+            let sessions = lock(&state.sessions);
+            let media = sessions.media(session).ok_or(SESSION_GONE)?;
+            let track = media.tracks.iter().find(|t| t.index == index);
+            let file = track.and_then(|t| t.file.clone()).ok_or(NO_SUCH_TRACK)?;
+            (file, media.info.duration_s, sessions.cancel_token(session).ok_or(SESSION_GONE)?)
+        };
+        peaks(paths, &file, duration_s, &cancel).map_err(|e| plain(&e, PEAKS_FAILED))
+    })
+    .await
+}
+
+/// Timeline thumbnails of a session's clip, written into its work folder. Stops when the session
+/// closes.
+#[tauri::command]
+async fn editor_thumbs(app: AppHandle, session: u64) -> Result<Vec<Thumb>, String> {
+    blocking(app, move |_, state| {
+        let paths = state.tools()?;
+        let (input, work_dir, duration_s, cancel) = {
+            let sessions = lock(&state.sessions);
+            let duration_s = sessions.media(session).ok_or(SESSION_GONE)?.info.duration_s;
+            let input = sessions.input(session).ok_or(SESSION_GONE)?.to_path_buf();
+            let work_dir = sessions.work_dir(session).ok_or(SESSION_GONE)?.to_path_buf();
+            (input, work_dir, duration_s, sessions.cancel_token(session).ok_or(SESSION_GONE)?)
+        };
+        let result = thumbnails(paths, &input, duration_s, &work_dir.join("thumbs"), &cancel);
+        sweep_if_closed(state, session, &work_dir);
+        result.map_err(|e| plain(&e, THUMBS_FAILED))
+    })
+    .await
+}
+
+/// Encode a session's H.264 preview proxy, reporting `ProxyProgress`. Stops when the session
+/// closes. Returns the proxy's path.
+#[tauri::command]
+async fn editor_proxy(app: AppHandle, session: u64) -> Result<String, String> {
+    blocking(app, move |_, state| {
+        let paths = state.tools()?;
+        let (input, work_dir, cancel) = {
+            let sessions = lock(&state.sessions);
+            let input = sessions.input(session).ok_or(SESSION_GONE)?.to_path_buf();
+            let work_dir = sessions.work_dir(session).ok_or(SESSION_GONE)?.to_path_buf();
+            (input, work_dir, sessions.cancel_token(session).ok_or(SESSION_GONE)?)
+        };
+        let mut report = |fraction| {
+            let _ = state.tx.send(Msg::Editor(EditorEvent::ProxyProgress { session, fraction }));
+        };
+        let result = make_proxy(paths, &input, &work_dir, &cancel, &mut report);
+        sweep_if_closed(state, session, &work_dir);
+        result.map(|proxy| proxy.display().to_string()).map_err(|e| plain(&e, PROXY_FAILED))
+    })
+    .await
+}
+
+/// Closing a session waits only so long for its ffmpeg runs to let go of its folder, and a run
+/// that was just starting may have recreated it; delete whatever is left now.
+fn sweep_if_closed(state: &AppState, session: u64, work_dir: &Path) {
+    if lock(&state.sessions).work_dir(session).is_none() {
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+}
+
+/// Queue an export of the edit. Returns its job id; progress arrives as `Export*` events.
+#[tauri::command]
+async fn editor_export(app: AppHandle, request: ExportRequest) -> Result<u64, String> {
+    blocking(app, move |_, state| {
+        let (reply, id) = mpsc::channel();
+        state.tx.send(Msg::Export(Box::new(request), reply)).map_err(|_| EXPORT_WONT_START)?;
+        id.recv().map_err(|_| EXPORT_WONT_START.to_owned())
+    })
+    .await
+}
+
+/// Send a clip the user discarded to the Recycle Bin.
+#[tauri::command]
+async fn editor_discard(app: AppHandle, path: String) -> Result<(), String> {
+    blocking(app, move |_, _| {
+        fsops::recycle(Path::new(&path)).map_err(|e| {
+            eprintln!("hasami: {DISCARD_FAILED} {e:?}");
+            DISCARD_FAILED.to_owned()
+        })
+    })
+    .await
+}
+
+/// The editor is done with a clip: stop its work and delete its work folder.
+#[tauri::command]
+async fn editor_close(app: AppHandle, session: u64) {
+    let _ = blocking(app, move |_, state| {
+        lock(&state.sessions).close(session);
+        Ok(())
+    })
+    .await;
+}
+
+/// Called by the editor window once its editor-event listener is attached.
+#[tauri::command]
+fn editor_ready(state: State<'_, AppState>) {
+    let _ = state.tx.send(Msg::EditorReady);
 }
 
 /// Carries out [`Flow`]'s decisions against Tauri and the queue.
@@ -208,7 +516,7 @@ impl Dispatcher {
                 let effects = self.handle(msg);
                 self.apply(effects);
             }
-            let effects = self.flow.on_tick(Instant::now(), self.settled());
+            let effects = self.flow.on_tick(Instant::now());
             self.apply(effects);
         }
     }
@@ -228,6 +536,25 @@ impl Dispatcher {
             Msg::WindowDestroyed => {
                 let settled = self.settled();
                 self.flow.on_window_closed(settled)
+            }
+            Msg::EditorReady => self.flow.on_editor_ready(),
+            Msg::EditorDestroyed => {
+                // Its clips go with it. Closing waits for their ffmpeg runs to stop, so it runs on
+                // its own thread; `RunEvent::Exit` waits for it through the sessions lock.
+                let app = self.app.clone();
+                let _ = thread::Builder::new()
+                    .name("hasami-editor-cleanup".into())
+                    .spawn(move || lock(&app.state::<AppState>().sessions).close_all());
+                let settled = self.settled();
+                self.flow.on_editor_closed(settled)
+            }
+            Msg::Editor(event) => self.flow.on_editor_event(event),
+            Msg::Export(request, reply) => {
+                let input = request.input.clone();
+                let id = self.queue.enqueue_one(JobKind::Export(ExportJob(Arc::from(request))), input.clone());
+                self.flow.on_export_enqueued(id, input.display().to_string());
+                let _ = reply.send(id);
+                Vec::new()
             }
         }
     }
@@ -255,6 +582,18 @@ impl Dispatcher {
                         eprintln!("hasami: could not send {event:?}: {e}");
                     }
                 }
+                Effect::OpenEditor(files) => {
+                    if let Err(e) = self.open_editor(files) {
+                        eprintln!("hasami: could not open the editor window: {e}");
+                        let settled = self.settled();
+                        todo.extend(self.flow.on_editor_closed(settled));
+                    }
+                }
+                Effect::EmitEditor(event) => {
+                    if let Err(e) = self.app.emit(EDITOR_EVENT, &event) {
+                        eprintln!("hasami: could not send {event:?}: {e}");
+                    }
+                }
                 Effect::Enqueue(kind, files) => self.queue.enqueue(kind, files),
                 Effect::Decline(id) => self.queue.confirm(id, false),
                 Effect::Exit => self.app.exit(0),
@@ -277,18 +616,42 @@ impl Dispatcher {
             .build()
             .map(|_| ())
     }
+
+    fn open_editor(&self, files: Vec<PathBuf>) -> tauri::Result<()> {
+        *lock(&self.app.state::<AppState>().editor_files) = files.iter().map(|f| f.display().to_string()).collect();
+        WebviewWindowBuilder::new(&self.app, EDITOR_LABEL, WebviewUrl::App("editor.html".into()))
+            .title("Hasami")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(960.0, 600.0)
+            .resizable(true)
+            .decorations(false)
+            .center()
+            .build()
+            .map(|_| ())
+    }
 }
 
 /// Something the dispatcher must do, decided by [`Flow`].
 #[derive(Debug, PartialEq)]
 pub(crate) enum Effect {
+    /// Open the progress window.
     OpenWindow { kind: &'static str, ext: Option<&'static str> },
     /// Send to the progress window (only produced once it listens).
     Emit(JobEvent),
+    /// Open the editor window for these files.
+    OpenEditor(Vec<PathBuf>),
+    /// Send to the editor window (only produced once it listens).
+    EmitEditor(EditorEvent),
     Enqueue(JobKind, Vec<PathBuf>),
     /// Answer a pending low-resolution question with "no".
     Decline(u64),
     Exit,
+}
+
+/// An export the flow is following: its input, and which editor window asked for it.
+struct ExportInfo {
+    input: String,
+    editor: u64,
 }
 
 /// The dispatcher's decisions, free of Tauri and threads so they can be unit-tested.
@@ -304,8 +667,16 @@ pub(crate) struct Flow {
     /// The window's listener is attached; until then events wait in `buffer`.
     ready: bool,
     buffer: Vec<JobEvent>,
-    /// A Quick Trim notice waiting for the queue to drain, so it never hides a running job.
-    held_trim: Option<PathBuf>,
+    /// The editor window exists, or is being created.
+    editor_open: bool,
+    /// The editor's listener is attached; until then its events wait in `editor_buffer`.
+    editor_ready: bool,
+    editor_buffer: Vec<EditorEvent>,
+    /// Counts editor windows opened, so a later window never hears of an earlier one's exports.
+    editor_count: u64,
+    /// Exports not yet finished, by job id. Their events go to the editor, never the progress
+    /// window (the queue sends no `Queued` snapshots for them, so every export event has its id).
+    exports: HashMap<u64, ExportInfo>,
 }
 
 impl Flow {
@@ -317,7 +688,11 @@ impl Flow {
             window_open: false,
             ready: false,
             buffer: Vec::new(),
-            held_trim: None,
+            editor_open: false,
+            editor_ready: false,
+            editor_buffer: Vec::new(),
+            editor_count: 0,
+            exports: HashMap::new(),
         }
     }
 
@@ -330,8 +705,9 @@ impl Flow {
         self.collector.push(action, now);
     }
 
-    /// Start the collected batch once it's due.
-    pub(crate) fn on_tick(&mut self, now: Instant, settled: bool) -> Vec<Effect> {
+    /// Start the collected batch once it's due: enqueue its jobs and hand its Trim files to the
+    /// editor, opening it if needed.
+    pub(crate) fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
         let mut out = Vec::new();
         let Some(batch) = self.collector.take_due(now) else {
             return out;
@@ -339,38 +715,120 @@ impl Flow {
         if let Some((kind, _)) = batch.jobs.first() {
             self.hint = (kind.name(), kind.ext());
         }
-        let mut enqueued = false;
         for (kind, files) in batch.jobs.into_iter().filter(|(_, files)| !files.is_empty()) {
-            enqueued = true;
             out.push(Effect::Enqueue(kind, files));
         }
-        if let Some(first) = batch.trims.into_iter().next() {
-            self.held_trim.get_or_insert(first);
+        if batch.trims.is_empty() {
+            return out;
         }
-        if settled && !enqueued {
-            self.show_held_trim(&mut out);
+        if self.editor_open {
+            let paths = batch.trims.iter().map(|f| f.display().to_string()).collect();
+            self.send_editor(EditorEvent::Files { paths }, &mut out);
+        } else {
+            out.push(Effect::OpenEditor(batch.trims));
+            self.editor_open = true;
+            self.editor_ready = false;
+            self.editor_buffer.clear();
+            self.editor_count += 1;
         }
         out
+    }
+
+    /// The dispatcher enqueued export `id` of `input` for the current editor window.
+    pub(crate) fn on_export_enqueued(&mut self, id: u64, input: String) {
+        self.exports.insert(id, ExportInfo { input, editor: self.editor_count });
     }
 
     pub(crate) fn on_job_event(&mut self, event: JobEvent, settled: bool) -> Vec<Effect> {
         let mut out = Vec::new();
         let drained = event == JobEvent::Drained;
-        let catch_up = self.replay.events();
-        self.replay.apply(&event);
-        if self.window_open {
-            self.send(event, &mut out);
-        } else if reopens_window(&event) {
-            // The new window first learns which job is running, then gets this event.
-            self.open_window(&mut out);
-            self.buffer = catch_up;
-            self.send(event, &mut out);
+        match job_id(&event).filter(|id| self.exports.contains_key(id)) {
+            Some(id) => self.on_export_event(id, event, &mut out),
+            None => self.on_progress_event(event, &mut out),
         }
         if drained && settled {
-            self.show_held_trim(&mut out);
             self.exit_if_finished(settled, &mut out);
         }
         out
+    }
+
+    /// A compress or convert job's event, or one about the whole queue.
+    fn on_progress_event(&mut self, event: JobEvent, out: &mut Vec<Effect>) {
+        let catch_up = self.replay.events();
+        self.replay.apply(&event);
+        if self.window_open {
+            self.send(event, out);
+        } else if reopens_window(&event) {
+            // The new window first learns which job is running, then gets this event.
+            self.open_window(self.hint, out);
+            self.buffer = catch_up;
+            self.send(event, out);
+        }
+    }
+
+    /// Route an export's event to the editor that asked for it. With that editor gone, only a
+    /// failure is shown, in the progress window.
+    fn on_export_event(&mut self, id: u64, event: JobEvent, out: &mut Vec<Effect>) {
+        let info = &self.exports[&id];
+        let to_editor = self.editor_open && info.editor == self.editor_count;
+        let input = info.input.clone();
+        let failure = |message: String, original_intact: bool| EditorEvent::ExportFailed {
+            id,
+            input: input.clone(),
+            message,
+            original_intact,
+        };
+        let editor_event = match event {
+            JobEvent::Started { .. } => EditorEvent::ExportStarted { id, input: input.clone() },
+            JobEvent::Progress { pass, passes, fraction, .. } => {
+                let overall = (f64::from(pass.saturating_sub(1)) + fraction) / f64::from(passes.max(1));
+                EditorEvent::ExportProgress { id, fraction: overall }
+            }
+            // Exports never ask; don't leave the queue waiting on an answer nobody can give.
+            JobEvent::NeedsConfirm { .. } => {
+                out.push(Effect::Decline(id));
+                return;
+            }
+            JobEvent::Done { output, bytes, .. } => {
+                self.exports.remove(&id);
+                EditorEvent::ExportDone { id, input: input.clone(), output, bytes }
+            }
+            JobEvent::Unchanged { reason, .. } => {
+                self.exports.remove(&id);
+                failure(reason, true)
+            }
+            JobEvent::Failed { message, original_intact, .. } => {
+                self.exports.remove(&id);
+                failure(message, original_intact)
+            }
+            JobEvent::Queued { .. } | JobEvent::Drained => return,
+        };
+        if to_editor {
+            self.send_editor(editor_event, out);
+        } else if let EditorEvent::ExportFailed { message, original_intact, .. } = editor_event {
+            if message != CANCELLED {
+                self.show_export_failure(id, input, message, original_intact, out);
+            }
+        }
+    }
+
+    /// Show a failed export in the progress window, opening it if needed.
+    fn show_export_failure(&mut self, id: u64, input: String, message: String, original_intact: bool, out: &mut Vec<Effect>) {
+        if !self.window_open {
+            self.open_window(("export", None), out);
+        }
+        let started = JobEvent::Started {
+            id,
+            input,
+            input_bytes: 0, // not shown with a failure
+            kind: Some("export".into()),
+            ext: None,
+            width: None,
+            height: None,
+            fps: None,
+        };
+        self.send(started, out);
+        self.send(JobEvent::Failed { id, message, original_intact }, out);
     }
 
     /// The window's listener is attached.
@@ -398,11 +856,40 @@ impl Flow {
     }
 
     /// An `OpenWindow` effect could not be carried out; the next event tries again. If nothing
-    /// else is coming (the window was for a trim notice or the final drain), exit instead of
-    /// waiting forever with no window.
+    /// else is coming (the window was for the final drain), exit instead of waiting forever with
+    /// no window.
     pub(crate) fn on_open_failed(&mut self, settled: bool) -> Vec<Effect> {
         let mut out = Vec::new();
         self.forget_window();
+        self.exit_if_finished(settled, &mut out);
+        out
+    }
+
+    /// The editor's listener is attached. A reloaded editor gets nothing again: it asks for its
+    /// files itself, and its earlier exports' progress is not replayed.
+    pub(crate) fn on_editor_ready(&mut self) -> Vec<Effect> {
+        if !self.editor_open || self.editor_ready {
+            return Vec::new();
+        }
+        self.editor_ready = true;
+        self.editor_buffer.drain(..).map(Effect::EmitEditor).collect()
+    }
+
+    /// An event from an editor command, for the editor window.
+    pub(crate) fn on_editor_event(&mut self, event: EditorEvent) -> Vec<Effect> {
+        let mut out = Vec::new();
+        if self.editor_open {
+            self.send_editor(event, &mut out);
+        }
+        out
+    }
+
+    /// The editor window closed, or could not be opened. Its exports keep running.
+    pub(crate) fn on_editor_closed(&mut self, settled: bool) -> Vec<Effect> {
+        let mut out = Vec::new();
+        self.editor_open = false;
+        self.editor_ready = false;
+        self.editor_buffer.clear();
         self.exit_if_finished(settled, &mut out);
         out
     }
@@ -413,8 +900,8 @@ impl Flow {
         self.buffer.clear();
     }
 
-    fn open_window(&mut self, out: &mut Vec<Effect>) {
-        out.push(Effect::OpenWindow { kind: self.hint.0, ext: self.hint.1 });
+    fn open_window(&mut self, (kind, ext): (&'static str, Option<&'static str>), out: &mut Vec<Effect>) {
+        out.push(Effect::OpenWindow { kind, ext });
         self.window_open = true;
         self.ready = false;
         self.buffer.clear();
@@ -428,30 +915,16 @@ impl Flow {
         }
     }
 
-    fn show_held_trim(&mut self, out: &mut Vec<Effect>) {
-        let Some(first) = self.held_trim.take() else {
-            return;
-        };
-        if !self.window_open {
-            self.open_window(out);
+    fn send_editor(&mut self, event: EditorEvent, out: &mut Vec<Effect>) {
+        if self.editor_ready {
+            out.push(Effect::EmitEditor(event));
+        } else {
+            self.editor_buffer.push(event);
         }
-        let id = 0; // queue ids start at 1
-        let started = JobEvent::Started {
-            id,
-            input: first.display().to_string(),
-            input_bytes: 0, // not shown with a notice
-            kind: Some("trim".into()),
-            ext: None,
-            width: None,
-            height: None,
-            fps: None,
-        };
-        self.send(started, out);
-        self.send(JobEvent::Unchanged { id, reason: TRIM_NOTICE.into() }, out);
     }
 
     fn exit_if_finished(&self, settled: bool, out: &mut Vec<Effect>) {
-        if settled && !self.window_open && self.collector.is_empty() && self.held_trim.is_none() {
+        if settled && !self.window_open && !self.editor_open && self.collector.is_empty() {
             out.push(Effect::Exit);
         }
     }
@@ -713,22 +1186,7 @@ mod tests {
     }
 
     const OPEN_COMPRESS: Effect = Effect::OpenWindow { kind: "compress", ext: None };
-
-    fn trim_notice(path: &str) -> Vec<JobEvent> {
-        vec![
-            JobEvent::Started {
-                id: 0,
-                input: path.into(),
-                input_bytes: 0,
-                kind: Some("trim".into()),
-                ext: None,
-                width: None,
-                height: None,
-                fps: None,
-            },
-            JobEvent::Unchanged { id: 0, reason: TRIM_NOTICE.into() },
-        ]
-    }
+    const OPEN_EXPORT: Effect = Effect::OpenWindow { kind: "export", ext: None };
 
     /// A flow whose window is open and listening, showing job 1 of 2.
     fn showing_job_1() -> Flow {
@@ -739,6 +1197,47 @@ mod tests {
         f
     }
 
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn to_editor(events: &[EditorEvent]) -> Vec<Effect> {
+        events.iter().cloned().map(Effect::EmitEditor).collect()
+    }
+
+    /// A flow whose editor window is open and listening, opened for `t.mp4`.
+    fn editing() -> Flow {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
+        assert_eq!(f.on_tick(t0 + ms(400)), vec![Effect::OpenEditor(files(&["t.mp4"]))]);
+        assert_eq!(f.on_editor_ready(), vec![]);
+        f
+    }
+
+    /// `editing()` with export 5 of `t.mp4` enqueued and started, as the queue reports it (pinned
+    /// by `jobs::queue::tests::exports_emit_no_snapshots`).
+    fn exporting() -> Flow {
+        let mut f = editing();
+        f.on_export_enqueued(5, "t.mp4".into());
+        // The queue's real sequence for an export: no `Queued`, straight to `Started`.
+        assert_eq!(f.on_job_event(export_started(5), false).len(), 1);
+        f
+    }
+
+    fn export_started(id: u64) -> JobEvent {
+        JobEvent::Started {
+            id,
+            input: "t.mp4".into(),
+            input_bytes: 1,
+            kind: Some("export".into()),
+            ext: None,
+            width: None,
+            height: None,
+            fps: None,
+        }
+    }
+
     #[test]
     fn a_batch_enqueues_each_kind_and_opens_the_window_on_its_first_event() {
         let t0 = Instant::now();
@@ -746,9 +1245,9 @@ mod tests {
         f.on_action(Action::Convert(Target::Mov, files(&["a.mkv"])), t0);
         f.on_action(Action::Compress(files(&["b.mp4"])), t0 + ms(100));
         assert_eq!(f.deadline(), Some(t0 + ms(500)));
-        assert_eq!(f.on_tick(t0 + ms(499), true), vec![]);
+        assert_eq!(f.on_tick(t0 + ms(499)), vec![]);
         assert_eq!(
-            f.on_tick(t0 + ms(500), true),
+            f.on_tick(t0 + ms(500)),
             vec![
                 Effect::Enqueue(JobKind::Convert(Target::Mov), files(&["a.mkv"])),
                 Effect::Enqueue(JobKind::Compress, files(&["b.mp4"])),
@@ -822,40 +1321,6 @@ mod tests {
     }
 
     #[test]
-    fn a_trim_during_a_job_waits_for_the_drain() {
-        let t0 = Instant::now();
-        let mut f = showing_job_1();
-        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
-        assert_eq!(f.on_tick(t0 + ms(400), false), vec![], "the running job keeps the window");
-        assert_eq!(f.on_job_event(failed(1, "boom"), false), emits(&[failed(1, "boom")]));
-        let mut expected = emits(&[JobEvent::Drained]);
-        expected.extend(emits(&trim_notice("t.mp4")));
-        assert_eq!(f.on_job_event(JobEvent::Drained, true), expected);
-    }
-
-    #[test]
-    fn a_trim_in_the_same_batch_as_jobs_waits_for_their_drain() {
-        let t0 = Instant::now();
-        let mut f = Flow::new();
-        f.on_action(Action::Compress(files(&["a.mp4"])), t0);
-        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
-        assert_eq!(
-            f.on_tick(t0 + ms(400), true),
-            vec![Effect::Enqueue(JobKind::Compress, files(&["a.mp4"]))]
-        );
-    }
-
-    #[test]
-    fn a_trim_alone_shows_at_once_and_closing_it_exits() {
-        let t0 = Instant::now();
-        let mut f = Flow::new();
-        f.on_action(Action::Trim(files(&["t.mp4", "u.mp4"])), t0);
-        assert_eq!(f.on_tick(t0 + ms(400), true), vec![OPEN_COMPRESS]);
-        assert_eq!(f.on_ready(), emits(&trim_notice("t.mp4")));
-        assert_eq!(f.on_window_closed(true), vec![Effect::Exit]);
-    }
-
-    #[test]
     fn a_failed_window_open_is_retried_on_the_next_event() {
         let mut f = Flow::new();
         assert_eq!(f.on_job_event(queued(1, 1), false), vec![OPEN_COMPRESS]);
@@ -866,10 +1331,10 @@ mod tests {
 
     #[test]
     fn a_failed_window_open_with_nothing_left_exits() {
-        let t0 = Instant::now();
         let mut f = Flow::new();
-        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
-        assert_eq!(f.on_tick(t0 + ms(400), true), vec![OPEN_COMPRESS]);
+        assert_eq!(f.on_job_event(queued(1, 1), false), vec![OPEN_COMPRESS]);
+        f.on_job_event(failed(1, "boom"), false);
+        f.on_job_event(JobEvent::Drained, true);
         assert_eq!(f.on_open_failed(true), vec![Effect::Exit]);
     }
 
@@ -877,10 +1342,321 @@ mod tests {
     fn a_failed_window_open_waits_while_a_batch_is_collected() {
         let t0 = Instant::now();
         let mut f = Flow::new();
-        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
-        assert_eq!(f.on_tick(t0 + ms(400), true), vec![OPEN_COMPRESS]);
-        f.on_action(Action::Compress(files(&["a.mp4"])), t0 + ms(450));
+        assert_eq!(f.on_job_event(queued(1, 1), false), vec![OPEN_COMPRESS]);
+        f.on_action(Action::Compress(files(&["a.mp4"])), t0);
         assert_eq!(f.on_open_failed(true), vec![]);
+    }
+
+    // ---- Editor ----
+
+    /// A real [`JobQueue`] whose jobs wait for [`RealQueue::release`], then report one progress
+    /// tick (pass 1 of 1, half done) and finish. Its events are collected in emission order, so
+    /// a Flow can be fed exactly what the queue sends.
+    struct RealQueue {
+        queue: JobQueue,
+        rx: Receiver<JobEvent>,
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    struct GatedRunner(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl JobRunner for GatedRunner {
+        fn run(
+            &self,
+            spec: &JobSpec,
+            _: bool,
+            cancel: &CancelToken,
+            progress: &mut dyn FnMut(JobProgress),
+        ) -> Result<JobOutcome, JobError> {
+            let (open, cv) = &*self.0;
+            let mut is_open = open.lock().unwrap();
+            while !*is_open {
+                if cancel.is_cancelled() {
+                    return Err(JobError::Cancelled);
+                }
+                is_open = cv.wait_timeout(is_open, ms(10)).unwrap().0;
+            }
+            progress(JobProgress { pass: 1, passes: 1, fraction: 0.5 });
+            Ok(JobOutcome::Done { output: spec.input.with_extension("out.mp4"), bytes: 2 })
+        }
+    }
+
+    impl RealQueue {
+        fn new() -> Self {
+            let (tx, rx) = mpsc::channel();
+            let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+            let queue = JobQueue::new(
+                Box::new(GatedRunner(gate.clone())),
+                Box::new(move |event| {
+                    let _ = tx.send(event);
+                }),
+            );
+            Self { queue, rx, gate }
+        }
+
+        fn release(&self) {
+            *self.gate.0.lock().unwrap() = true;
+            self.gate.1.notify_all();
+        }
+
+        /// Every event not taken yet, up to and including the first that matches `end`.
+        fn until(&self, end: impl Fn(&JobEvent) -> bool) -> Vec<JobEvent> {
+            let mut events = Vec::new();
+            loop {
+                let event = self.rx.recv_timeout(Duration::from_secs(5)).expect("the queue went quiet");
+                let last = end(&event);
+                events.push(event);
+                if last {
+                    return events;
+                }
+            }
+        }
+
+        fn drained(&self) -> Vec<JobEvent> {
+            self.release();
+            self.until(|e| *e == JobEvent::Drained)
+        }
+    }
+
+    /// Feed `events` to `f` as the dispatcher would: settled only at the final `Drained`.
+    fn feed(f: &mut Flow, events: Vec<JobEvent>) -> Vec<Effect> {
+        let n = events.len();
+        let mut out = Vec::new();
+        for (i, event) in events.into_iter().enumerate() {
+            let settled = i + 1 == n && event == JobEvent::Drained;
+            out.extend(f.on_job_event(event, settled));
+        }
+        out
+    }
+
+    fn export_job(input: &str) -> JobKind {
+        JobKind::Export(ExportJob(Arc::new(ExportRequest {
+            session: 1,
+            input: PathBuf::from(input),
+            mode: crate::editor::request::ExportMode::Quick,
+            fit_20mb: false,
+            duration_s: 2.0,
+            video: Vec::new(),
+            audio: Vec::new(),
+        })))
+    }
+
+    #[test]
+    fn an_export_with_no_batch_running_never_opens_the_progress_window() {
+        let mut f = editing();
+        let rq = RealQueue::new();
+        let id = rq.queue.enqueue_one(export_job("t.mp4"), PathBuf::from("t.mp4"));
+        f.on_export_enqueued(id, "t.mp4".into());
+        let effects = feed(&mut f, rq.drained());
+        assert_eq!(
+            effects,
+            to_editor(&[
+                EditorEvent::ExportStarted { id, input: "t.mp4".into() },
+                EditorEvent::ExportProgress { id, fraction: 0.5 },
+                EditorEvent::ExportDone { id, input: "t.mp4".into(), output: "t.out.mp4".into(), bytes: 2 },
+            ])
+        );
+        assert!(f.on_editor_closed(true).contains(&Effect::Exit));
+    }
+
+    #[test]
+    fn a_batch_running_beside_exports_shows_only_its_own_files() {
+        let t0 = Instant::now();
+        let mut f = editing();
+        let rq = RealQueue::new();
+        f.on_action(Action::Compress(files(&["a.mp4", "b.mp4"])), t0);
+        for effect in f.on_tick(t0 + ms(400)) {
+            let Effect::Enqueue(kind, files) = effect else { panic!("{effect:?}") };
+            rq.queue.enqueue(kind, files);
+        }
+        let id = rq.queue.enqueue_one(export_job("t.mp4"), PathBuf::from("t.mp4"));
+        f.on_export_enqueued(id, "t.mp4".into());
+        let mut effects = feed(&mut f, rq.drained());
+        effects.extend(f.on_ready());
+
+        let opened: Vec<_> = effects.iter().filter(|e| matches!(e, Effect::OpenWindow { .. })).collect();
+        assert_eq!(opened, vec![&OPEN_COMPRESS]);
+        for effect in &effects {
+            match effect {
+                // "File N of 2": the export isn't one of the window's files.
+                Effect::Emit(JobEvent::Queued { snapshot }) => assert_eq!(snapshot.total, 2, "{effects:?}"),
+                Effect::Emit(event) => assert_ne!(job_id(event), Some(id), "{event:?} reached the progress window"),
+                _ => {}
+            }
+        }
+        assert!(effects.contains(&Effect::EmitEditor(EditorEvent::ExportStarted { id, input: "t.mp4".into() })));
+    }
+
+
+    #[test]
+    fn a_trim_batch_opens_the_editor() {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["a.mp4"])), t0);
+        f.on_action(Action::Compress(files(&["c.mp4"])), t0 + ms(10));
+        f.on_action(Action::Trim(files(&["b.mp4"])), t0 + ms(20));
+        assert_eq!(
+            f.on_tick(t0 + ms(420)),
+            vec![
+                Effect::Enqueue(JobKind::Compress, files(&["c.mp4"])),
+                Effect::OpenEditor(files(&["a.mp4", "b.mp4"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trim_while_the_editor_is_open_appends_files() {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["a.mp4"])), t0);
+        f.on_tick(t0 + ms(400));
+        // The page isn't listening yet: the new files wait for it.
+        f.on_action(Action::Trim(files(&["b.mp4", "c.mp4"])), t0 + ms(500));
+        assert_eq!(f.on_tick(t0 + ms(900)), vec![]);
+        let appended = EditorEvent::Files { paths: strings(&["b.mp4", "c.mp4"]) };
+        assert_eq!(f.on_editor_ready(), to_editor(&[appended]));
+        // Once it listens, they go straight to it.
+        f.on_action(Action::Trim(files(&["d.mp4"])), t0 + ms(1000));
+        assert_eq!(
+            f.on_tick(t0 + ms(1400)),
+            to_editor(&[EditorEvent::Files { paths: strings(&["d.mp4"]) }])
+        );
+    }
+
+    #[test]
+    fn export_events_go_to_the_editor_not_the_progress_window() {
+        let mut f = editing();
+        f.on_export_enqueued(5, "t.mp4".into());
+        assert_eq!(
+            f.on_job_event(export_started(5), false),
+            to_editor(&[EditorEvent::ExportStarted { id: 5, input: "t.mp4".into() }])
+        );
+        // Pass 2 of 3, half done: halfway through the whole export.
+        let tick = JobEvent::Progress { id: 5, pass: 2, passes: 3, fraction: 0.5, eta_s: None };
+        assert_eq!(
+            f.on_job_event(tick, false),
+            to_editor(&[EditorEvent::ExportProgress { id: 5, fraction: 0.5 }])
+        );
+        assert_eq!(
+            f.on_job_event(done(5), false),
+            to_editor(&[EditorEvent::ExportDone {
+                id: 5,
+                input: "t.mp4".into(),
+                output: "5.out.mp4".into(),
+                bytes: 2
+            }])
+        );
+        assert_eq!(f.on_job_event(JobEvent::Drained, true), vec![]);
+    }
+
+    #[test]
+    fn an_export_failure_goes_to_the_editor() {
+        let mut f = exporting();
+        assert_eq!(
+            f.on_job_event(failed(5, "boom"), false),
+            to_editor(&[EditorEvent::ExportFailed {
+                id: 5,
+                input: "t.mp4".into(),
+                message: "boom".into(),
+                original_intact: true
+            }])
+        );
+    }
+
+    #[test]
+    fn export_failure_without_editor_shows_in_progress_window() {
+        let mut f = exporting();
+        assert_eq!(f.on_editor_closed(false), vec![]);
+        assert_eq!(f.on_job_event(progress(5), false), vec![], "nothing shows a running export");
+        assert_eq!(f.on_job_event(failed(5, "boom"), false), vec![OPEN_EXPORT]);
+        let shown = JobEvent::Started {
+            id: 5,
+            input: "t.mp4".into(),
+            input_bytes: 0,
+            kind: Some("export".into()),
+            ext: None,
+            width: None,
+            height: None,
+            fps: None,
+        };
+        assert_eq!(f.on_ready(), emits(&[shown, failed(5, "boom")]));
+        assert_eq!(f.on_job_event(JobEvent::Drained, true), emits(&[JobEvent::Drained]));
+        assert_eq!(f.on_window_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_later_editor_hears_nothing_of_an_earlier_ones_exports() {
+        let t0 = Instant::now();
+        let mut f = exporting();
+        f.on_editor_closed(false);
+        f.on_action(Action::Trim(files(&["u.mp4"])), t0);
+        assert_eq!(f.on_tick(t0 + ms(400)), vec![Effect::OpenEditor(files(&["u.mp4"]))]);
+        f.on_editor_ready();
+        assert_eq!(f.on_job_event(done(5), false), vec![]);
+    }
+
+    #[test]
+    fn no_exit_while_the_editor_is_open() {
+        let mut f = exporting();
+        assert_eq!(f.on_job_event(done(5), false).len(), 1);
+        assert_eq!(f.on_job_event(JobEvent::Drained, true), vec![]);
+        // A progress window closing doesn't end the app under the editor either.
+        f.on_job_event(queued(2, 2), false);
+        assert_eq!(f.on_window_closed(true), vec![]);
+        assert_eq!(f.on_editor_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn exit_after_editor_closes_and_exports_drain() {
+        let mut f = exporting();
+        assert_eq!(f.on_editor_closed(false), vec![], "the export is still running");
+        assert_eq!(f.on_job_event(done(5), false), vec![]);
+        assert_eq!(f.on_job_event(JobEvent::Drained, true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_failed_editor_open_with_nothing_left_exits() {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
+        f.on_tick(t0 + ms(400));
+        assert_eq!(f.on_editor_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn proxy_progress_waits_for_the_editor() {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
+        f.on_tick(t0 + ms(400));
+        let tick = EditorEvent::ProxyProgress { session: 1, fraction: 0.25 };
+        assert_eq!(f.on_editor_event(tick.clone()), vec![]);
+        assert_eq!(f.on_editor_ready(), vec![Effect::EmitEditor(tick.clone())]);
+        assert_eq!(f.on_editor_event(tick.clone()), vec![Effect::EmitEditor(tick)]);
+    }
+
+    #[test]
+    fn an_export_that_asks_to_confirm_is_declined() {
+        let mut f = exporting();
+        let ask = JobEvent::NeedsConfirm { id: 5, width: 426, height: 240, fps: 15.0 };
+        assert_eq!(f.on_job_event(ask, false), vec![Effect::Decline(5)]);
+    }
+
+    #[test]
+    fn editor_events_serialize_to_the_ui_contract() {
+        let failed = EditorEvent::ExportFailed {
+            id: 5,
+            input: "C:\\v\\a.mp4".into(),
+            message: "boom".into(),
+            original_intact: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            serde_json::json!({"type": "ExportFailed", "id": 5, "input": "C:\\v\\a.mp4", "message": "boom",
+                               "original_intact": false})
+        );
+        let files = EditorEvent::Files { paths: strings(&["a.mp4"]) };
+        assert_eq!(serde_json::to_value(&files).unwrap(), serde_json::json!({"type": "Files", "paths": ["a.mp4"]}));
     }
 
     #[test]

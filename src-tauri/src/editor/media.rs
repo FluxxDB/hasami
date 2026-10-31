@@ -7,8 +7,9 @@
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::thread;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -31,6 +32,8 @@ pub const THUMB_HEIGHT: u32 = 72;
 const PEAKS_SAMPLE_RATE: u32 = 8000;
 /// The proxy is never taller than this.
 const PROXY_MAX_HEIGHT: u32 = 720;
+/// How often a running ffmpeg is checked for exit or cancellation.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One audio track of the input.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -75,34 +78,68 @@ fn tool_failed(what: &str, stderr: &[u8]) -> MediaError {
     MediaError::Io(io::Error::other(format!("{what} failed:\n{tail}")))
 }
 
-/// Run ffmpeg with `args` to completion and return its output; a failure status becomes an error.
-fn run_checked(paths: &FfmpegPaths, what: &str, args: &[OsString]) -> Result<Output, MediaError> {
-    let output = hidden_command(&paths.ffmpeg)
+/// Wait for `child` to exit. A cancel kills and reaps it, so it lets go of its files.
+fn wait_or_cancel(child: &mut Child, cancel: &CancelToken) -> Result<ExitStatus, JobError> {
+    loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(JobError::Cancelled);
+        }
+        if let Some(status) = child.try_wait().map_err(MediaError::Io)? {
+            return Ok(status);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Run ffmpeg with `args` to completion and return its stderr; a failure status becomes an error.
+/// Stops (killing ffmpeg) when `cancel` is set.
+fn run_checked(paths: &FfmpegPaths, what: &str, args: &[OsString], cancel: &CancelToken) -> Result<Vec<u8>, JobError> {
+    if cancel.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    let mut child = hidden_command(&paths.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-nostats", "-y"])
         .args(args)
         .stdin(Stdio::null())
-        .output()?;
-    if output.status.success() {
-        Ok(output)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(MediaError::Io)?;
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    // Drained on its own thread so a chatty ffmpeg can't block on a full pipe.
+    let reader = thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = stderr.read_to_end(&mut text);
+        text
+    });
+    let status = wait_or_cancel(&mut child, cancel);
+    let stderr = reader.join().unwrap_or_default();
+    if status?.success() {
+        Ok(stderr)
     } else {
-        Err(tool_failed(what, &output.stderr))
+        Err(tool_failed(what, &stderr).into())
     }
 }
 
 /// Probe `input`, find its empty audio tracks and extract the others into `work_dir` as
-/// `a<N>.m4a`.
-pub fn prepare(paths: &FfmpegPaths, input: &Path, work_dir: &Path) -> Result<PreparedMedia, JobError> {
+/// `a<N>.m4a`. Stops with [`JobError::Cancelled`] when `cancel` is set.
+pub fn prepare(paths: &FfmpegPaths, input: &Path, work_dir: &Path, cancel: &CancelToken) -> Result<PreparedMedia, JobError> {
     let info = probe(paths, input).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
+    if cancel.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
     std::fs::create_dir_all(work_dir).map_err(MediaError::Io)?;
 
-    let empty = detect_empty_tracks(paths, input, info.audio.len())?;
+    let empty = detect_empty_tracks(paths, input, info.audio.len(), cancel)?;
     let mut tracks = Vec::with_capacity(empty.len());
     for (index, &empty) in empty.iter().enumerate() {
         let file = if empty {
             None
         } else {
             let out = work_dir.join(format!("a{index}.m4a"));
-            extract_track(paths, input, index, &info.audio[index].codec, &out)?;
+            extract_track(paths, input, index, &info.audio[index].codec, &out, cancel)?;
             Some(out)
         };
         tracks.push(TrackMedia { index, empty, file });
@@ -112,7 +149,12 @@ pub fn prepare(paths: &FfmpegPaths, input: &Path, work_dir: &Path) -> Result<Pre
 
 /// Whether each of the first `count` audio tracks of `input` is empty (see
 /// [`EMPTY_TRACK_PEAK_DB`]).
-pub fn detect_empty_tracks(paths: &FfmpegPaths, input: &Path, count: usize) -> Result<Vec<bool>, MediaError> {
+pub fn detect_empty_tracks(
+    paths: &FfmpegPaths,
+    input: &Path,
+    count: usize,
+    cancel: &CancelToken,
+) -> Result<Vec<bool>, JobError> {
     (0..count)
         .map(|n| {
             let args = [
@@ -127,9 +169,9 @@ pub fn detect_empty_tracks(paths: &FfmpegPaths, input: &Path, count: usize) -> R
                 os("null"),
                 os("-"),
             ];
-            let output = run_checked(paths, "Measuring an audio track", &args)?;
+            let stderr = run_checked(paths, "Measuring an audio track", &args, cancel)?;
             // No level reported means no samples were decoded at all: nothing to hear.
-            Ok(parse_max_volume(&String::from_utf8_lossy(&output.stderr)).is_none_or(|db| db < EMPTY_TRACK_PEAK_DB))
+            Ok(parse_max_volume(&String::from_utf8_lossy(&stderr)).is_none_or(|db| db < EMPTY_TRACK_PEAK_DB))
         })
         .collect()
 }
@@ -143,7 +185,14 @@ fn parse_max_volume(log: &str) -> Option<f64> {
 
 /// Write audio track `n` of `input` to `out`: stream-copied when it is already AAC, otherwise
 /// re-encoded to AAC.
-fn extract_track(paths: &FfmpegPaths, input: &Path, n: usize, codec: &str, out: &Path) -> Result<(), MediaError> {
+fn extract_track(
+    paths: &FfmpegPaths,
+    input: &Path,
+    n: usize,
+    codec: &str,
+    out: &Path,
+    cancel: &CancelToken,
+) -> Result<(), JobError> {
     let mut args = vec![os("-i"), input.as_os_str().to_os_string(), os("-map"), os(&format!("0:a:{n}")), os("-vn")];
     if codec == "aac" {
         args.extend([os("-c"), os("copy")]);
@@ -151,7 +200,7 @@ fn extract_track(paths: &FfmpegPaths, input: &Path, n: usize, codec: &str, out: 
         args.extend([os("-c:a"), os("aac"), os("-b:a"), os("192k")]);
     }
     args.push(out.as_os_str().to_os_string());
-    run_checked(paths, "Extracting an audio track", &args).map(drop)
+    run_checked(paths, "Extracting an audio track", &args, cancel).map(drop)
 }
 
 /// Waveform values per second for an input of `duration_s`: [`PEAKS_PER_SECOND`], lowered so the
@@ -217,6 +266,21 @@ impl PeakAccumulator {
     }
 }
 
+/// Fails every read once `cancel` is set, so a streaming decode stops.
+struct CancellableRead<'a, R> {
+    inner: R,
+    cancel: &'a CancelToken,
+}
+
+impl<R: Read> Read for CancellableRead<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        self.inner.read(buf)
+    }
+}
+
 /// Window s16le samples read from `reader` into peak values at `rate`, without holding the whole
 /// stream in memory.
 fn peaks_from_reader(mut reader: impl Read, rate: f64) -> io::Result<Vec<f32>> {
@@ -247,8 +311,11 @@ fn peaks_from_reader(mut reader: impl Read, rate: f64) -> io::Result<Vec<f32>> {
 }
 
 /// Waveform of `track_file` (an extracted track), decoded to mono 8 kHz through a pipe and
-/// windowed as it streams in.
-pub fn peaks(paths: &FfmpegPaths, track_file: &Path, duration_s: f64) -> Result<Peaks, MediaError> {
+/// windowed as it streams in. Stops (killing ffmpeg) when `cancel` is set.
+pub fn peaks(paths: &FfmpegPaths, track_file: &Path, duration_s: f64, cancel: &CancelToken) -> Result<Peaks, JobError> {
+    if cancel.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
     let rate = peaks_rate(duration_s);
     let mut child = hidden_command(&paths.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
@@ -257,7 +324,8 @@ pub fn peaks(paths: &FfmpegPaths, track_file: &Path, duration_s: f64) -> Result<
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(MediaError::Io)?;
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
     // Drained on its own thread so a chatty ffmpeg can't stall the stdout read.
@@ -267,15 +335,18 @@ pub fn peaks(paths: &FfmpegPaths, track_file: &Path, duration_s: f64) -> Result<
         text
     });
 
-    let values = peaks_from_reader(stdout, rate);
+    let values = peaks_from_reader(CancellableRead { inner: stdout, cancel }, rate);
     if values.is_err() {
         let _ = child.kill();
     }
-    let status = child.wait()?;
+    let status = child.wait().map_err(MediaError::Io)?;
     let stderr = stderr_thread.join().unwrap_or_default();
-    let values = values?;
+    if cancel.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    let values = values.map_err(MediaError::Io)?;
     if !status.success() {
-        return Err(tool_failed("Reading the audio waveform", &stderr));
+        return Err(tool_failed("Reading the audio waveform", &stderr).into());
     }
     Ok(Peaks { rate, values })
 }
@@ -289,12 +360,22 @@ fn thumbs_to_keep(found: usize, interval: f64, duration_s: f64) -> usize {
 
 /// Timeline thumbnails of `input`, one per [`thumb_interval`] seconds, as `thumb_%05d.jpg` in
 /// `out_dir` (any earlier `thumb_*.jpg` there is removed first). Frames at or past `duration_s`
-/// are dropped, and there are never more than [`MAX_THUMBS`].
-pub fn thumbnails(paths: &FfmpegPaths, input: &Path, duration_s: f64, out_dir: &Path) -> Result<Vec<Thumb>, MediaError> {
-    std::fs::create_dir_all(out_dir)?;
+/// are dropped, and there are never more than [`MAX_THUMBS`]. Stops (killing ffmpeg) when `cancel`
+/// is set.
+pub fn thumbnails(
+    paths: &FfmpegPaths,
+    input: &Path,
+    duration_s: f64,
+    out_dir: &Path,
+    cancel: &CancelToken,
+) -> Result<Vec<Thumb>, JobError> {
+    if cancel.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    std::fs::create_dir_all(out_dir).map_err(MediaError::Io)?;
     // A reused folder must not leak a previous run's higher-numbered frames into this one.
-    for entry in std::fs::read_dir(out_dir)? {
-        let path = entry?.path();
+    for entry in std::fs::read_dir(out_dir).map_err(MediaError::Io)? {
+        let path = entry.map_err(MediaError::Io)?.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name.starts_with("thumb_") && name.ends_with(".jpg") {
             let _ = std::fs::remove_file(&path);
@@ -315,7 +396,7 @@ pub fn thumbnails(paths: &FfmpegPaths, input: &Path, duration_s: f64, out_dir: &
         os("5"),
         out_dir.join("thumb_%05d.jpg").into_os_string(),
     ];
-    run_checked(paths, "Making thumbnails", &args)?;
+    run_checked(paths, "Making thumbnails", &args, cancel)?;
 
     let mut files = Vec::new();
     for k in 1.. {

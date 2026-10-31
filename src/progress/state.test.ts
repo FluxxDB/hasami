@@ -178,6 +178,16 @@ describe('reduce', () => {
     expect(s.shouldClose).toBe(false);
   });
 
+  it('export_kind_title: an export failure shown here reads "HASAMI export"', () => {
+    const s = run([
+      { type: 'Started', id: 7, input: 'C:\\clips\\Replay 01.mp4', input_bytes: 0, kind: 'export' },
+      { type: 'Failed', id: 7, message: 'Couldn\'t process this video.', original_intact: true },
+    ]);
+    expect(s.kind).toBe('export');
+    expect(s.phase).toBe('failed');
+    expect(s.failure?.fileName).toBe('Replay 01.mp4');
+  });
+
   it('splits file names on both slash styles', () => {
     expect(run([started(1, '/home/x/a b.mkv')]).fileName).toBe('a b.mkv');
   });
