@@ -88,7 +88,7 @@
     {#if view.phase === 'failed'}
       <p class="message">{view.failure?.message}</p>
       <div class="foot">
-        <span class="sub">The original file was not changed.</span>
+        <span class="sub">{#if view.failure?.originalIntact !== false}The original file was not changed.{/if}</span>
         <button type="button" class="btn cap" onclick={onClose}>Close</button>
       </div>
     {:else if view.phase === 'unchanged'}

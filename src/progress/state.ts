@@ -35,7 +35,8 @@ export interface ViewState {
   queue: { index: number; total: number };
   /** "File 3 of 12"; null when there is only one file. */
   fileLabel: string | null;
-  failure: { fileName: string; message: string } | null;
+  /** The failure on screen. One whose original is no longer in place stays over later ones. */
+  failure: { fileName: string; message: string; originalIntact: boolean } | null;
   failedCount: number;
   notice: { fileName: string; reason: string } | null;
   noticeCount: number;
@@ -159,12 +160,17 @@ export function reduce(s: ViewState, e: JobEvent): ViewState {
     case 'Failed':
       if (e.id !== s.id) return s;
       if (e.message === CANCELLED) return { ...s, phase: 'cancelled' };
-      return {
-        ...s,
-        phase: 'failed',
-        failure: { fileName: s.fileName, message: e.message },
-        failedCount: s.failedCount + 1,
-      };
+      {
+        const failure = { fileName: s.fileName, message: e.message, originalIntact: e.original_intact !== false };
+        // Never replace the one message that says where a user's new file ended up.
+        const keepEarlier = s.failure !== null && !s.failure.originalIntact;
+        return {
+          ...s,
+          phase: 'failed',
+          failure: keepEarlier ? s.failure : failure,
+          failedCount: s.failedCount + 1,
+        };
+      }
 
     case 'Drained': {
       const drained = { ...s, drained: true };

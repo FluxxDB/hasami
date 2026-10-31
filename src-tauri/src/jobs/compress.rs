@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{JobError, JobOutcome, JobProgress};
+use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, CompressPlan, SIZE_LIMIT_BYTES};
 use crate::fsops::{commit_replace, temp_path_for, unique_path, with_extension};
 use crate::media::run::{run_ffmpeg, CancelToken};
@@ -26,12 +26,9 @@ const MAX_RETRIES: u32 = 3;
 /// Each retry multiplies the bitrate by this.
 const RETRY_FACTOR: f64 = 0.9;
 /// Shown when every retry was still over the limit.
-const NEVER_FIT: &str = "Couldn't get this video under 20 MB. The original was not changed.";
-/// Shown when the input can't be probed (unreadable, not media, or no duration).
-const UNREADABLE: &str = "Hasami couldn't read this video. The original was not changed.";
+const NEVER_FIT: &str = "Couldn't get this video under 20 MB.";
 /// Shown when an encoded result fails verification for a reason other than its size.
-const DIDNT_CHECK_OUT: &str =
-    "Couldn't compress this video: the result didn't check out. The original was not changed.";
+const DIDNT_CHECK_OUT: &str = "Couldn't compress this video: the result didn't check out.";
 /// Where pass 1 writes its (discarded) output. The crate is Windows-only.
 const NULL_OUTPUT: &str = "NUL";
 
@@ -345,8 +342,7 @@ fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
         }
     }
     Err(JobError::Message(
-        "Couldn't create a temporary folder for the encode. The original was not changed."
-            .to_owned(),
+        "Couldn't create a temporary folder for the encode.".to_owned(),
     ))
 }
 

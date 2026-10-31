@@ -339,7 +339,7 @@ fn compress_unreadable_input_is_plain_language() {
     match result {
         Err(e) => assert_eq!(
             e.to_string(),
-            "Hasami couldn't read this video. The original was not changed."
+            "Hasami couldn't read this video."
         ),
         other => panic!("expected an error, got {other:?}"),
     }

@@ -116,6 +116,10 @@ pub enum JobEvent {
     Failed {
         id: u64,
         message: String,
+        /// False when the original is no longer at its own path (it is in the Recycle Bin and
+        /// `message` says where the new file is). The window only says "The original file was
+        /// not changed." when this is true.
+        original_intact: bool,
     },
     Drained,
 }
@@ -185,7 +189,7 @@ impl JobQueue {
     }
 
     /// Cancel a job. The running job is stopped; a waiting job is dropped. Either way the queue
-    /// emits `Failed { id, message: "Cancelled" }` and moves on. Unknown ids are ignored.
+    /// emits `Failed { id, message: "Cancelled", .. }` and moves on. Unknown ids are ignored.
     pub fn cancel(&self, id: u64) {
         let mut st = self.shared.lock();
         if let Some(current) = st.current.as_ref().filter(|c| c.id == id) {
@@ -199,7 +203,7 @@ impl JobQueue {
         };
         st.pending.remove(at);
         st.batch_total -= 1;
-        (st.emit)(JobEvent::Failed { id, message: CANCELLED.into() });
+        (st.emit)(JobEvent::Failed { id, message: CANCELLED.into(), original_intact: true });
         if st.current.is_none() && st.pending.is_empty() {
             st.drain();
         } else {
@@ -329,7 +333,7 @@ impl Shared {
 
             let finished = match panic::catch_unwind(AssertUnwindSafe(|| self.run_job(&*runner, &spec, &cancel))) {
                 Ok(event) => event,
-                Err(_) => JobEvent::Failed { id: spec.id, message: UNEXPECTED.into() },
+                Err(_) => JobEvent::Failed { id: spec.id, message: UNEXPECTED.into(), original_intact: true },
             };
 
             let mut st = self.lock();
@@ -344,7 +348,7 @@ impl Shared {
     /// Run one job to its end, including the confirm round-trip. Returns the final event.
     fn run_job(&self, runner: &dyn JobRunner, spec: &JobSpec, cancel: &CancelToken) -> JobEvent {
         let id = spec.id;
-        let cancelled = || JobEvent::Failed { id, message: CANCELLED.into() };
+        let cancelled = || JobEvent::Failed { id, message: CANCELLED.into(), original_intact: true };
         let mut confirmed = false;
         loop {
             let mut eta = EtaTracker::new();
@@ -363,13 +367,13 @@ impl Shared {
                     cancelled()
                 }
                 Ok(JobOutcome::NeedsConfirm { .. }) if cancel.is_cancelled() => cancelled(),
-                Ok(JobOutcome::NeedsConfirm { .. }) => JobEvent::Failed { id, message: UNEXPECTED.into() },
+                Ok(JobOutcome::NeedsConfirm { .. }) => JobEvent::Failed { id, message: UNEXPECTED.into(), original_intact: true },
                 Ok(JobOutcome::Done { output, bytes }) => {
                     JobEvent::Done { id, output: output.display().to_string(), bytes }
                 }
                 Ok(JobOutcome::Unchanged { reason }) => JobEvent::Unchanged { id, reason },
                 Err(_) if cancel.is_cancelled() => cancelled(),
-                Err(e) => JobEvent::Failed { id, message: e.to_string() },
+                Err(e) => JobEvent::Failed { id, message: e.to_string(), original_intact: e.original_intact() },
             };
         }
     }
@@ -637,7 +641,7 @@ mod tests {
         queue.cancel(1);
         let all = events.wait_drained();
 
-        let failed = pos(&all, |e| *e == JobEvent::Failed { id: 1, message: CANCELLED.into() });
+        let failed = pos(&all, |e| *e == JobEvent::Failed { id: 1, message: CANCELLED.into(), original_intact: true });
         assert!(failed < pos(&all, started(2)));
         assert!(all.iter().any(done(2)));
     }
@@ -657,7 +661,7 @@ mod tests {
         queue.cancel(1);
         let all = events.wait_drained();
 
-        assert!(all.contains(&JobEvent::Failed { id: 2, message: CANCELLED.into() }));
+        assert!(all.contains(&JobEvent::Failed { id: 2, message: CANCELLED.into(), original_intact: true }));
         assert!(!all.iter().any(started(2)));
         assert!(all.iter().any(done(3)));
         assert_eq!(log.lock().unwrap().iter().map(|r| r.0).collect::<Vec<_>>(), vec![1, 3]);
@@ -703,7 +707,7 @@ mod tests {
         queue.confirm(1, false);
         let all = events.wait_drained();
 
-        assert!(all.contains(&JobEvent::Failed { id: 1, message: CANCELLED.into() }));
+        assert!(all.contains(&JobEvent::Failed { id: 1, message: CANCELLED.into(), original_intact: true }));
         assert!(all.iter().any(done(2)));
         let runs: Vec<_> = log.lock().unwrap().iter().map(|r| (r.0, r.1)).collect();
         assert_eq!(runs, vec![(1, false), (2, false)]);
@@ -717,7 +721,7 @@ mod tests {
         events.wait_for("NeedsConfirm", |e| matches!(e, JobEvent::NeedsConfirm { .. }));
         queue.cancel(1);
         let all = events.wait_drained();
-        assert!(all.contains(&JobEvent::Failed { id: 1, message: CANCELLED.into() }));
+        assert!(all.contains(&JobEvent::Failed { id: 1, message: CANCELLED.into(), original_intact: true }));
     }
 
     #[test]
@@ -752,7 +756,21 @@ mod tests {
             queue_with(|_, _, _, _| Err(JobError::Message("Not wired yet".into())));
         queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
         let all = events.wait_drained();
-        assert!(all.contains(&JobEvent::Failed { id: 1, message: "Not wired yet".into() }));
+        assert!(all.contains(&JobEvent::Failed { id: 1, message: "Not wired yet".into(), original_intact: true }));
+    }
+
+    #[test]
+    fn a_stranded_commit_says_the_original_was_moved() {
+        let (queue, events, _log) = queue_with(|spec, _, _, _| {
+            let temp = crate::fsops::temp_path_for(&spec.input);
+            Err(crate::fsops::FsError::stranded(&temp, std::io::Error::from_raw_os_error(5)).into())
+        });
+        queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
+        let all = events.wait_drained();
+        let failed = all.iter().find(|e| matches!(e, JobEvent::Failed { .. })).expect("Failed");
+        let JobEvent::Failed { message, original_intact, .. } = failed else { unreachable!() };
+        assert!(message.contains(".a.mp4.hasami-tmp"), "{message}");
+        assert!(!original_intact);
     }
 
     #[test]

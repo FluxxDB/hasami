@@ -130,3 +130,17 @@ fn convert_cancelled_leaves_original_and_no_temp() {
     assert!(!dir.path().join("multitrack_hevc.mov").exists());
     assert!(leftover_temp_files(dir.path()).is_empty());
 }
+
+#[test]
+fn convert_unreadable_input_is_plain_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("not a video.mkv");
+    std::fs::write(&input, b"this is not a video").unwrap();
+
+    let err = run(&input, Target::Mp4).unwrap_err();
+
+    assert_eq!(err.to_string(), "Hasami couldn't read this video.");
+    assert_eq!(std::fs::read(&input).unwrap(), b"this is not a video");
+    assert!(!dir.path().join("not a video.mp4").exists());
+    assert!(leftover_temp_files(dir.path()).is_empty());
+}

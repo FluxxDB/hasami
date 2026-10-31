@@ -31,7 +31,9 @@ export type JobEvent =
   | { type: 'NeedsConfirm'; id: number; width: number; height: number; fps: number }
   | { type: 'Done'; id: number; output: string; bytes: number }
   | { type: 'Unchanged'; id: number; reason: string }
-  | { type: 'Failed'; id: number; message: string }
+  // `original_intact` is false when the original went to the Recycle Bin and `message` says
+  // where the new file is; the window then leaves out "The original file was not changed."
+  | { type: 'Failed'; id: number; message: string; original_intact: boolean }
   | { type: 'Drained' };
 
 export function onJobEvent(cb: (event: JobEvent) => void): Promise<UnlistenFn> {

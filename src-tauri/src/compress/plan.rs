@@ -46,13 +46,10 @@ pub enum CompressDecision {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
-    #[error(
-        "This video is too long to fit in 20 MB at any watchable quality. \
-         The original was not changed."
-    )]
+    #[error("This video is too long to fit in 20 MB at any watchable quality.")]
     TooLong,
 
-    #[error("The video's length could not be determined, so it can't be compressed. The original was not changed.")]
+    #[error("The video's length could not be determined, so it can't be compressed.")]
     UnknownDuration,
 }
 
@@ -240,7 +237,7 @@ mod tests {
         assert!(matches!(err, CompressError::TooLong));
         let msg = err.to_string();
         assert!(msg.contains("too long to fit in 20 MB"), "{msg}");
-        assert!(msg.contains("original was not changed"), "{msg}");
+        assert!(!msg.contains("original"), "the window adds that line itself: {msg}");
     }
 
     #[test]

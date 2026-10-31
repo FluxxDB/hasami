@@ -46,7 +46,7 @@ export const scripts: Record<string, JobEvent[]> = {
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started(plan),
     progress(0.2),
-    { type: 'Failed', id: 1, message: 'ffmpeg could not read the audio stream (exit code 1).' },
+    { type: 'Failed', id: 1, message: 'Couldn\'t process this video.', original_intact: true },
     { type: 'Drained' },
   ],
   unchanged: [

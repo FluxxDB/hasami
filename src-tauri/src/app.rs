@@ -693,7 +693,7 @@ mod tests {
     }
 
     fn failed(id: u64, message: &str) -> JobEvent {
-        JobEvent::Failed { id, message: message.into() }
+        JobEvent::Failed { id, message: message.into(), original_intact: true }
     }
 
     fn done(id: u64) -> JobEvent {

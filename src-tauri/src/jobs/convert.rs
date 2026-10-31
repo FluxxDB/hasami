@@ -11,9 +11,12 @@ use crate::cli::Target;
 use crate::fsops::{commit_replace, temp_path_for, unique_path, with_extension};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
-use crate::verify::verify_output;
+use crate::verify::{verify_output, VerifyError};
 
-use super::{JobError, JobOutcome, JobProgress};
+use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
+
+/// Shown when the converted file fails verification.
+const DIDNT_CHECK_OUT: &str = "Couldn't convert this video: the result didn't check out.";
 
 /// How a file is converted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +127,7 @@ pub fn convert(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<JobOutcome, JobError> {
-    let info = probe(paths, input)?;
+    let info = probe(paths, input).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
     let plan = plan_convert(&info, target.clone())?;
 
     let final_path = unique_path(&with_extension(input, extension(&target)), Some(input));
@@ -153,7 +156,7 @@ fn encode_and_commit(
     run_ffmpeg(paths, &args, info.duration_s, cancel, &mut |fraction| {
         on_progress(JobProgress { pass: 1, passes: 1, fraction })
     })?;
-    verify_output(paths, temp, info.duration_s, None)?;
+    verify_output(paths, temp, info.duration_s, None).map_err(didnt_check_out)?;
     // Last chance to back out before the original is touched.
     if cancel.is_cancelled() {
         return Err(JobError::Cancelled);
@@ -161,6 +164,11 @@ fn encode_and_commit(
     commit_replace(temp, input, final_path)?;
     let bytes = std::fs::metadata(final_path).map(|m| m.len()).unwrap_or(0);
     Ok(JobOutcome::Done { output: final_path.to_path_buf(), bytes })
+}
+
+/// Replace a verification failure's technical text with plain language for the user.
+fn didnt_check_out(_: VerifyError) -> JobError {
+    JobError::Message(DIDNT_CHECK_OUT.to_owned())
 }
 
 #[cfg(test)]
@@ -257,6 +265,12 @@ mod tests {
             plan_convert(&info("mp4", Some("h264"), &["mp3"]), Target::Mov).unwrap(),
             ConvertPlan::ReencodeVideo
         );
+    }
+
+    #[test]
+    fn verify_failures_read_as_plain_language() {
+        let wrong = VerifyError::WrongDuration { expected_s: 13.0, actual_s: 12.34 };
+        assert_eq!(didnt_check_out(wrong).to_string(), DIDNT_CHECK_OUT);
     }
 
     #[test]

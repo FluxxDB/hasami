@@ -88,9 +88,9 @@ describe('reduce', () => {
   });
 
   it('keeps the window open on Failed and shows the message', () => {
-    const s = run([started(), { type: 'Failed', id: 1, message: 'ffmpeg exited with code 1' }]);
+    const s = run([started(), { type: 'Failed', id: 1, message: 'ffmpeg exited with code 1', original_intact: true }]);
     expect(s.phase).toBe('failed');
-    expect(s.failure).toEqual({ fileName: 'Replay 01.mp4', message: 'ffmpeg exited with code 1' });
+    expect(s.failure).toEqual({ fileName: 'Replay 01.mp4', message: 'ffmpeg exited with code 1', originalIntact: true });
     expect(s.shouldClose).toBe(false);
   });
 
@@ -104,19 +104,48 @@ describe('reduce', () => {
   it('Drained after a failure does not close and shows the failure', () => {
     const s = run([
       started(1, 'C:\\a.mp4'),
-      { type: 'Failed', id: 1, message: 'Disk full' },
+      { type: 'Failed', id: 1, message: 'Disk full', original_intact: true },
       started(2, 'C:\\b.mp4'),
       { type: 'Done', id: 2, output: 'C:\\b2.mp4', bytes: 1 },
       { type: 'Drained' },
     ]);
     expect(s.phase).toBe('failed');
-    expect(s.failure).toEqual({ fileName: 'a.mp4', message: 'Disk full' });
+    expect(s.failure).toEqual({ fileName: 'a.mp4', message: 'Disk full', originalIntact: true });
     expect(s.failedCount).toBe(1);
     expect(s.shouldClose).toBe(false);
   });
 
+  it('carries original_intact so the window can leave out "not changed"', () => {
+    const msg = 'Couldn\'t finish saving the new file. It\'s saved as "C:\\a\\.a.mp4.hasami-tmp", and the original is in the Recycle Bin.';
+    const s = run([started(), { type: 'Failed', id: 1, message: msg, original_intact: false }, { type: 'Drained' }]);
+    expect(s.phase).toBe('failed');
+    expect(s.failure).toEqual({ fileName: 'Replay 01.mp4', message: msg, originalIntact: false });
+  });
+
+  it('a later failure never hides one whose original was moved', () => {
+    const s = run([
+      started(1, 'C:\\a.mp4'),
+      { type: 'Failed', id: 1, message: 'saved as x', original_intact: false },
+      started(2, 'C:\\b.mp4'),
+      { type: 'Failed', id: 2, message: 'Disk full', original_intact: true },
+      { type: 'Drained' },
+    ]);
+    expect(s.failure).toEqual({ fileName: 'a.mp4', message: 'saved as x', originalIntact: false });
+    expect(s.failedCount).toBe(2);
+  });
+
+  it('a later failure replaces an earlier ordinary one', () => {
+    const s = run([
+      started(1, 'C:\\a.mp4'),
+      { type: 'Failed', id: 1, message: 'first', original_intact: true },
+      started(2, 'C:\\b.mp4'),
+      { type: 'Failed', id: 2, message: 'second', original_intact: true },
+    ]);
+    expect(s.failure).toEqual({ fileName: 'b.mp4', message: 'second', originalIntact: true });
+  });
+
   it('a Cancelled job is not a failure: next job runs, then the window closes', () => {
-    const mid = run([started(1), { type: 'Failed', id: 1, message: 'Cancelled' }]);
+    const mid = run([started(1), { type: 'Failed', id: 1, message: 'Cancelled', original_intact: true }]);
     expect(mid.phase).toBe('cancelled');
     expect(mid.failedCount).toBe(0);
     const end = [started(2), { type: 'Done', id: 2, output: 'x', bytes: 1 } as JobEvent, { type: 'Drained' } as JobEvent].reduce(reduce, mid);
@@ -142,7 +171,7 @@ describe('reduce', () => {
   });
 
   it('a new batch after Drained starts clean', () => {
-    const s = run([started(1), { type: 'Failed', id: 1, message: 'boom' }, { type: 'Drained' }, started(2)]);
+    const s = run([started(1), { type: 'Failed', id: 1, message: 'boom', original_intact: true }, { type: 'Drained' }, started(2)]);
     expect(s.phase).toBe('running');
     expect(s.failedCount).toBe(0);
     expect(s.failure).toBeNull();
