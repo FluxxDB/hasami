@@ -5,7 +5,7 @@
 
   let { store }: { store: EditorStore } = $props();
 
-  const HINTS = 'Space play · J/K/L shuttle · ←/→ frame · Del delete · Ctrl+Z undo';
+  const HINTS = 'Space play · J/K/L shuttle · ←/→ frame · Shift+V select · Del delete · Ctrl+Z undo';
 
   const tl = $derived(store.timeline);
   const cuts = $derived(cutCount(tl));

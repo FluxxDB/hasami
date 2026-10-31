@@ -166,7 +166,7 @@
   // --- keyboard ------------------------------------------------------------------------------
 
   // Taps that mean "once": holding the key down shouldn't repeat them.
-  const NO_REPEAT = new Set<Command>(['playPause', 'J', 'K', 'L', 'cut', 'delete', 'toggleSnap', 'toggleLinked']);
+  const NO_REPEAT = new Set<Command>(['playPause', 'J', 'K', 'L', 'cut', 'delete', 'toggleSnap', 'toggleLinked', 'selectAtPlayhead']);
   // Keys a focused slider uses itself.
   const SLIDER_KEYS = new Set<Command>(['frameBack', 'frameFwd', 'secBack', 'secFwd', 'prevCut', 'nextCut', 'home', 'end']);
   const TEXT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);

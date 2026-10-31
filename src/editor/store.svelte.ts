@@ -524,6 +524,14 @@ export class EditorStore {
       case 'toggleLinked':
         this.linked = !this.linked;
         return;
+      case 'selectAtPlayhead': {
+        // The video piece under the playhead (on a cut, the one that starts there), picked as a
+        // click would pick it. With no video there, the selection stays as it was.
+        const t = this.playhead;
+        const seg = tl.video.find((s) => t >= s.at && t < s.at + segLen(s));
+        if (seg) this.selectAt(seg.id);
+        return;
+      }
     }
   }
 

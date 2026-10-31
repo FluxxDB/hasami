@@ -16,6 +16,8 @@
   const idle = $derived(!!media && !store.busy);
   const audioOk = $derived(idle && store.canExportAudio);
   const NO_AUDIO = 'This clip has no audio to export';
+  /** Said while the next clip opens, or when it couldn't be opened; empty once it's open. */
+  const opening = $derived(media || !path ? '' : store.error ? "Couldn't open" : 'Opening…');
   const running = $derived(store.exports.running.length);
   // Exports run one at a time, so the first one still running is the one making progress.
   const fraction = $derived(running > 0 ? (store.exports.progress[store.exports.running[0]] ?? 0) : 0);
@@ -42,8 +44,10 @@
     {:else if path}
       <!-- Opening the next clip, or it couldn't be opened (the viewer says why). -->
       <div class="name"><h1 class="fname" title={fileName(path)} data-tauri-drag-region>{fileName(path)}</h1></div>
-      <div class="meta cap" role="status">{store.error ? "Couldn't open" : 'Opening…'}</div>
+      <div class="meta cap">{opening}</div>
     {/if}
+    <!-- Always mounted, so a change of its text ("Opening…", "Couldn't open") is announced. -->
+    <span class="sr-only" role="status">{opening}</span>
   </div>
   <div class="spacer" data-tauri-drag-region></div>
 

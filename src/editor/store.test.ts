@@ -331,6 +331,45 @@ describe('EditorStore commands', () => {
     expect(s.shuttle.dir).toBe(0);
   });
 
+  it('Shift+V selects the video piece under the playhead (and its linked audio); Delete ripples', () => {
+    const s = loaded();
+    s.seek(12);
+    s.command('cut');
+    s.seek(31);
+    s.command('cut');
+    s.seek(20);
+    s.command('selectAtPlayhead');
+    const mid = s.timeline.video[1];
+    expect(new Set(s.selection)).toEqual(new Set([mid.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]));
+    s.command('delete');
+    expect(s.timeline.video.map((v) => v.src)).toEqual([
+      [0, 12],
+      [31, 90],
+    ]);
+    expect(videoEnd(s.timeline)).toBeCloseTo(71, 9);
+  });
+
+  it('Shift+V on a cut picks the piece that starts there; with Linked off, only the video', () => {
+    const s = loaded();
+    s.seek(12);
+    s.command('cut');
+    s.linked = false;
+    s.command('selectAtPlayhead'); // playhead still on the cut at 12
+    expect(s.selection).toEqual([s.timeline.video[1].id]);
+  });
+
+  it('Shift+V with no video under the playhead leaves the selection as it was', () => {
+    const s = loaded();
+    s.seek(12);
+    s.command('cut');
+    const a = s.timeline.audio[0].segs[0].id;
+    s.linked = false;
+    s.selectAt(a);
+    s.command('end'); // the playhead at the video's end has no video piece under it
+    s.command('selectAtPlayhead');
+    expect(s.selection).toEqual([a]);
+  });
+
   it('selectAt honours Linked', () => {
     const s = loaded();
     s.seek(12);

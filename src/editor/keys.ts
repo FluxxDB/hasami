@@ -19,7 +19,8 @@ export type Command =
   | 'undo'
   | 'redo'
   | 'toggleSnap'
-  | 'toggleLinked';
+  | 'toggleLinked'
+  | 'selectAtPlayhead';
 
 export function keyToCommand(e: {
   key: string;
@@ -63,5 +64,7 @@ export function keyToCommand(e: {
   if (letter === 'k') return 'K';
   if (letter === 'l') return 'L';
   if (letter === 'n' && !e.shiftKey) return 'toggleSnap';
+  // Not in Resolve's map: added so a clip can be selected (and deleted) without a mouse.
+  if (letter === 'v' && e.shiftKey) return 'selectAtPlayhead';
   return null;
 }
