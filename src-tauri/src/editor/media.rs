@@ -206,11 +206,13 @@ impl PeakAccumulator {
         self.window_has_samples = false;
     }
 
-    /// The values, including a final partial window.
+    /// The values, including a final partial window, at most [`MAX_PEAKS`]. Decoders often return
+    /// a little more audio than the container's duration, which can tip a long input over.
     fn finish(mut self) -> Vec<f32> {
         if self.window_has_samples {
             self.close_window();
         }
+        self.values.truncate(MAX_PEAKS);
         self.values
     }
 }
@@ -278,10 +280,26 @@ pub fn peaks(paths: &FfmpegPaths, track_file: &Path, duration_s: f64) -> Result<
     Ok(Peaks { rate, values })
 }
 
+/// How many of `found` consecutive thumbnails (frame k at `(k - 1) * interval` seconds) to keep:
+/// those inside the clip, and never more than [`MAX_THUMBS`]. The fps filter can emit a frame at
+/// or past the end, and float rounding in [`thumb_interval`] can let the count creep over the cap.
+fn thumbs_to_keep(found: usize, interval: f64, duration_s: f64) -> usize {
+    (0..found).take_while(|&i| (i as f64) * interval < duration_s).count().min(MAX_THUMBS)
+}
+
 /// Timeline thumbnails of `input`, one per [`thumb_interval`] seconds, as `thumb_%05d.jpg` in
-/// `out_dir`. Frames at or past `duration_s` are dropped.
+/// `out_dir` (any earlier `thumb_*.jpg` there is removed first). Frames at or past `duration_s`
+/// are dropped, and there are never more than [`MAX_THUMBS`].
 pub fn thumbnails(paths: &FfmpegPaths, input: &Path, duration_s: f64, out_dir: &Path) -> Result<Vec<Thumb>, MediaError> {
     std::fs::create_dir_all(out_dir)?;
+    // A reused folder must not leak a previous run's higher-numbered frames into this one.
+    for entry in std::fs::read_dir(out_dir)? {
+        let path = entry?.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with("thumb_") && name.ends_with(".jpg") {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     let interval = thumb_interval(duration_s);
     let args = [
         os("-loglevel"),
@@ -299,20 +317,20 @@ pub fn thumbnails(paths: &FfmpegPaths, input: &Path, duration_s: f64, out_dir: &
     ];
     run_checked(paths, "Making thumbnails", &args)?;
 
-    let mut thumbs = Vec::new();
+    let mut files = Vec::new();
     for k in 1.. {
         let file = out_dir.join(format!("thumb_{k:05}.jpg"));
         if !file.is_file() {
             break;
         }
-        let t = (k - 1) as f64 * interval;
-        if t < duration_s {
-            thumbs.push(Thumb { t, file });
-        } else {
-            // The fps filter can emit one frame past the end; it would hang off the timeline.
-            let _ = std::fs::remove_file(&file);
-        }
+        files.push(file);
     }
+    let keep = thumbs_to_keep(files.len(), interval, duration_s);
+    // Frames past the end (or past the cap) would hang off the timeline.
+    for file in files.split_off(keep) {
+        let _ = std::fs::remove_file(file);
+    }
+    let thumbs = files.into_iter().enumerate().map(|(i, file)| Thumb { t: i as f64 * interval, file }).collect();
     Ok(thumbs)
 }
 
@@ -372,6 +390,27 @@ mod tests {
     fn thumb_interval_bounds_count() {
         assert_eq!(thumb_interval(90.0), 1.0);
         assert_eq!(thumb_interval(7200.0), 24.0);
+    }
+
+    #[test]
+    fn thumbnails_are_dropped_past_the_end_and_capped() {
+        // A 5 s clip at 1 s spacing: the frame at t = 5 is dropped.
+        assert_eq!(thumbs_to_keep(6, 1.0, 5.0), 5);
+        // A long clip where the extra end-of-clip frame (or float creep) offers 301.
+        let duration = 7300.5;
+        let interval = thumb_interval(duration);
+        assert_eq!(thumbs_to_keep(301, interval, duration), MAX_THUMBS);
+        assert_eq!(thumbs_to_keep(0, 1.0, 5.0), 0);
+    }
+
+    #[test]
+    fn peaks_never_exceed_the_cap() {
+        // rate 8000 -> one sample per value, so 200,001 samples would be 200,001 values.
+        let mut acc = PeakAccumulator::new(8000.0);
+        for _ in 0..=MAX_PEAKS {
+            acc.push(1);
+        }
+        assert_eq!(acc.finish().len(), MAX_PEAKS);
     }
 
     fn s16le(samples: &[i16]) -> Vec<u8> {
