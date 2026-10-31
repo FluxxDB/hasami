@@ -23,6 +23,17 @@ fn probe_multitrack() {
 }
 
 #[test]
+fn probe_reports_a_rotated_video_at_its_display_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = common::fixture_rotated_mov(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+
+    let video = probe(&paths, &file).unwrap().video.expect("video stream");
+
+    assert_eq!((video.width, video.height), (360, 640));
+}
+
+#[test]
 fn probe_video_only() {
     let dir = tempfile::tempdir().unwrap();
     let file = common::fixture_video_only(dir.path());

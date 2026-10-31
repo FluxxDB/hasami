@@ -94,6 +94,16 @@ pub fn fixture_small_h264_mp4(dir: &Path) -> PathBuf {
     out
 }
 
+/// 2 s of 640x360 H.264 + AAC in a `.mov` whose display matrix turns it 90°, as phones record
+/// portrait video: shown as 360x640.
+pub fn fixture_rotated_mov(dir: &Path) -> PathBuf {
+    let plain = fixture_small_h264_mp4(dir);
+    let out = out_path(dir, "rotated.mov");
+    ffmpeg(&["-display_rotation", "90", "-i", s(&plain), "-c", "copy", s(&out)]);
+    std::fs::remove_file(&plain).unwrap();
+    out
+}
+
 /// 3 s of 320x180 H.264 with six AAC tracks: a 440 Hz sine peaking at -12 dBFS, then five silent ones.
 pub fn fixture_six_tracks(dir: &Path) -> PathBuf {
     let out = out_path(dir, "six_tracks.mp4");

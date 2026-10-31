@@ -10,6 +10,8 @@ use super::{hidden_command, FfmpegPaths, MediaError};
 pub struct VideoStream {
     pub index: usize,
     pub codec: String,
+    /// Display size: the coded size with width and height swapped for a 90° or 270° rotation,
+    /// matching the frames ffmpeg's autorotate hands to filters.
     pub width: u32,
     pub height: u32,
     /// From `avg_frame_rate`.
@@ -80,6 +82,33 @@ struct RawStream {
     sample_rate: Option<String>,
     bit_rate: Option<String>,
     disposition: Option<RawDisposition>,
+    #[serde(default)]
+    side_data_list: Vec<RawSideData>,
+    tags: Option<RawTags>,
+}
+
+#[derive(Deserialize)]
+struct RawSideData {
+    /// Degrees, from a "Display Matrix" entry, e.g. `-90`.
+    rotation: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct RawTags {
+    /// Older files and ffmpeg versions: degrees as a string, e.g. `"90"`.
+    rotate: Option<String>,
+}
+
+impl RawStream {
+    /// Whether the picture is displayed turned a quarter (90° or 270°, either direction).
+    fn quarter_turned(&self) -> bool {
+        let rotation = self
+            .side_data_list
+            .iter()
+            .find_map(|d| d.rotation)
+            .or_else(|| self.tags.as_ref()?.rotate.as_deref()?.trim().parse().ok());
+        rotation.is_some_and(|r| (r.round() as i64).rem_euclid(180) == 90)
+    }
 }
 
 #[derive(Deserialize)]
@@ -110,11 +139,15 @@ fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
         let bit_rate = s.bit_rate.as_deref().and_then(|b| b.parse().ok());
         match s.codec_type.as_deref() {
             Some("video") if video.is_none() && !s.disposition.as_ref().is_some_and(|d| d.attached_pic == 1) => {
+                let (mut width, mut height) = (s.width.unwrap_or(0), s.height.unwrap_or(0));
+                if s.quarter_turned() {
+                    std::mem::swap(&mut width, &mut height);
+                }
                 video = Some(VideoStream {
                     index: s.index,
                     codec,
-                    width: s.width.unwrap_or(0),
-                    height: s.height.unwrap_or(0),
+                    width,
+                    height,
                     fps: s.avg_frame_rate.as_deref().map(parse_rate).unwrap_or(0.0),
                     bit_rate,
                 });
@@ -157,7 +190,38 @@ fn parse_rate(rate: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rate;
+    use super::{parse, parse_rate};
+    use std::path::Path;
+
+    /// ffprobe JSON for a 1920x1080 stream with the given extra stream fields.
+    fn video_json(extra: &str) -> Vec<u8> {
+        format!(
+            r#"{{"streams":[{{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+                "avg_frame_rate":"30/1"{extra}}}],
+              "format":{{"duration":"10.0","size":"1000"}}}}"#
+        )
+        .into_bytes()
+    }
+
+    fn size(extra: &str) -> (u32, u32) {
+        let v = parse(Path::new("x.mp4"), &video_json(extra)).unwrap().video.unwrap();
+        (v.width, v.height)
+    }
+
+    #[test]
+    fn a_quarter_turned_video_reports_its_display_size() {
+        let matrix = |deg: &str| {
+            format!(r#","side_data_list":[{{"side_data_type":"Display Matrix","displaymatrix":"...","rotation":{deg}}}]"#)
+        };
+        assert_eq!(size(&matrix("-90")), (1080, 1920));
+        assert_eq!(size(&matrix("90")), (1080, 1920));
+        assert_eq!(size(&matrix("270")), (1080, 1920));
+        assert_eq!(size(&matrix("180")), (1920, 1080));
+        assert_eq!(size(&matrix("0")), (1920, 1080));
+        assert_eq!(size(r#","tags":{"rotate":"90"}"#), (1080, 1920));
+        assert_eq!(size(r#","tags":{"language":"und"}"#), (1920, 1080));
+        assert_eq!(size(""), (1920, 1080));
+    }
 
     #[test]
     fn rates() {

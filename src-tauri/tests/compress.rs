@@ -329,6 +329,23 @@ fn compress_cancel_during_pass_2_removes_temp() {
 }
 
 #[test]
+fn compress_keeps_a_rotated_video_upright_and_unsquashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_rotated_mov(dir.path());
+
+    let (_, info) = done(run(&input, false).0);
+
+    let video = info.video.expect("video stream");
+    let aspect = video.width as f64 / video.height as f64;
+    assert!(
+        (aspect - 360.0 / 640.0).abs() < 0.02,
+        "output {}x{} should be portrait 9:16",
+        video.width,
+        video.height
+    );
+}
+
+#[test]
 fn compress_unreadable_input_is_plain_language() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("not a video.mp4");
