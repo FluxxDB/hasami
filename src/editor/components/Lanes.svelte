@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, type Peaks, type Thumb } from '../api';
   import { LANE_BG, MUTED_COLOR, formatClock, mixHex, trackColor } from '../display';
-  import { rulerStep, timeToX } from '../geometry';
+  import { edgeAt, rulerStep, timeToX, xToTime } from '../geometry';
   import type { EditorStore } from '../store.svelte';
   import { segLen, videoEnd, type Seg } from '../timeline';
 
@@ -21,6 +21,120 @@
   const fileName = $derived(store.media?.file_name ?? '');
 
   const x = (t: number) => timeToX(t, pps, sx);
+
+  let el = $state() as HTMLDivElement;
+  /** Pointer x relative to the lanes' left edge. */
+  const localX = (e: MouseEvent) => e.clientX - el.getBoundingClientRect().left;
+  const pointerTime = (e: MouseEvent) => xToTime(localX(e), store.pxPerSecond, store.scrollX);
+
+  /** Which lane shows the resize cursor ('v', or 'a' + track index), and whether a drag is on. */
+  let hoverLane = $state<string | null>(null);
+  let dragging = $state(false);
+
+  function edgeUnder(segs: Seg[], e: MouseEvent) {
+    const boxes = segs.map((s) => ({ id: s.id, at: s.at, len: segLen(s) }));
+    return edgeAt(boxes, localX(e), store.pxPerSecond, store.scrollX);
+  }
+
+  /** Follows one pointer until it's released: `move` on every move, then `done` once. */
+  function track(e: PointerEvent, move: (ev: PointerEvent) => void, done: () => void = () => {}) {
+    const target = e.currentTarget as HTMLElement;
+    try {
+      target.setPointerCapture(e.pointerId); // keeps the drag when the pointer leaves the lane
+    } catch {
+      // No capture for this pointer; the drag still works while it stays over the lane.
+    }
+    const end = () => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', end);
+      target.removeEventListener('pointercancel', end);
+      done();
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', end);
+    target.addEventListener('pointercancel', end);
+  }
+
+  /** A press on the timeline takes focus off a slider, so the arrow keys step frames again. */
+  function blurControls() {
+    const a = document.activeElement;
+    if (a instanceof HTMLElement && a !== document.body) a.blur();
+  }
+
+  /** Click and drag on the ruler or on empty lane: moves the playhead. */
+  function scrub(e: PointerEvent) {
+    store.seek(pointerTime(e));
+    track(e, (ev) => store.seek(pointerTime(ev)));
+  }
+
+  /**
+   * In a lane: near an edge, resize that segment (snapping, one undo step for the whole drag);
+   * on a segment, select it; on empty lane, clear the selection and move the playhead.
+   */
+  function onLaneDown(e: PointerEvent, segs: Seg[]) {
+    if (e.button !== 0 || !store.media) return;
+    e.preventDefault();
+    blurControls();
+    const hit = edgeUnder(segs, e);
+    if (hit) {
+      const seg = segs.find((s) => s.id === hit.segId)!;
+      // Keep the grab offset, so the edge doesn't jump to the pointer.
+      const edgeT = hit.edge === 'start' ? seg.at : seg.at + segLen(seg);
+      const offset = edgeT - pointerTime(e);
+      store.beginEdgeDrag(hit.segId, hit.edge);
+      dragging = true;
+      track(
+        e,
+        (ev) => store.dragEdgeTo(pointerTime(ev) + offset),
+        () => {
+          store.endEdgeDrag();
+          dragging = false;
+        },
+      );
+      return;
+    }
+    const t = pointerTime(e);
+    const seg = segs.find((s) => t >= s.at && t < s.at + segLen(s));
+    if (seg) {
+      store.selectAt(seg.id);
+    } else {
+      store.clearSelection();
+      scrub(e);
+    }
+  }
+
+  function onRulerDown(e: PointerEvent) {
+    if (e.button !== 0 || !store.media) return;
+    e.preventDefault();
+    blurControls();
+    scrub(e);
+  }
+
+  function onLaneHover(e: PointerEvent, segs: Seg[], lane: string) {
+    if (dragging || e.buttons !== 0) return;
+    const key = edgeUnder(segs, e) ? lane : null;
+    if (key !== hoverLane) hoverLane = key;
+  }
+
+  // Ctrl+scroll zooms around the pointer; plain scroll pans sideways. Not passive, so it can
+  // stop the page itself from scrolling or zooming.
+  $effect(() => {
+    const onWheel = (e: WheelEvent) => {
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1;
+      if (e.ctrlKey) {
+        e.preventDefault();
+        store.zoomAt(Math.exp(-e.deltaY * unit * 0.002), localX(e));
+        return;
+      }
+      const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) * unit;
+      if (d !== 0) {
+        e.preventDefault();
+        store.pan(d);
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  });
 
   /** A clip's box (1px inset each side, as in the mockup) and the part of it that's on screen. */
   function box(at: number, len: number) {
@@ -78,6 +192,7 @@
   interface WaveParams {
     peaks: Peaks | undefined;
     srcStart: number; // source time at the canvas's left edge
+    phase: number; // px from the clip's left edge to the canvas's, so bars stay put while panning
     pps: number;
     width: number;
     color: string;
@@ -98,7 +213,7 @@
       if (!p.peaks || p.peaks.values.length === 0) return;
       const { rate, values } = p.peaks;
       ctx.fillStyle = p.color;
-      for (let bx = 0; bx < w; bx += BAR_PX) {
+      for (let bx = -(p.phase % BAR_PX); bx < w; bx += BAR_PX) {
         const a = p.srcStart + bx / p.pps;
         const i0 = Math.max(0, Math.floor(a * rate));
         const i1 = Math.min(values.length, Math.max(i0 + 1, Math.ceil((a + BAR_PX / p.pps) * rate)));
@@ -113,15 +228,24 @@
   }
 </script>
 
-<div class="lanes" bind:clientWidth={width}>
-  <div class="ruler" aria-hidden="true">
+<div class="lanes" class:dragging bind:this={el} bind:clientWidth={width}>
+  <div class="ruler" aria-hidden="true" onpointerdown={onRulerDown}>
     {#each ticks as tk (tk.t)}
       <div class="tick" class:major={tk.major} style:left="{tk.x}px"></div>
       {#if tk.label}<span class="tick-label" style:left="{tk.x + 5}px">{tk.label}</span>{/if}
     {/each}
   </div>
 
-  <div class="lane" aria-label="V1">
+  <!-- Pointer-only, like any NLE timeline; every action here also has a key (spec 5.5). -->
+  <div
+    class="lane"
+    class:edge={hoverLane === 'v'}
+    role="group"
+    aria-label="V1"
+    onpointerdown={(e) => onLaneDown(e, tl.video)}
+    onpointermove={(e) => onLaneHover(e, tl.video, 'v')}
+    onpointerleave={() => (hoverLane = null)}
+  >
     {#each tl.video as seg (seg.id)}
       {@const b = box(seg.at, segLen(seg))}
       {#if b.onScreen}
@@ -137,7 +261,16 @@
 
   {#each tl.audio as tr, n (tr.index)}
     {@const c = tr.muted ? MUTED_COLOR : trackColor(n)}
-    <div class="lane" aria-label="A{n + 1}" style:--c={c}>
+    <div
+      class="lane"
+      class:edge={hoverLane === `a${tr.index}`}
+      role="group"
+      aria-label="A{n + 1}"
+      style:--c={c}
+      onpointerdown={(e) => onLaneDown(e, tr.segs)}
+      onpointermove={(e) => onLaneHover(e, tr.segs, `a${tr.index}`)}
+      onpointerleave={() => (hoverLane = null)}
+    >
       {#each silences(tr.segs) as gap (gap.at)}
         {@const b = box(gap.at, gap.len)}
         {#if b.onScreen}
@@ -157,6 +290,7 @@
               use:waveform={{
                 peaks: store.peaks[tr.index],
                 srcStart: seg.src[0] + (b.visA + 1) / pps,
+                phase: b.visA,
                 pps,
                 width: b.visB - b.visA,
                 color: sel ? mixHex(c, BONE, 0.45) : mixHex(c, LANE_BG, 0.88),
@@ -183,6 +317,9 @@
   {#if overhangs}
     <div class="video-end" style:left="{x(vEnd)}px"></div>
     <span class="video-end-label cap" style:left="{x(vEnd) + 8}px">Video ends</span>
+  {/if}
+  {#if store.snapAt !== null}
+    <div class="snap-line" style:left="{x(store.snapAt)}px"></div>
   {/if}
   <div class="playhead" style:left="{x(store.playhead)}px"></div>
 </div>
@@ -231,6 +368,11 @@
     position: relative;
     height: 64px;
     border-bottom: 1px solid var(--line);
+  }
+  .lane.edge,
+  .lanes.dragging,
+  .lanes.dragging .lane {
+    cursor: col-resize;
   }
   .lane.empty {
     height: 40px;
@@ -343,6 +485,17 @@
     top: 34px;
     color: var(--ash);
     white-space: nowrap;
+    pointer-events: none;
+  }
+
+  /* Where a dragged edge snapped: a 1px bone line through every lane. */
+  .snap-line {
+    position: absolute;
+    top: 28px;
+    bottom: 0;
+    z-index: 3;
+    width: 1px;
+    background: var(--bone);
     pointer-events: none;
   }
 

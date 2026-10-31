@@ -18,6 +18,7 @@ mount(EditorWindow, {
     onMinimize: () => (win ? void win.minimize() : console.info('[mock] window.minimize()')),
     onToggleMaximize: () => (win ? void win.toggleMaximize() : console.info('[mock] window.toggleMaximize()')),
     onClose: () => (win ? void win.close() : console.info('[mock] window.close()')),
+    forceProxy: isMock && mockParam === 'proxy',
   },
 });
 
@@ -55,6 +56,9 @@ async function openFile(path: string) {
 async function boot() {
   await api.onEvent((e) => {
     if (e.type === 'Files') addFiles(e.paths);
+    else if (e.type === 'ProxyProgress' && e.session === store.media?.session && store.proxyFraction !== null) {
+      store.proxyFraction = e.fraction;
+    }
   });
   addFiles(await api.files());
   // Rust holds editor events until the listener is attached.

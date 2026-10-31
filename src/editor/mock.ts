@@ -4,8 +4,11 @@
 //
 // `?mock=1` also applies a few edits after load (see `demoEdits`) so the page shows the approved
 // mockup's state: cuts, a linked selection, silence on A2 and audio past the end of the video.
-// `?mock=fresh` shows the clip exactly as opened.
-import type { EditorApi, EditorMedia, Peaks, Thumb } from './api';
+// `?mock=fresh` shows the clip exactly as opened. `?mock=proxy` also acts as if the video can't be
+// decoded, so the "Preparing preview" step runs (with ProxyProgress events) before it's playable.
+//
+// There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
+import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
 import type { EditorStore } from './store.svelte';
 import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
@@ -86,12 +89,29 @@ function thumbs(): Thumb[] {
 
 const later = <T>(value: T, ms = 40): Promise<T> => new Promise((r) => setTimeout(() => r(value), ms));
 
+const listeners = new Set<(e: EditorEvent) => void>();
+
+/** A proxy that takes about two seconds, reporting progress the way the Rust side does. */
+function proxy(session: number): Promise<string> {
+  return new Promise((resolve) => {
+    let fraction = 0;
+    const timer = setInterval(() => {
+      fraction = Math.min(1, fraction + 0.08);
+      for (const cb of listeners) cb({ type: 'ProxyProgress', session, fraction });
+      if (fraction >= 1) {
+        clearInterval(timer);
+        resolve('');
+      }
+    }, 160);
+  });
+}
+
 export const mockApi: EditorApi = {
   files: () => later([PATH]),
   open: () => later(media),
   peaks: (_session, index) => later(peaksFor(index), 120),
   thumbs: () => later(thumbs(), 80),
-  proxy: () => later(''),
+  proxy,
   exportClip: (request) => {
     console.info('[mock] editor_export', request);
     return later(1);
@@ -105,7 +125,10 @@ export const mockApi: EditorApi = {
     return later(undefined);
   },
   ready: () => later(undefined, 0),
-  onEvent: async () => () => {},
+  onEvent: async (cb) => {
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  },
   src: (path) => path,
 };
 

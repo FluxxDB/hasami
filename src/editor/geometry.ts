@@ -73,6 +73,12 @@ export function zoomPos(pxPerSecond: number): number {
   return clamp(p, 0, 1);
 }
 
+/** The zoom level for a zoom slider position (the inverse of `zoomPos`). */
+export function zoomFromPos(pos: number): number {
+  const p = clamp(pos, 0, 1);
+  return MIN_PX_PER_SECOND * (MAX_PX_PER_SECOND / MIN_PX_PER_SECOND) ** p;
+}
+
 // Major ruler intervals (seconds) and the minor tick spacing under each.
 const RULER_STEPS: { major: number; minor: number }[] = [
   { major: 1, minor: 0.2 },
@@ -103,4 +109,11 @@ export function rulerStep(pxPerSecond: number): { major: number; minor: number }
 export function faderPos(gainDb: number, minDb = -60, maxDb = 6): number {
   if (gainDb <= minDb) return 0;
   return clamp(Math.sqrt(10 ** ((gainDb - maxDb) / 20)), 0, 1);
+}
+
+/** The gain for a volume slider position (the inverse of `faderPos`), to a tenth of a dB. */
+export function faderDb(pos: number, minDb = -60, maxDb = 6): number {
+  if (!(pos > 0)) return minDb;
+  const db = maxDb + 40 * Math.log10(Math.min(pos, 1));
+  return db <= minDb ? minDb : Math.round(db * 10) / 10;
 }

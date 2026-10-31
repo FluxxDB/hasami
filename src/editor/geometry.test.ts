@@ -3,12 +3,14 @@ import {
   EDGE_HIT_PX,
   SNAP_PX,
   edgeAt,
+  faderDb,
   faderPos,
   fitZoom,
   rulerStep,
   timeToX,
   xToTime,
   zoomAround,
+  zoomFromPos,
   zoomPos,
 } from './geometry';
 
@@ -101,5 +103,20 @@ describe('faderPos', () => {
     expect(faderPos(6)).toBe(1);
     expect(faderPos(-60)).toBe(0);
     expect(faderPos(-6)).toBeLessThan(faderPos(0));
+  });
+});
+
+describe('slider inverses', () => {
+  it('zoomFromPos undoes zoomPos', () => {
+    for (const pps of [2, 12, 20, 333, 2000]) expect(zoomFromPos(zoomPos(pps))).toBeCloseTo(pps, 6);
+    expect(zoomFromPos(-1)).toBe(2);
+    expect(zoomFromPos(2)).toBe(2000);
+  });
+  it('faderDb undoes faderPos, to a tenth of a dB, with the bottom at −60', () => {
+    for (const db of [-40, -6, 0, 3.5, 6]) expect(faderDb(faderPos(db))).toBeCloseTo(db, 6);
+    expect(faderDb(0)).toBe(-60);
+    expect(faderDb(0.0001)).toBe(-60);
+    expect(faderDb(1)).toBe(6);
+    expect(faderDb(0.7)).toBe(Math.round((6 + 40 * Math.log10(0.7)) * 10) / 10);
   });
 });
