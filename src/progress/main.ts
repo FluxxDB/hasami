@@ -43,7 +43,7 @@ async function start() {
       // Rust buffers job events until this window is listening; tell it once the listener is attached.
       listen: (cb) =>
         onJobEvent(cb).then((off) => {
-          void invoke('progress_ready');
+          invoke('progress_ready').catch((err) => console.error('progress_ready failed', err));
           return off;
         }),
       onCancel: (id) => void cancelJob(id),

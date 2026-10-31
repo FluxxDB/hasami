@@ -21,6 +21,8 @@ use crate::media::run::CancelToken;
 
 /// `Failed.message` for every user cancel. The progress window keys on this exact string.
 pub const CANCELLED: &str = "Cancelled";
+/// `Failed.message` when a runner breaks its contract (panics, or asks to confirm twice).
+const UNEXPECTED: &str = "Something went wrong while processing this file.";
 
 /// What a job does to its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +133,12 @@ pub trait JobRunner: Send {
         cancel: &CancelToken,
         progress: &mut dyn FnMut(JobProgress),
     ) -> Result<JobOutcome, JobError>;
+
+    /// Planned output `(width, height, fps)`, shown in the window as soon as the job starts.
+    /// Called just before `Started`; `None` when unknown (the job itself reports any error).
+    fn preview(&self, _spec: &JobSpec) -> Option<(u32, u32, f64)> {
+        None
+    }
 }
 
 /// The serial queue. Dropping it stops the worker once the current job finishes.
@@ -297,23 +305,31 @@ impl Shared {
                 let cancel = CancelToken::new();
                 st.batch_started += 1;
                 st.current = Some(Current { id: spec.id, cancel: cancel.clone(), confirm: Confirm::NotAsked });
+                (spec, cancel)
+            };
+
+            // File system and probe work happens outside the lock; a cancel meanwhile still lands
+            // on `current` and is honoured by the runner.
+            let input_bytes = std::fs::metadata(&spec.input).map(|m| m.len()).unwrap_or(0);
+            let preview = panic::catch_unwind(AssertUnwindSafe(|| runner.preview(&spec))).ok().flatten();
+            {
+                let st = self.lock();
                 st.emit_snapshot();
                 (st.emit)(JobEvent::Started {
                     id: spec.id,
                     input: spec.input.display().to_string(),
-                    input_bytes: std::fs::metadata(&spec.input).map(|m| m.len()).unwrap_or(0),
+                    input_bytes,
                     kind: Some(spec.kind.name().to_string()),
                     ext: spec.kind.ext().map(str::to_string),
-                    width: None,
-                    height: None,
-                    fps: None,
+                    width: preview.map(|p| p.0),
+                    height: preview.map(|p| p.1),
+                    fps: preview.map(|p| p.2),
                 });
-                (spec, cancel)
-            };
+            }
 
             let finished = match panic::catch_unwind(AssertUnwindSafe(|| self.run_job(&*runner, &spec, &cancel))) {
                 Ok(event) => event,
-                Err(_) => JobEvent::Failed { id: spec.id, message: "Something went wrong while processing this file.".into() },
+                Err(_) => JobEvent::Failed { id: spec.id, message: UNEXPECTED.into() },
             };
 
             let mut st = self.lock();
@@ -347,9 +363,7 @@ impl Shared {
                     cancelled()
                 }
                 Ok(JobOutcome::NeedsConfirm { .. }) if cancel.is_cancelled() => cancelled(),
-                Ok(JobOutcome::NeedsConfirm { .. }) => {
-                    JobEvent::Failed { id, message: "Something went wrong while processing this file.".into() }
-                }
+                Ok(JobOutcome::NeedsConfirm { .. }) => JobEvent::Failed { id, message: UNEXPECTED.into() },
                 Ok(JobOutcome::Done { output, bytes }) => {
                     JobEvent::Done { id, output: output.display().to_string(), bytes }
                 }
@@ -750,6 +764,37 @@ mod tests {
         queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
         let all = events.wait_drained();
         assert!(all.contains(&JobEvent::Progress { id: 1, pass: 2, passes: 2, fraction: 0.25, eta_s: None }));
+    }
+
+    #[test]
+    fn preview_fills_the_started_event() {
+        struct Previewing;
+        impl JobRunner for Previewing {
+            fn run(
+                &self,
+                spec: &JobSpec,
+                _: bool,
+                _: &CancelToken,
+                _: &mut dyn FnMut(JobProgress),
+            ) -> Result<JobOutcome, JobError> {
+                done_outcome(spec)
+            }
+            fn preview(&self, spec: &JobSpec) -> Option<(u32, u32, f64)> {
+                (spec.kind == JobKind::Compress).then_some((1280, 720, 60.0))
+            }
+        }
+        let events = Events::default();
+        let queue = JobQueue::new(Box::new(Previewing), events.sink());
+        queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
+        queue.enqueue(JobKind::Convert(Target::Mp4), paths(&["b.mkv"]));
+        let all = events.wait_for("Done 2", done(2));
+        let started: Vec<_> = all.iter().filter(|e| matches!(e, JobEvent::Started { .. })).collect();
+        assert!(
+            matches!(started[0], JobEvent::Started { width: Some(1280), height: Some(720), fps: Some(f), .. } if *f == 60.0),
+            "{:?}",
+            started[0]
+        );
+        assert!(matches!(started[1], JobEvent::Started { width: None, height: None, fps: None, .. }));
     }
 
     #[test]
