@@ -407,6 +407,34 @@ describe('snapCandidates while dragging a video edge', () => {
   });
 });
 
+describe('snapCandidates and the linked flag', () => {
+  // Cut at 12: the right piece of the cut on A0 starts at 12 with a different link than video seg 0.
+  const cut12 = cutAt(createTimeline(D, FPS, [0]), 12);
+  const dragEnd = { segId: cut12.video[0].id, edge: 'end' as const };
+
+  it('linked: audio edges at or after the dragged edge ripple with it, so they are dropped', () => {
+    const c = snapCandidates(cut12, 5, dragEnd, true);
+    expect([...new Set(c)].sort((x, y) => x - y)).toEqual([0, 5]);
+    expect(snapCandidates(cut12, 5, dragEnd)).toEqual(snapCandidates(cut12, 5, dragEnd, true));
+  });
+
+  it('unlinked: audio does not move, so its edges (including the cut piece) stay targets', () => {
+    const c = snapCandidates(cut12, 5, dragEnd, false);
+    expect(c).toContain(12); // A0's first end and its right piece's start
+    expect(c).toContain(90); // A0's last end
+    expect(c).toContain(0);
+    expect(c).toContain(5);
+  });
+
+  it('linked: audio edges before the dragged edge stay targets', () => {
+    const tl = cutAt(cutAt(createTimeline(D, FPS, [0]), 12), 31);
+    const c = snapCandidates(tl, 0, { segId: tl.video[2].id, edge: 'end' }, true);
+    expect(c).toContain(12);
+    expect(c).toContain(31);
+    expect(c).not.toContain(90);
+  });
+});
+
 describe('export request', () => {
   it('toExportRequest lists video pieces and per-track audio', () => {
     const tl = linkedDeleted();

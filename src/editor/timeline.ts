@@ -313,16 +313,20 @@ export function snapCandidates(
   tl: Timeline,
   playhead: number,
   exclude?: { segId: string; edge: 'start' | 'end' },
+  linked = true,
 ): number[] {
   const dragged = exclude ? tl.video.find((s) => s.id === exclude.segId) : undefined;
-  // Dragging a video edge moves everything from that edge on (the ripple), and the linked audio
-  // edges on the same side. None of those can be snap targets, or the edge snaps back to where it
-  // started.
+  // Dragging a video edge moves everything from that edge on (the ripple). With `linked`, audio
+  // from that point on ripples too, and the linked audio edges on the same side move with it.
+  // None of those can be snap targets, or the edge snaps back to where it started. Without
+  // `linked`, audio does not move and stays a target.
   const from = dragged && exclude ? (exclude.edge === 'start' ? dragged.at : segEnd(dragged)) : Infinity;
   const movesWithDrag = (s: Seg, isVideo: boolean, edge: 'start' | 'end'): boolean => {
     if (!dragged || !exclude) return false;
     if (isVideo) return (edge === 'start' ? s.at : segEnd(s)) >= from - EPS;
-    return s.link === dragged.link && edge === exclude.edge;
+    if (!linked) return false;
+    const t = edge === 'start' ? s.at : segEnd(s);
+    return t >= from - EPS || (s.link === dragged.link && edge === exclude.edge);
   };
 
   const out = [playhead];
