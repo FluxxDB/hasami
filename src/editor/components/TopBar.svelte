@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { metaLine } from '../display';
+  import { fileName, metaLine } from '../display';
   import type { EditorStore } from '../store.svelte';
 
   interface Props {
@@ -12,6 +12,13 @@
   let { store, onMinimize, onToggleMaximize, onClose }: Props = $props();
 
   const media = $derived(store.media);
+  const path = $derived(store.currentPath);
+  const idle = $derived(!!media && !store.busy);
+  const audioOk = $derived(idle && store.canExportAudio);
+  const NO_AUDIO = 'This clip has no audio to export';
+  const running = $derived(store.exports.running.length);
+  // Exports run one at a time, so the first one still running is the one making progress.
+  const fraction = $derived(running > 0 ? (store.exports.progress[store.exports.running[0]] ?? 0) : 0);
 </script>
 
 {#snippet arrow()}
@@ -20,19 +27,50 @@
   </svg>
 {/snippet}
 
-<header class="topbar" data-tauri-drag-region>
+<header class="topbar" class:queued={store.queueMode} data-tauri-drag-region>
   <div class="brand"><b>HASAMI</b><em>quick trim</em></div>
-  <div class="vsep"></div>
+  <div class="vsep brand-sep"></div>
   <div class="file">
     {#if media}
       <div class="name">
-        <span class="fname">{media.file_name}</span>
+        <span class="fname" title={media.file_name}>{media.file_name}</span>
         {#if store.edited}<span class="dot" aria-hidden="true"></span><span class="cap edited">Edited</span>{/if}
       </div>
       <div class="meta cap">{metaLine(media)}</div>
+    {:else if path}
+      <!-- Opening the next clip, or it couldn't be opened (the viewer says why). -->
+      <div class="name"><span class="fname" title={fileName(path)}>{fileName(path)}</span></div>
+      <div class="meta cap">{store.error ? "Couldn't open" : 'Opening…'}</div>
     {/if}
   </div>
   <div class="spacer" data-tauri-drag-region></div>
+
+  <!-- The queue's place and controls, with the running exports under them: stacked, so the
+       file name keeps its room at the minimum window width. -->
+  {#if (store.queueMode && path) || running > 0}
+    <div class="side">
+      {#if store.queueMode && path}
+        <div class="queue">
+          <span class="pos cap">{store.queue.index + 1} of {store.queue.files.length}</span>
+          <button type="button" class="link cap" disabled={store.busy} onclick={() => store.skip()}>Skip</button>
+          <!-- Not while the clip is still opening: the file is being read. -->
+          <button
+            type="button"
+            class="link cap"
+            disabled={store.busy || (!media && !store.error)}
+            onclick={() => store.discard()}>Discard</button
+          >
+        </div>
+      {/if}
+      {#if running > 0}
+        <div class="exporting cap" role="status">
+          <span>Exporting {running}</span>
+          <span class="rail" aria-hidden="true"><i style:width="{Math.round(fraction * 100)}%"></i></span>
+        </div>
+      {/if}
+    </div>
+    <div class="vsep"></div>
+  {/if}
 
   <button
     type="button"
@@ -44,9 +82,22 @@
   >
     <span class="switch" class:on={store.fit20} aria-hidden="true"></span>Fit to 20 MB
   </button>
-  <button type="button" class="link cap" disabled={!media}>Export audio</button>
-  <button type="button" class="btn cap" disabled={!media}>Export + save raw {@render arrow()}</button>
-  <button type="button" class="btn primary cap" disabled={!media}>Quick export {@render arrow()}</button>
+  <!-- aria-disabled rather than disabled, so the hint still shows on hover and focus. -->
+  <button
+    type="button"
+    class="link cap"
+    aria-disabled={!audioOk}
+    title={media && !store.canExportAudio ? NO_AUDIO : undefined}
+    aria-describedby={media && !store.canExportAudio ? 'no-audio-hint' : undefined}
+    onclick={() => audioOk && store.exportClip('audio')}>Export audio</button
+  >
+  {#if media && !store.canExportAudio}<span id="no-audio-hint" class="sr-only">{NO_AUDIO}</span>{/if}
+  <button type="button" class="btn cap" disabled={!idle} onclick={() => store.exportClip('save_raw')}
+    >Export + save raw {@render arrow()}</button
+  >
+  <button type="button" class="btn primary cap" disabled={!idle} onclick={() => store.exportClip('quick')}
+    >Quick export {@render arrow()}</button
+  >
 
   <div class="winctl">
     <button type="button" class="ctl" aria-label="Minimize" onclick={onMinimize}>
@@ -161,8 +212,60 @@
       color 0.12s ease-out,
       text-decoration-color 0.12s ease-out;
   }
-  button:disabled {
+  button:disabled,
+  button[aria-disabled='true'] {
     opacity: 0.4;
+  }
+  button[aria-disabled='true'] {
+    cursor: default;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .side {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+  }
+  .exporting {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ash);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .rail {
+    flex: 1;
+    min-width: 32px;
+    height: 1px;
+    background: var(--iron);
+  }
+  .rail i {
+    display: block;
+    height: 100%;
+    background: var(--bone);
+    transition: width 0.2s ease-out;
+  }
+
+  .queue {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .pos {
+    color: var(--pebble);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .toggle {
@@ -210,7 +313,7 @@
     text-decoration-color: var(--iron);
     text-underline-offset: 4px;
   }
-  .link:hover:not(:disabled) {
+  .link:hover:not(:disabled, [aria-disabled='true']) {
     text-decoration-color: var(--bone);
   }
 
@@ -268,11 +371,41 @@
     .link {
       padding: 6px 2px;
     }
+    .queue {
+      gap: 8px;
+    }
     .winctl {
       margin-left: 0;
     }
     .ctl {
       width: 30px;
+    }
+  }
+
+  /* The queue's controls take room from the file name; tighten sooner so the name stays readable. */
+  @media (max-width: 1440px) {
+    .topbar.queued {
+      gap: 10px;
+      padding-left: 14px;
+    }
+    .queued .btn {
+      padding: 10px 12px;
+      gap: 8px;
+    }
+    .queued .link {
+      padding: 6px 2px;
+    }
+    .queued .winctl {
+      margin-left: 0;
+    }
+  }
+
+  /* Near the minimum width a queue needs the wordmark's room for the file name (the title bar
+     and taskbar still say Hasami). */
+  @media (max-width: 1100px) {
+    .queued .brand,
+    .queued .brand-sep {
+      display: none;
     }
   }
 
@@ -285,6 +418,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     button,
+    .rail i,
     .switch,
     .switch::after {
       transition: none;

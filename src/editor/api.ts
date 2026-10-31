@@ -40,7 +40,11 @@ export type EditorEvent =
   | { type: 'ExportProgress'; id: number; fraction: number }
   | { type: 'ExportDone'; id: number; input: string; output: string; bytes: number }
   | { type: 'ExportFailed'; id: number; input: string; message: string; original_intact: boolean }
-  | { type: 'ProxyProgress'; session: number; fraction: number };
+  | { type: 'ProxyProgress'; session: number; fraction: number }
+  /** A deferred discard (`discard` with `after`) sent the clip to the Recycle Bin. */
+  | { type: 'DiscardDone'; path: string }
+  /** A deferred discard kept the clip: an export it waited for didn't finish, or recycling failed. */
+  | { type: 'DiscardKept'; path: string; message: string };
 
 export interface EditorApi {
   files(): Promise<string[]>;
@@ -49,7 +53,11 @@ export interface EditorApi {
   thumbs(session: number): Promise<Thumb[]>;
   proxy(session: number): Promise<string>;
   exportClip(request: ExportRequest): Promise<number>;
-  discard(path: string): Promise<void>;
+  /**
+   * Recycles `path` now when `after` is empty; otherwise the Rust side recycles it once every
+   * export in `after` is done (even if this window has closed) and reports with `Discard*`.
+   */
+  discard(path: string, after: number[]): Promise<void>;
   close(session: number): Promise<void>;
   ready(): Promise<void>;
   onEvent(cb: (e: EditorEvent) => void): Promise<() => void>;
@@ -64,7 +72,7 @@ const tauriApi: EditorApi = {
   thumbs: (session) => invoke('editor_thumbs', { session }),
   proxy: (session) => invoke('editor_proxy', { session }),
   exportClip: (request) => invoke('editor_export', { request }),
-  discard: (path) => invoke('editor_discard', { path }),
+  discard: (path, after) => invoke('editor_discard', { path, after }),
   close: (session) => invoke('editor_close', { session }),
   ready: () => invoke('editor_ready'),
   onEvent: (cb) => listen<EditorEvent>(EDITOR_EVENT, (e) => cb(e.payload)),
@@ -85,7 +93,7 @@ export const api: EditorApi = {
   thumbs: (session) => backend.then((b) => b.thumbs(session)),
   proxy: (session) => backend.then((b) => b.proxy(session)),
   exportClip: (request) => backend.then((b) => b.exportClip(request)),
-  discard: (path) => backend.then((b) => b.discard(path)),
+  discard: (path, after) => backend.then((b) => b.discard(path, after)),
   close: (session) => backend.then((b) => b.close(session)),
   ready: () => backend.then((b) => b.ready()),
   onEvent: (cb) => backend.then((b) => b.onEvent(cb)),

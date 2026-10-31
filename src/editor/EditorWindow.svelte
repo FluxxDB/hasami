@@ -1,8 +1,10 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api, type EditorMedia } from './api';
+  import ConfirmDialog from './components/ConfirmDialog.svelte';
   import Lanes from './components/Lanes.svelte';
   import StatusBar from './components/StatusBar.svelte';
+  import Summary from './components/Summary.svelte';
   import Toolbar from './components/Toolbar.svelte';
   import TopBar from './components/TopBar.svelte';
   import TrackHeaders from './components/TrackHeaders.svelte';
@@ -26,6 +28,15 @@
 
   const FIT_MARGIN_PX = 24; // room after the last frame, so the end edge stays grabbable
   const PREVIEW_FAILED = "Couldn't show a preview of this video. Cuts and exports still work.";
+
+  // The summary closes the window once every export has finished and none failed (once: later
+  // events would otherwise ask again while it's closing).
+  let closing = false;
+  $effect(() => {
+    if (!store.shouldClose || closing) return;
+    closing = true;
+    untrack(onClose);
+  });
 
   // A newly loaded clip fits the lanes as soon as their width is known.
   $effect(() => {
@@ -76,7 +87,7 @@
   $effect(() => {
     const e = engine;
     const m = store.media;
-    if (e && m) untrack(() => openPreview(e, m));
+    if (e) untrack(() => (m ? openPreview(e, m) : closePreview(e)));
   });
 
   $effect(() => {
@@ -110,6 +121,14 @@
     } else {
       e.load(src, tracks);
     }
+  }
+
+  /** Between clips: stop, and let go of the previous clip's files so its session can delete them. */
+  function closePreview(e: PlaybackEngine) {
+    tracks = [];
+    proxied = false;
+    e.pause();
+    e.load('', []);
   }
 
   function makeProxy(e: PlaybackEngine, m: EditorMedia) {
@@ -153,7 +172,8 @@
   const TEXT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
 
   function onKeydown(e: KeyboardEvent) {
-    if (!store.media) return;
+    // While the dialog asks, its own buttons have the keyboard.
+    if (!store.media || store.confirm) return;
     const target = e.target instanceof HTMLElement ? e.target : null;
     if (target?.isContentEditable || target instanceof HTMLTextAreaElement) return;
     if (target instanceof HTMLInputElement && TEXT_TYPES.has(target.type)) return;
@@ -170,14 +190,19 @@
 <svelte:window onkeydown={onKeydown} />
 
 <main class="win">
-  <TopBar {store} {onMinimize} {onToggleMaximize} {onClose} />
-  <Viewer {store} bind:video {onVideoError} />
-  <Toolbar {store} />
-  <div class="timeline">
-    <TrackHeaders {store} />
-    <Lanes {store} bind:width={store.viewWidth} />
-  </div>
-  <StatusBar {store} />
+  {#if store.showSummary}
+    <Summary {store} {onMinimize} {onClose} />
+  {:else}
+    <TopBar {store} {onMinimize} {onToggleMaximize} {onClose} />
+    <Viewer {store} bind:video {onVideoError} />
+    <Toolbar {store} />
+    <div class="timeline">
+      <TrackHeaders {store} />
+      <Lanes {store} bind:width={store.viewWidth} />
+    </div>
+    <StatusBar {store} />
+  {/if}
+  <ConfirmDialog {store} />
 </main>
 
 <style>

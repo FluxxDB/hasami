@@ -55,3 +55,8 @@ export function metaLine(m: EditorMedia): string {
   parts.push(`${n} audio ${n === 1 ? 'track' : 'tracks'}`, formatClock(m.duration_s), formatBytes(m.size_bytes));
   return parts.join(' · ');
 }
+
+/** The last part of a Windows or POSIX path: "C:\\clips\\a.mp4" → "a.mp4". */
+export function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
