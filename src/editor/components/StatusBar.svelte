@@ -5,6 +5,8 @@
 
   let { store }: { store: EditorStore } = $props();
 
+  const HINTS = 'Space play · J/K/L shuttle · ←/→ frame · Del delete · Ctrl+Z undo';
+
   const tl = $derived(store.timeline);
   const cuts = $derived(cutCount(tl));
   // A linked selection is one selection however many tracks it spans: count distinct links.
@@ -30,7 +32,8 @@
     </span>
   {/if}
   <span class="spacer"></span>
-  <span class="hints">Space play · J/K/L shuttle · ←/→ frame · Del delete · Ctrl+Z undo</span>
+  <!-- Cut short in a narrow window; the tooltip has the whole line. -->
+  <span class="hints" title={HINTS}>{HINTS}</span>
 </footer>
 
 <style>

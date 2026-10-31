@@ -45,8 +45,8 @@
       // No capture for this pointer; the drag still works while it stays over the lane.
     }
     let ended = false;
-    const end = () => {
-      if (ended) return;
+    const end = (ev: PointerEvent) => {
+      if (ended || ev.pointerId !== e.pointerId) return; // another pointer's release isn't ours
       ended = true;
       target.removeEventListener('pointermove', move);
       target.removeEventListener('pointerup', end);
@@ -241,6 +241,8 @@
       <div class="tick" class:major={tk.major} style:left="{tk.x}px"></div>
       {#if tk.label}<span class="tick-label" style:left="{tk.x + 5}px">{tk.label}</span>{/if}
     {/each}
+    <!-- The playhead's head lives in the sticky ruler, so it stays in view when the lanes scroll. -->
+    <div class="playhead-head" style:left="{x(store.playhead)}px"></div>
   </div>
 
   <!-- Pointer-only, like any NLE timeline; every action here also has a key (spec 5.5). -->
@@ -375,6 +377,11 @@
     position: relative;
     height: 64px;
     border-bottom: 1px solid var(--line);
+  }
+  /* Drags here are ours: a touch drag scrubs or trims instead of panning the view. */
+  .ruler,
+  .lane {
+    touch-action: none;
   }
   .lane.edge,
   .lanes.dragging,
@@ -515,14 +522,14 @@
     background: var(--red);
     pointer-events: none;
   }
-  .playhead::before {
-    content: '';
+  .playhead-head {
     position: absolute;
     top: 0;
-    left: -6px;
     width: 13px;
     height: 14px;
+    margin-left: -6px;
     background: var(--red);
     clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+    pointer-events: none;
   }
 </style>

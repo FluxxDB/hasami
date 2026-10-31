@@ -77,7 +77,7 @@
       </div>
     {/if}
     {#if store.error}
-      <p class="message">{store.error}</p>
+      <p class="message" role="alert">{store.error}</p>
     {/if}
   </div>
 

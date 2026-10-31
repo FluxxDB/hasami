@@ -69,6 +69,10 @@
     background: var(--charcoal);
     min-height: 100%;
   }
+  /* A control tabbed into view stops below the sticky ruler row instead of under it. */
+  .heads :global(:is(button, input)) {
+    scroll-margin-top: 36px;
+  }
   .ruler-head {
     position: sticky;
     top: 0;
