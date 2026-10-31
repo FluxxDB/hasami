@@ -634,10 +634,17 @@ impl Dispatcher {
                 Effect::Recycle(path) => {
                     // The shell's recycle can take a moment; its result comes back as a message.
                     let tx = self.app.state::<AppState>().tx.clone();
-                    let _ = thread::Builder::new().name("hasami-recycle".into()).spawn(move || {
-                        let result = recycle(&path);
-                        let _ = tx.send(Msg::Recycled { path, result });
+                    let target = path.clone();
+                    let spawned = thread::Builder::new().name("hasami-recycle".into()).spawn(move || {
+                        let result = recycle(&target);
+                        let _ = tx.send(Msg::Recycled { path: target, result });
                     });
+                    if let Err(e) = spawned {
+                        // Resolve it anyway (the clip stays), so the app isn't kept waiting.
+                        eprintln!("hasami: {DISCARD_FAILED} {e}");
+                        let settled = self.settled();
+                        todo.extend(self.flow.on_recycled(path, Err(DISCARD_FAILED.to_owned()), settled));
+                    }
                 }
                 Effect::Decline(id) => self.queue.confirm(id, false),
                 Effect::Exit => self.app.exit(0),

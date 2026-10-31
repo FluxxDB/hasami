@@ -688,6 +688,48 @@ describe('EditorStore queue and exports', () => {
     expect(s.shouldClose).toBe(false);
   });
 
+  it('a discard outcome that arrives before editor_discard answers still lands', async () => {
+    const s = await queued(FILES.slice(0, 2));
+    await s.exportClip('audio');
+    // Rust can resolve the discard (e.g. the export had just failed) and emit before it replies.
+    vi.mocked(api.discard).mockImplementationOnce(async (path) => {
+      s.applyEvent({ type: 'DiscardKept', path, message: 'Kept.' });
+    });
+    await s.discard();
+    expect(s.results[1]).toMatchObject({ action: 'discard', state: 'failed', message: 'Kept.' });
+
+    const t = await queued(FILES.slice(0, 2));
+    await t.exportClip('audio');
+    vi.mocked(api.discard).mockImplementationOnce(async (path) => t.applyEvent({ type: 'DiscardDone', path }));
+    await t.discard();
+    await t.skip();
+    t.applyEvent({ type: 'ExportDone', id: 101, input: FILES[0], output: 'a.mp3', bytes: 1 });
+    expect(t.results[1].state).toBe('none');
+    expect(t.shouldClose).toBe(true);
+  });
+
+  it('a deferred discard that Rust refuses leaves no waiting row and reopens the clip', async () => {
+    const s = await queued();
+    await s.exportClip('audio');
+    vi.mocked(api.discard).mockRejectedValueOnce("Couldn't set this clip aside for the Recycle Bin.");
+    await s.discard();
+    expect(s.log.some((l) => l.action === 'discard')).toBe(false);
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.notice).toBe("Couldn't set this clip aside for the Recycle Bin.");
+  });
+
+  it('a clip waiting to be recycled is not re-queued by a new trim of it', async () => {
+    const s = await queued(FILES.slice(0, 2));
+    await s.exportClip('audio');
+    await s.discard();
+    s.applyEvent({ type: 'Files', paths: [FILES[0]] });
+    expect(s.queue.files).toEqual(FILES.slice(0, 2));
+    s.applyEvent({ type: 'DiscardKept', path: FILES[0], message: 'Kept.' });
+    // Once it's been kept, it can be trimmed again.
+    s.applyEvent({ type: 'Files', paths: [FILES[0]] });
+    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0]]);
+  });
+
   it('the summary waits for a deferred discard to be done before closing', async () => {
     const s = await queued(FILES.slice(0, 2));
     await s.exportClip('audio');

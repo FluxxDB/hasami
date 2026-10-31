@@ -229,11 +229,14 @@ export class EditorStore {
 
   /**
    * Adds files to the end of the queue, once per path among those not dealt with yet (a file
-   * already exported, skipped or failed can be trimmed again). At the summary, the first opens.
+   * already exported, skipped, kept or failed can be trimmed again; one waiting to be recycled
+   * can't). At the summary, the first opens.
    */
   addFiles(paths: string[]): void {
     const resume = this.showSummary;
-    const pending = new Set(this.queue.files.slice(this.queue.index));
+    // A clip waiting to be recycled is as good as gone: don't open it again.
+    const waiting = this.log.flatMap((l) => (l.action === 'discard' && l.state === 'waiting' ? [l.input] : []));
+    const pending = new Set([...this.queue.files.slice(this.queue.index), ...waiting]);
     for (const p of paths) {
       if (pending.has(p)) continue;
       pending.add(p);
@@ -334,14 +337,17 @@ export class EditorStore {
       // An export of this clip still to finish (an Export audio) needs the file: the Rust side
       // recycles it after that, or keeps it if the export fails.
       const after = this.runningExportsOf(path);
+      // Logged before asking: Rust may report the outcome (Discard*) before its reply arrives.
+      const at = this.log.length;
+      this.log.push({ action: 'discard', input: path, state: after.length > 0 ? 'waiting' : 'done' });
       try {
         await api.discard(path, after);
       } catch (err) {
+        this.log.splice(at, 1);
         await this.openFile(path);
         this.notice = plain(err, DISCARD_FAILED);
         return;
       }
-      this.log.push({ action: 'discard', input: path, state: after.length > 0 ? 'waiting' : 'done' });
       await this.next();
     } finally {
       this.busy = false;

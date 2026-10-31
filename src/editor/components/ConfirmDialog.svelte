@@ -57,8 +57,7 @@
 <dialog
   bind:this={dialog}
   role="alertdialog"
-  aria-label="Unsaved edits"
-  aria-describedby="confirm-message"
+  aria-labelledby="confirm-message"
   oncancel={onCancel}
   onclose={onClose}
   onkeydown={onKeydown}
