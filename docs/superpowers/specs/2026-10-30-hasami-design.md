@@ -202,7 +202,7 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 
 1. Write output to a temp file in the same folder (e.g. `.<name>.hasami-tmp`).
 2. Verify it: ffprobe opens it, the duration matches the expected timeline length within tolerance, and for size-limited encodes the size is ≤ the limit.
-3. Only then rename the temp file to its final name, and only after that move or recycle the original.
+3. Only then rename the temp file to its final name, and only after that move or recycle the original. When the output takes the original's own name, the order is: check the original can be deleted → recycle the original under its real name (so Restore brings back the right file) → rename the temp file with a non-replacing rename. If that rename fails after the original is recycled, the new file is kept where it is and the error says where it is and that the original is in the Recycle Bin. Plan 2's Quick Export reuses this same commit routine (`fsops::commit_replace`).
 4. On any failure or cancel, delete the temp file and leave the original exactly as it was. Report the error in plain language.
 5. A file locked by another program fails cleanly with a message. Nothing is half-done.
 6. **Recycle Bin limits (Dang's choice):** the Recycle Bin is treated as a short undo window, not a backup. If Windows drops old raws once the bin fills, that's accepted. Hasami itself always recycles silently and never calls a permanent delete. For a file that's too big for the bin, or a drive with no bin, use whatever Windows does with no prompt shown. If Windows would show a dialog, the builder should suppress it so no UI appears (*builder's call on the exact flags*).
