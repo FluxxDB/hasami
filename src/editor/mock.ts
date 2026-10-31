@@ -7,12 +7,23 @@
 // `?mock=fresh` shows the clip exactly as opened. `?mock=proxy` also acts as if the video can't be
 // decoded, so the "Preparing preview" step runs (with ProxyProgress events) before it's playable.
 //
+// `?mock=queue` opens a trim queue of three clips (as opened, no demo edits) whose exports run one
+// at a time for a few seconds each, like the job queue; `?mock=queue-fail` makes the second
+// clip's export fail, so the summary stays up.
+//
 // There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
 import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
+import { fileName } from './display';
 import type { EditorStore } from './store.svelte';
 import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
 const PATH = 'C:\\Users\\ledan\\Videos\\Replay 2026-10-09 23-40-17.mp4';
+const PARAM = new URLSearchParams(location.search).get('mock') ?? '';
+const QUEUE = PARAM.startsWith('queue')
+  ? [PATH, 'C:\\Users\\ledan\\Videos\\Replay 2026-10-09 23-52-04.mp4', 'C:\\Users\\ledan\\Videos\\Replay 2026-10-10 00-07-31.mp4']
+  : [PATH];
+const FAILING = PARAM === 'queue-fail' ? QUEUE[1] : null;
+const EXPORT_MS = 4000;
 const DURATION = 90;
 const PEAK_RATE = 50;
 const THUMB_EVERY = 2;
@@ -106,15 +117,47 @@ function proxy(session: number): Promise<string> {
   });
 }
 
+let sessions = 0;
+let jobs = 0;
+/** The job queue runs one export at a time. */
+let lastExport: Promise<void> = Promise.resolve();
+
+function emit(e: EditorEvent): void {
+  for (const cb of listeners) cb(e);
+}
+
+function runExport(id: number, input: string, mode: string): Promise<void> {
+  return new Promise((resolve) => {
+    emit({ type: 'ExportStarted', id, input });
+    let fraction = 0;
+    const timer = setInterval(() => {
+      fraction = Math.min(1, fraction + 0.05);
+      emit({ type: 'ExportProgress', id, fraction });
+      if (fraction < 1) return;
+      clearInterval(timer);
+      if (input === FAILING && mode !== 'audio') {
+        emit({ type: 'ExportFailed', id, input, message: "Couldn't export this clip: the result didn't check out.", original_intact: true });
+      } else {
+        const name = fileName(input).replace(/\.[^.]+$/, mode === 'audio' ? '.mp3' : '.mp4');
+        const output = input.replace(/[^\\]+$/, `[CLIPPED] ${name}`);
+        emit({ type: 'ExportDone', id, input, output, bytes: mode === 'audio' ? 1_400_000 : 18_600_000 });
+      }
+      resolve();
+    }, EXPORT_MS / 20);
+  });
+}
+
 export const mockApi: EditorApi = {
-  files: () => later([PATH]),
-  open: () => later(media),
+  files: () => later(QUEUE),
+  open: (path) => later({ ...media, session: ++sessions, path, file_name: fileName(path) }),
   peaks: (_session, index) => later(peaksFor(index), 120),
   thumbs: () => later(thumbs(), 80),
   proxy,
   exportClip: (request) => {
     console.info('[mock] editor_export', request);
-    return later(1);
+    const id = ++jobs;
+    lastExport = lastExport.then(() => runExport(id, request.input, request.mode));
+    return later(id);
   },
   discard: (path) => {
     console.info('[mock] editor_discard', { path });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRACK_COLORS, formatClock, formatDb, metaLine, mixHex, trackColor } from './display';
+import { TRACK_COLORS, fileName, formatClock, formatDb, metaLine, mixHex, trackColor } from './display';
 import type { EditorMedia } from './api';
 
 describe('formatClock', () => {
@@ -56,5 +56,13 @@ describe('metaLine', () => {
   });
   it('drops the video parts for an audio-only file and singularises one track', () => {
     expect(metaLine({ ...media, video: null, tracks: [media.tracks[0]] })).toBe('1 audio track · 1:30 · 412 MB');
+  });
+});
+
+describe('fileName', () => {
+  it('keeps the last part of a Windows or POSIX path', () => {
+    expect(fileName('C:\\Users\\ledan\\Videos\\Replay 1.mp4')).toBe('Replay 1.mp4');
+    expect(fileName('/tmp/a.mkv')).toBe('a.mkv');
+    expect(fileName('a.mp4')).toBe('a.mp4');
   });
 });

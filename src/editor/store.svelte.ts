@@ -2,8 +2,12 @@
 // one is an undo step. The timeline itself lives in `history.present`, except while an edge drag
 // or a volume slider is moving: that live state is `preview`, and it becomes one undo step when
 // the drag or the slider is released.
+//
+// It also runs the trim queue: which file is open, the exports handed to the Rust job queue and
+// how they ended, and the end-of-queue summary. Leaving a clip (export, Skip, Discard) closes its
+// editor session on the Rust side.
 
-import type { EditorMedia, Peaks, Thumb } from './api';
+import { api, type EditorEvent, type EditorMedia, type Peaks, type Thumb } from './api';
 import { SNAP_PX, zoomAround } from './geometry';
 import { initHistory, isEdited, push, redo, undo, type History } from './history';
 import type { Command } from './keys';
@@ -20,9 +24,43 @@ import {
   setMuted,
   snap,
   snapCandidates,
+  hasAudibleAudio,
+  toExportRequest,
   videoEnd,
+  type ExportRequest,
   type Timeline,
 } from './timeline';
+
+export type ExportMode = ExportRequest['mode'];
+
+type LogEntry =
+  | { action: ExportMode; id: number; input: string }
+  | { action: 'skip'; input: string }
+  /** A discard waits for the clip's own exports (an Export audio still queued reads the file). */
+  | { action: 'discard'; input: string; state: 'waiting' | 'recycling' | 'done' | 'failed'; message?: string };
+/** What the unsaved-edits dialog is asking about. */
+export type ConfirmKind = 'close' | 'skip' | 'discard';
+
+/** One line of the end-of-queue summary: something done to a file, and how it ended. */
+export interface Result {
+  input: string;
+  action: ExportMode | 'skip' | 'discard';
+  /** `none` for a skip or a finished discard; `running` for a discard waiting on an export. */
+  state: 'running' | 'done' | 'failed' | 'none';
+  fraction: number;
+  output?: string;
+  bytes?: number;
+  message?: string;
+  originalIntact?: boolean;
+}
+
+// Shown when a command fails without a message of its own.
+const OPEN_FAILED = "Couldn't open this clip.";
+const EXPORT_FAILED = "Couldn't start the export.";
+const DISCARD_FAILED = "Couldn't send this clip to the Recycle Bin.";
+
+/** The Rust commands answer failures with a plain-language string. */
+const plain = (err: unknown, fallback: string): string => (typeof err === 'string' && err ? err : fallback);
 
 const DEFAULT_FPS = 30; // for audio-only files, which have no frame rate of their own
 const PLAY_1X: Shuttle = { dir: 1, speed: 1 };
@@ -71,15 +109,34 @@ export class EditorStore {
 
   queue = $state<{ files: string[]; index: number }>({ files: [], index: 0 });
   exports = $state<{
+    /** Job ids handed to the queue and not yet finished. */
     running: number[];
-    done: { input: string; output: string }[];
-    failed: { input: string; message: string; originalIntact: boolean }[];
-  }>({ running: [], done: [], failed: [] });
+    done: { id: number; input: string; output: string; bytes: number }[];
+    failed: { id: number; input: string; message: string; originalIntact: boolean }[];
+    /** Latest progress (0..1) of each running export. */
+    progress: Record<number, number>;
+  }>({ running: [], done: [], failed: [], progress: {} });
+  /** What was done to each file, in order, for the summary. */
+  log = $state<LogEntry[]>([]);
 
   /** A plain-language message when the clip couldn't be opened. */
   error = $state<string | null>(null);
+  /** A plain-language message when an export couldn't start or a discard failed (status bar). */
+  notice = $state<string | null>(null);
+  /** The unsaved-edits question being asked, if any; `answer` replies. */
+  confirm = $state<ConfirmKind | null>(null);
+  /** An export, Skip or Discard is under way; the buttons wait for it. */
+  busy = $state(false);
+
+  /** Called after each clip loads (the browser mock applies its demo edits here). */
+  afterLoad: ((store: EditorStore) => void) | null = null;
 
   private drag: { segId: string; edge: 'start' | 'end'; base: Timeline } | null = null;
+  private reply: ((ok: boolean) => void) | null = null;
+  /** Exports already finished, in case their last event beats `editor_export`'s answer. */
+  private finished = new Set<number>();
+  /** Bumped by each open, so an answer for a clip no longer wanted is dropped. */
+  private openSeq = 0;
 
   get timeline(): Timeline {
     return this.preview ?? this.history.present;
@@ -87,6 +144,57 @@ export class EditorStore {
 
   get edited(): boolean {
     return isEdited(this.history);
+  }
+
+  /** The file the queue is on (open, opening, or failed to open); null at the summary. */
+  get currentPath(): string | null {
+    return this.queue.files[this.queue.index] ?? null;
+  }
+
+  /** More than one file: the top bar shows "2 OF 3", Skip and Discard. */
+  get queueMode(): boolean {
+    return this.queue.files.length > 1;
+  }
+
+  /** Every file has been dealt with. */
+  get showSummary(): boolean {
+    return this.queue.files.length > 0 && this.queue.index >= this.queue.files.length;
+  }
+
+  get canExportAudio(): boolean {
+    return this.media !== null && hasAudibleAudio(this.timeline);
+  }
+
+  /**
+   * The window can close by itself: every file is dealt with and no export failed. A queue waits
+   * for its exports, so the summary can report them; a single clip closes as soon as its export
+   * is handed over (spec 5.7), and a late failure shows in the progress window instead.
+   */
+  get shouldClose(): boolean {
+    const e = this.exports;
+    const discarding = this.log.some((l) => l.action === 'discard' && l.state !== 'done');
+    return this.showSummary && e.failed.length === 0 && !discarding && (e.running.length === 0 || !this.queueMode);
+  }
+
+  /** The summary's lines, in the order things were done. */
+  get results(): Result[] {
+    const e = this.exports;
+    return this.log.map((entry): Result => {
+      if (entry.action === 'skip') return { input: entry.input, action: 'skip', state: 'none', fraction: 0 };
+      if (entry.action === 'discard') {
+        const state = entry.state === 'done' ? 'none' : entry.state === 'failed' ? 'failed' : 'running';
+        return { input: entry.input, action: 'discard', state, fraction: 0, message: entry.message };
+      }
+      const { id, input, action } = entry;
+      const done = e.done.find((d) => d.id === id);
+      if (done) return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes };
+      const failed = e.failed.find((f) => f.id === id);
+      if (failed) {
+        const { message, originalIntact } = failed;
+        return { input, action, state: 'failed', fraction: 0, message, originalIntact };
+      }
+      return { input, action, state: 'running', fraction: e.progress[id] ?? 0 };
+    });
   }
 
   /** Quick export at source quality: the source's average rate × the kept video length. */
@@ -111,6 +219,225 @@ export class EditorStore {
     this.shuttle = STOPPED;
     this.proxyFraction = null;
     this.error = null;
+    this.notice = null;
+  }
+
+  // --- queue -------------------------------------------------------------------------------
+
+  /** Adds files to the end of the queue (once per path). At the summary, the first new one opens. */
+  addFiles(paths: string[]): void {
+    const resume = this.showSummary;
+    for (const p of paths) if (!this.queue.files.includes(p)) this.queue.files.push(p);
+    const next = this.currentPath;
+    if (resume && next) void this.openFile(next);
+  }
+
+  /** Opens `path` and loads it; thumbnails and waveforms fill in as they arrive (spec 6). */
+  async openFile(path: string): Promise<void> {
+    const seq = ++this.openSeq;
+    this.error = null;
+    let media: EditorMedia;
+    try {
+      media = await api.open(path);
+    } catch (err) {
+      if (seq === this.openSeq) this.error = plain(err, OPEN_FAILED);
+      return;
+    }
+    if (seq !== this.openSeq || this.currentPath !== path) {
+      this.closeSession(media.session); // moved on while it opened
+      return;
+    }
+    this.load(media);
+    this.afterLoad?.(this);
+
+    // A late answer for a clip that is no longer open is dropped.
+    const session = media.session;
+    const current = () => this.media?.session === session;
+    api
+      .thumbs(session)
+      .then((thumbs) => current() && (this.thumbs = thumbs))
+      .catch((err) => console.error('editor_thumbs failed', err));
+    for (const t of media.tracks.filter((t) => !t.empty)) {
+      api
+        .peaks(session, t.index)
+        .then((p) => current() && (this.peaks = { ...this.peaks, [t.index]: p }))
+        .catch((err) => console.error('editor_peaks failed', err));
+    }
+  }
+
+  /** Leaves the current clip and opens the next queued file; with none left, the summary shows. */
+  async advance(): Promise<void> {
+    this.leave();
+    this.queue.index += 1;
+    const next = this.currentPath;
+    if (next) await this.openFile(next);
+  }
+
+  /** Hands the edit to the job queue. A video export then moves on; Export audio stays. */
+  async exportClip(mode: ExportMode): Promise<void> {
+    const m = this.media;
+    if (!m || this.busy || (mode === 'audio' && !this.canExportAudio)) return;
+    this.commitLive();
+    const fit20 = mode !== 'audio' && this.fit20;
+    const request = toExportRequest(this.history.present, m.session, m.path, mode, fit20);
+    this.busy = true;
+    this.notice = null;
+    try {
+      // Waited for: until the queue has the job, closing the window could lose it.
+      let id: number;
+      try {
+        id = await api.exportClip(request);
+      } catch (err) {
+        this.notice = plain(err, EXPORT_FAILED);
+        return;
+      }
+      this.log.push({ action: mode, id, input: m.path });
+      this.track(id);
+      if (mode !== 'audio') await this.advance();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** Moves on and leaves the file as it is; an edited clip asks first. */
+  async skip(): Promise<void> {
+    const path = this.currentPath;
+    if (!path || this.busy) return;
+    this.busy = true;
+    try {
+      if (this.edited && !(await this.ask('skip'))) return;
+      this.log.push({ action: 'skip', input: path });
+      await this.advance();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** Sends the file to the Recycle Bin and moves on; an edited clip asks first. */
+  async discard(): Promise<void> {
+    const path = this.currentPath;
+    if (!path || this.busy) return;
+    this.busy = true;
+    try {
+      if (this.edited && !(await this.ask('discard'))) return;
+      // The session's ffmpeg runs let go of the file before it's recycled.
+      this.leave();
+      if (this.exporting(path)) {
+        // Its Export audio is still queued or running: recycle it once that finishes (`finish`).
+        this.log.push({ action: 'discard', input: path, state: 'waiting' });
+      } else {
+        try {
+          await api.discard(path);
+        } catch (err) {
+          await this.openFile(path);
+          this.notice = plain(err, DISCARD_FAILED);
+          return;
+        }
+        this.log.push({ action: 'discard', input: path, state: 'done' });
+      }
+      this.queue.index += 1;
+      const next = this.currentPath;
+      if (next) await this.openFile(next);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** Asks the unsaved-edits question; resolves true to go ahead, false to keep editing. */
+  ask(kind: ConfirmKind): Promise<boolean> {
+    this.reply?.(false);
+    this.confirm = kind;
+    return new Promise((resolve) => (this.reply = resolve));
+  }
+
+  answer(ok: boolean): void {
+    const reply = this.reply;
+    this.reply = null;
+    this.confirm = null;
+    reply?.(ok);
+  }
+
+  /** Applies an event from the Rust side. */
+  applyEvent(e: EditorEvent): void {
+    const x = this.exports;
+    switch (e.type) {
+      case 'Files':
+        this.addFiles(e.paths);
+        return;
+      case 'ExportStarted':
+        this.track(e.id);
+        return;
+      case 'ExportProgress':
+        if (x.running.includes(e.id)) x.progress[e.id] = e.fraction;
+        return;
+      case 'ExportDone':
+        this.finish(e.id);
+        x.done.push({ id: e.id, input: e.input, output: e.output, bytes: e.bytes });
+        return;
+      case 'ExportFailed':
+        this.finish(e.id);
+        x.failed.push({ id: e.id, input: e.input, message: e.message, originalIntact: e.original_intact });
+        return;
+      case 'ProxyProgress':
+        if (e.session === this.media?.session && this.proxyFraction !== null) this.proxyFraction = e.fraction;
+        return;
+    }
+  }
+
+  /** Follows export `id` until it finishes (a no-op for one already followed or finished). */
+  private track(id: number): void {
+    if (!this.finished.has(id) && !this.exports.running.includes(id)) this.exports.running.push(id);
+  }
+
+  private finish(id: number): void {
+    this.finished.add(id);
+    const x = this.exports;
+    x.running = x.running.filter((r) => r !== id);
+    delete x.progress[id];
+    for (const entry of this.log) {
+      if (entry.action === 'discard' && entry.state === 'waiting' && !this.exporting(entry.input)) {
+        void this.recycle(entry);
+      }
+    }
+  }
+
+  /** Whether an export of `path` is still queued or running. */
+  private exporting(path: string): boolean {
+    const running = new Set(this.exports.running);
+    return this.log.some((l) => 'id' in l && l.input === path && running.has(l.id));
+  }
+
+  /** The deferred half of a discard; a failure shows in the summary. */
+  private async recycle(entry: Extract<LogEntry, { action: 'discard' }>): Promise<void> {
+    entry.state = 'recycling';
+    try {
+      await api.discard(entry.input);
+      entry.state = 'done';
+    } catch (err) {
+      entry.state = 'failed';
+      entry.message = plain(err, DISCARD_FAILED);
+    }
+  }
+
+  /** Lets go of the open clip: its session closes and nothing of it stays on screen. */
+  private leave(): void {
+    this.openSeq += 1; // an open still in flight is no longer wanted
+    if (this.media) this.closeSession(this.media.session);
+    this.media = null;
+    this.history = initHistory(createTimeline(0, DEFAULT_FPS, []));
+    this.endLive();
+    this.selection = [];
+    this.movePlayhead(0);
+    this.peaks = {};
+    this.thumbs = [];
+    this.shuttle = STOPPED;
+    this.proxyFraction = null;
+    this.error = null;
+    this.notice = null;
+  }
+
+  private closeSession(session: number): void {
+    api.close(session).catch((err) => console.error('editor_close failed', err));
   }
 
   /** Records `next` as an undo step (a no-op edit that returns the same timeline records nothing). */

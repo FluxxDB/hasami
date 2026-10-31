@@ -17,10 +17,16 @@
 </script>
 
 <footer class="statusbar cap">
+  {#if store.notice}
+    <!-- An export that couldn't start, or a discard that failed: the clip is still open. -->
+    <span class="notice" role="alert">{store.notice}</span>
+  {/if}
   {#if store.media}
     <span>{cuts} {cuts === 1 ? 'cut' : 'cuts'} · {selectedCount} selected</span>
+    <!-- The size the export buttons will make now is in bone; the other one is for comparison. -->
     <span>
-      Quick export ≈ <b>{formatBytes(store.estimateBytes)}</b> at source quality · Fit to 20 MB: <b>≤ 20 MB</b>
+      Quick export ≈ <b class:off={store.fit20}>{formatBytes(store.estimateBytes)}</b> at source quality · Fit to
+      20 MB: <b class:off={!store.fit20}>≤ 20 MB</b>
     </span>
   {/if}
   <span class="spacer"></span>
@@ -44,6 +50,17 @@
   b {
     color: var(--bone);
     font-weight: 500;
+  }
+  b.off {
+    color: var(--pebble);
+    font-weight: 400;
+  }
+  .notice {
+    flex: none;
+    color: var(--bone);
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: 12px;
   }
   .spacer {
     flex: 1;
