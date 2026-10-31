@@ -144,7 +144,7 @@ export function demoEdits(store: EditorStore): void {
   tl = moveEdge(tl, a2()[2].id, 'end', 52, false); // A2 runs 8 s past the video
   store.edit(tl);
   store.selection = linkedIds(tl, tl.video[1].id);
-  store.playhead = 21 + 43 / 60;
   store.pxPerSecond = 20;
   store.needsFit = false;
+  store.seek(21 + 43 / 60);
 }

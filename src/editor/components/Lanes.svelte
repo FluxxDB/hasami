@@ -44,15 +44,22 @@
     } catch {
       // No capture for this pointer; the drag still works while it stays over the lane.
     }
+    let ended = false;
     const end = () => {
+      if (ended) return;
+      ended = true;
       target.removeEventListener('pointermove', move);
       target.removeEventListener('pointerup', end);
       target.removeEventListener('pointercancel', end);
+      target.removeEventListener('lostpointercapture', end);
+      window.removeEventListener('pointerup', end);
       done();
     };
     target.addEventListener('pointermove', move);
     target.addEventListener('pointerup', end);
     target.addEventListener('pointercancel', end);
+    target.addEventListener('lostpointercapture', end);
+    window.addEventListener('pointerup', end); // a release outside the lane, without capture
   }
 
   /** A press on the timeline takes focus off a slider, so the arrow keys step frames again. */

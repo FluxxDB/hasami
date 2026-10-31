@@ -40,7 +40,13 @@ export class EditorStore {
   /** The live timeline during an edge drag or a volume slide; null otherwise. */
   preview = $state.raw<Timeline | null>(null);
   selection = $state.raw<string[]>([]);
+  /** Written by `seek` (and by the playback engine while it plays). */
   playhead = $state(0);
+  /**
+   * Bumped on every seek, so the window forwards each one to the playback engine, even one that
+   * lands on the time the engine last reported (the engine's own reports don't bump it).
+   */
+  seekSeq = $state(0);
 
   pxPerSecond = $state(20);
   scrollX = $state(0);
@@ -97,7 +103,7 @@ export class EditorStore {
     this.history = initHistory(createTimeline(media.duration_s, media.video?.fps ?? DEFAULT_FPS, audio));
     this.endLive();
     this.selection = [];
-    this.playhead = 0;
+    this.movePlayhead(0);
     this.scrollX = 0;
     this.needsFit = true;
     this.peaks = {};
@@ -118,6 +124,8 @@ export class EditorStore {
 
   /** Runs one keyboard command (keys.ts) against the timeline, selection, playhead and shuttle. */
   command(c: Command): void {
+    // An edit made mid-drag (or mid-slide) lands on top of it as its own undo step.
+    if (c === 'cut' || c === 'delete') this.commitLive();
     const tl = this.timeline;
     const end = videoEnd(tl);
     switch (c) {
@@ -193,7 +201,7 @@ export class EditorStore {
   /** Moves the playhead to `t`, on the frame grid inside [0, videoEnd], and keeps it in view. */
   seek(t: number): void {
     const tl = this.timeline;
-    this.playhead = clamp(quantize(t, tl.fps), 0, videoEnd(tl));
+    this.movePlayhead(clamp(quantize(t, tl.fps), 0, videoEnd(tl)));
     this.reveal();
   }
 
@@ -287,6 +295,17 @@ export class EditorStore {
 
   // --- internals ---------------------------------------------------------------------------
 
+  private movePlayhead(t: number): void {
+    this.playhead = t;
+    this.seekSeq += 1;
+  }
+
+  /** Records a live drag or slide as its undo step now. */
+  private commitLive(): void {
+    if (this.preview) this.edit(this.preview);
+    else this.endLive();
+  }
+
   /** Drops any live drag or slide state. */
   private endLive(): void {
     this.drag = null;
@@ -298,7 +317,7 @@ export class EditorStore {
   private afterChange(): void {
     const tl = this.timeline;
     const end = videoEnd(tl);
-    if (this.playhead > end) this.playhead = end;
+    if (this.playhead > end) this.movePlayhead(end);
     if (this.selection.length > 0) {
       const ids = new Set([...tl.video, ...tl.audio.flatMap((a) => a.segs)].map((s) => s.id));
       const kept = this.selection.filter((id) => ids.has(id));

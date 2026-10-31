@@ -13,8 +13,16 @@ import { MIN_GAIN_DB, segLen, videoEnd, type Timeline } from './timeline';
 /** How far an <audio> element may drift from where it should be before it's re-seeked. */
 export const DRIFT_TOLERANCE_S = 0.04;
 
+/** After an <audio> seek lands, drift isn't checked again for this long, so playback settles. */
+const SETTLE_MS = 250;
+/** The most an <audio> seek is aimed ahead to make up for its own latency. */
+const MAX_SEEK_LEAD_S = 0.25;
+
 /** Reverse shuttle steps the picture back this often (and by speed × this). */
 const REVERSE_TICK_S = 1 / 30;
+
+/** HTMLMediaElement.HAVE_FUTURE_DATA, spelled out so the engine runs against test doubles. */
+const HAVE_FUTURE_DATA = 3;
 
 const clamp = (x: number, lo: number, hi: number): number => Math.min(Math.max(x, lo), hi);
 
@@ -45,11 +53,18 @@ interface Track {
   /** The segment this element is playing, so entering the next one re-seeks it. */
   segId: string | null;
   failed: boolean;
+  /** When the seek in flight started (performance.now), or null. */
+  seekStart: number | null;
+  /** How long this element's seeks take, seconds (a running average). */
+  latency: number;
+  /** Drift isn't checked before this time (performance.now): a seek is in flight or settling. */
+  settleUntil: number;
 }
 
 export class PlaybackEngine {
   private readonly video: HTMLVideoElement;
   private readonly ctx: AudioContext | null;
+  private readonly makeAudio: () => HTMLAudioElement;
   private tl: Timeline | null = null;
   private tracks: Track[] = [];
   private videoSrc = '';
@@ -64,19 +79,27 @@ export class PlaybackEngine {
   private vfc = 0;
   private reverseTimer: ReturnType<typeof setInterval> | 0 = 0;
   private lastWall = 0;
+  /**
+   * Bumped whenever the engine moves the picture itself (seek, new timeline, new source, segment
+   * jump). A frame callback registered before that describes the old position and is ignored.
+   */
+  private gen = 0;
 
   private timeCbs = new Set<(t: number) => void>();
   private endedCbs = new Set<() => void>();
 
-  constructor(video: HTMLVideoElement, ctx: AudioContext | null) {
+  /** `makeAudio` is for tests, which hand in fake elements. */
+  constructor(video: HTMLVideoElement, ctx: AudioContext | null, makeAudio: () => HTMLAudioElement = () => new Audio()) {
     this.video = video;
     this.ctx = ctx;
+    this.makeAudio = makeAudio;
     video.muted = true;
   }
 
   /** Points the engine at a clip: the picture's URL ('' for none) and each audio track's URL. */
   load(videoSrc: string, tracks: { index: number; src: string }[]): void {
     if (videoSrc !== this.videoSrc) {
+      this.gen += 1;
       this.videoSrc = videoSrc;
       if (videoSrc) this.video.src = videoSrc;
       else this.video.removeAttribute('src');
@@ -109,7 +132,10 @@ export class PlaybackEngine {
     const end = videoEnd(tl);
     if (this.t > end) this.t = end;
     // Only a change to the video track moves the picture; gain and audio edits don't.
-    if (prev?.video !== tl.video) this.showFrame(true);
+    if (prev?.video !== tl.video) {
+      this.gen += 1;
+      this.showFrame(true);
+    }
     for (const tr of this.tracks) tr.segId = null; // re-check every track against the new segments
   }
 
@@ -124,6 +150,7 @@ export class PlaybackEngine {
   seek(t: number): void {
     this.t = this.tl ? clamp(t, 0, videoEnd(this.tl)) : Math.max(0, t);
     this.lastWall = performance.now();
+    this.gen += 1;
     this.showFrame(true);
     for (const tr of this.tracks) tr.segId = null;
     if (this.shuttle.dir === 1) this.syncAudio();
@@ -173,22 +200,36 @@ export class PlaybackEngine {
    */
   private makeTrack(index: number, src: string): Track {
     // `el` and `graph` are filled in by attach.
-    const tr: Track = { index, src, el: null as unknown as HTMLAudioElement, graph: null, segId: null, failed: false };
+    const tr: Track = {
+      index,
+      src,
+      el: null as unknown as HTMLAudioElement,
+      graph: null,
+      segId: null,
+      failed: false,
+      seekStart: null,
+      latency: 0,
+      settleUntil: 0,
+    };
     this.attach(tr, this.ctx !== null);
     return tr;
   }
 
   private attach(tr: Track, useGraph: boolean): void {
-    const el = new Audio();
+    const el = this.makeAudio();
     el.preload = 'auto';
     tr.el = el;
     tr.graph = null;
     tr.segId = null;
+    tr.seekStart = null;
+    tr.settleUntil = 0;
     if (useGraph && this.ctx) {
       el.crossOrigin = 'anonymous';
       try {
         const node = this.ctx.createMediaElementSource(el);
         const gain = this.ctx.createGain();
+        // Start at the track's level: a ramp from the default 1.0 would blip a muted track.
+        gain.gain.value = this.gainFor(tr);
         node.connect(gain).connect(this.ctx.destination);
         tr.graph = { node, gain };
       } catch (err) {
@@ -196,6 +237,16 @@ export class PlaybackEngine {
         el.removeAttribute('crossorigin');
       }
     }
+    el.addEventListener('seeked', () => {
+      if (tr.el !== el) return;
+      const t = performance.now();
+      if (tr.seekStart !== null) {
+        const took = (t - tr.seekStart) / 1000;
+        tr.latency = tr.latency ? (tr.latency + took) / 2 : took;
+        tr.seekStart = null;
+      }
+      tr.settleUntil = t + SETTLE_MS;
+    });
     el.addEventListener('error', () => {
       if (tr.el !== el) return;
       if (tr.graph) {
@@ -226,9 +277,13 @@ export class PlaybackEngine {
     for (const tr of this.tracks) this.applyGain(tr);
   }
 
-  private applyGain(tr: Track): void {
+  private gainFor(tr: Track): number {
     const at = this.tl?.audio.find((a) => a.index === tr.index);
-    const g = at ? trackGain(at.gainDb, at.muted) : 0;
+    return at ? trackGain(at.gainDb, at.muted) : 0;
+  }
+
+  private applyGain(tr: Track): void {
+    const g = this.gainFor(tr);
     if (tr.graph && this.ctx) {
       // A short ramp, so moving the fader doesn't click.
       tr.graph.gain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.015);
@@ -312,14 +367,18 @@ export class PlaybackEngine {
   /** Segment ends are caught on the frame the video presents (requestVideoFrameCallback). */
   private watchFrames(): void {
     if (this.vfc || !('requestVideoFrameCallback' in this.video)) return;
-    const onFrame = (_now: number, meta: VideoFrameCallbackMetadata) => {
+    const gen = this.gen;
+    this.vfc = this.video.requestVideoFrameCallback((_now, meta) => {
       this.vfc = 0;
       if (this.shuttle.dir !== 1 || !this.tl) return;
-      // The last frame of a segment starts one frame before its end: once it's up, move on.
-      this.crossSegmentEnd(meta.mediaTime, 1.5 / this.tl.fps);
-      if (this.shuttle.dir === 1) this.vfc = this.video.requestVideoFrameCallback(onFrame);
-    };
-    this.vfc = this.video.requestVideoFrameCallback(onFrame);
+      // A frame from before the engine last moved the picture says nothing about where it is now.
+      // `currentTime` reflects a seek at once, so the smaller of the two is never a stale frame's.
+      if (gen === this.gen && !this.video.seeking) {
+        // The last frame of a segment starts one frame before its end: once it's up, move on.
+        this.crossSegmentEnd(Math.min(meta.mediaTime, this.video.currentTime), 1.5 / this.tl.fps);
+      }
+      if (this.shuttle.dir === 1) this.watchFrames();
+    });
   }
 
   /**
@@ -337,7 +396,10 @@ export class PlaybackEngine {
     }
     this.vi += 1;
     this.t = next.at;
-    if (Math.abs(next.src[0] - seg.src[1]) > 0.5 / tl.fps) this.video.currentTime = next.src[0];
+    if (Math.abs(next.src[0] - seg.src[1]) > 0.5 / tl.fps) {
+      this.gen += 1;
+      this.video.currentTime = next.src[0];
+    }
     for (const tr of this.tracks) tr.segId = null;
   }
 
@@ -374,36 +436,54 @@ export class PlaybackEngine {
     this.raf = requestAnimationFrame(this.tick);
   };
 
-  /** Each track plays the source time under the playhead, or is paused in a silent gap. */
+  /**
+   * Each track plays the source time under the playhead, or is paused in a silent gap. Above 1×
+   * the sound is off, as in Resolve's fast shuttle (and no seek could keep up with it anyway).
+   */
   private syncAudio(): void {
     const tl = this.tl;
     if (!tl) return;
     const end = videoEnd(tl);
-    // While the picture is seeking or buffering, the sound waits for it.
-    const waiting = this.videoLive() && (this.video.seeking || this.video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
+    const speed = this.shuttle.speed;
+    // While the picture is seeking or buffering, the sound waits for it (the last half second of
+    // the file has no "future data", which isn't buffering).
+    const v = this.video;
+    const buffering = v.readyState < HAVE_FUTURE_DATA && !(v.duration - v.currentTime < 0.5);
+    const waiting = this.videoLive() && (v.seeking || buffering);
+    const silent = waiting || speed > 1 || this.t >= end; // past the video end: dropped on export too
+    const tolerance = DRIFT_TOLERANCE_S * Math.max(1, speed);
+    const now = performance.now();
     for (const tr of this.tracks) {
       if (tr.failed) continue;
       const segs = tl.audio.find((a) => a.index === tr.index)?.segs ?? [];
-      // Audio past the end of the video is never heard (export drops it too).
-      const hit = waiting || this.t >= end ? null : audioSourceAt(segs, this.t);
+      const hit = silent ? null : audioSourceAt(segs, this.t);
       const el = tr.el;
       if (!hit) {
         if (!el.paused) el.pause();
         tr.segId = null;
         continue;
       }
-      if (el.playbackRate !== this.shuttle.speed) el.playbackRate = this.shuttle.speed;
+      if (el.playbackRate !== speed) el.playbackRate = speed;
       const off = Math.abs(el.currentTime - hit.srcT);
-      // Entering a segment seeks to its source time; a contiguous one is already there.
       if (tr.segId !== hit.seg.id) {
+        // Entering a segment seeks to its source time; a contiguous one is already there.
         tr.segId = hit.seg.id;
-        if (off > DRIFT_TOLERANCE_S) el.currentTime = hit.srcT;
-      } else if (!el.seeking && off > DRIFT_TOLERANCE_S) {
-        el.currentTime = hit.srcT;
+        if (off > tolerance) this.seekAudio(tr, hit.srcT);
+      } else if (!el.seeking && now >= tr.settleUntil && off > tolerance) {
+        // Drift is only judged once the last seek has landed and settled.
+        this.seekAudio(tr, hit.srcT);
       }
       // An element that ran out of file stays quiet until the next seek (play() would rewind it).
       if (el.paused && !el.ended) el.play().catch(() => {});
     }
+  }
+
+  /** Seeks a track, aimed ahead by how long its seeks take, so it lands in sync rather than behind. */
+  private seekAudio(tr: Track, srcT: number): void {
+    const lead = Math.min(MAX_SEEK_LEAD_S, tr.latency) * this.shuttle.speed;
+    tr.seekStart = performance.now();
+    tr.settleUntil = Infinity; // until it lands ('seeked')
+    tr.el.currentTime = srcT + lead;
   }
 
   // --- reverse -----------------------------------------------------------------------------

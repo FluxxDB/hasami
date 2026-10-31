@@ -10,8 +10,8 @@
   import { PlaybackEngine } from './engine';
   import { fitZoom } from './geometry';
   import { keyToCommand, type Command } from './keys';
-  import { STOPPED } from './playbackModel';
   import type { EditorStore } from './store.svelte';
+  import { EngineSync } from './sync';
 
   interface Props {
     store: EditorStore;
@@ -39,8 +39,7 @@
 
   let video = $state<HTMLVideoElement>();
   let engine = $state.raw<PlaybackEngine | null>(null);
-  /** The last time the engine reported; any other playhead change is a seek. */
-  let engineT = -1;
+  let sync = $state.raw<EngineSync | null>(null);
   /** The open clip's audio tracks, as handed to the engine. */
   let tracks: { index: number; src: string }[] = [];
   /** Whether the open clip has already gone to its H.264 proxy (so another failure is final). */
@@ -55,26 +54,23 @@
       console.warn('No Web Audio; tracks play without the gain stage', err);
     }
     const e = new PlaybackEngine(video, ctx);
-    const offTime = e.onTime((t) => {
-      engineT = t;
-      store.playhead = t;
-      store.follow();
-    });
-    const offEnded = e.onEnded(() => (store.shuttle = STOPPED));
+    const sy = new EngineSync(store, e);
     engine = e;
+    sync = sy;
     return () => {
-      offTime();
-      offEnded();
+      sy.destroy();
       e.destroy();
       void ctx?.close();
       engine = null;
+      sync = null;
     };
   });
 
-  // Order matters: the timeline first, then a new clip, then seeks, then the shuttle (so Space at
-  // the end seeks back to 0 before it plays).
+  // Each effect tells the sync what changed; it doesn't matter which runs first (sync.ts).
   $effect(() => {
-    engine?.setTimeline(store.timeline);
+    const tl = store.timeline;
+    const sy = sync;
+    if (sy) untrack(() => sy.timeline(tl));
   });
 
   $effect(() => {
@@ -84,20 +80,15 @@
   });
 
   $effect(() => {
-    const t = store.playhead;
-    const e = engine;
-    if (e && t !== engineT) untrack(() => e.seek(t));
+    void store.seekSeq;
+    const sy = sync;
+    if (sy) untrack(() => sy.seekIfRequested());
   });
 
   $effect(() => {
     const s = store.shuttle;
-    const e = engine;
-    if (!e) return;
-    untrack(() => {
-      e.setShuttle(s);
-      // A stopped playhead sits on a frame, so a cut lands on the frame the viewer shows.
-      if (s.dir === 0) store.seek(store.playhead);
-    });
+    const sy = sync;
+    if (sy) untrack(() => sy.shuttle(s));
   });
 
   function isHevc(m: EditorMedia): boolean {
@@ -110,6 +101,7 @@
       .flatMap((t) => (!t.empty && t.file ? [{ index: t.index, src: api.src(t.file) }] : []))
       .filter((t) => t.src !== '');
     proxied = false;
+    e.pause(); // a new clip never starts playing by itself
     const src = m.video ? api.src(m.path) : '';
     const undecodable = isHevc(m) && video?.canPlayType('video/mp4; codecs="hvc1"') === '';
     if (forceProxy || (src && undecodable)) {
@@ -142,7 +134,8 @@
   /** The picture failed to decode: go to the proxy once; if the proxy fails too, say so. */
   function onVideoError() {
     const m = store.media;
-    if (!m?.video || !engine || !video?.getAttribute('src')) return;
+    // `error` is reset when a new source loads, so a late event from the previous clip is ignored.
+    if (!m?.video || !engine || !video?.getAttribute('src') || !video.error) return;
     if (proxied) {
       if (store.proxyFraction === null) store.error = PREVIEW_FAILED;
       return;

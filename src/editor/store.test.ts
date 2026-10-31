@@ -348,3 +348,33 @@ describe('EditorStore commands', () => {
     expect(x).toBeLessThanOrEqual(400);
   });
 });
+
+describe('EditorStore seek requests', () => {
+  it('every seek is a new request, even to the time the engine last reported', () => {
+    const s = new EditorStore();
+    s.load(media());
+    s.playhead = 90; // the engine reporting that playback ran to the end
+    const before = s.seekSeq;
+    s.command('home');
+    s.command('end');
+    expect(s.playhead).toBe(90);
+    expect(s.seekSeq).toBe(before + 2);
+  });
+
+  it('a cut mid-drag records the drag and the cut as separate undo steps', () => {
+    const s = new EditorStore();
+    s.load(media());
+    s.seek(44);
+    s.command('cut');
+    s.snapping = false;
+    const steps = s.history.past.length;
+    s.beginEdgeDrag(s.timeline.video[0].id, 'end');
+    s.dragEdgeTo(40);
+    s.seek(20);
+    s.command('cut');
+    expect(s.history.past.length).toBe(steps + 2);
+    s.command('undo');
+    expect(cutCount(s.timeline)).toBe(1);
+    expect(s.timeline.video[0].src[1]).toBeCloseTo(40, 9);
+  });
+});
