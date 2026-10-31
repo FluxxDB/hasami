@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -101,24 +101,14 @@ pub fn run_ffmpeg(
 
     let (tx, rx) = mpsc::channel::<f64>();
     let stdout_thread = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(fraction) = parse_progress_line(&line, total_s) {
-                if tx.send(fraction).is_err() {
-                    break;
-                }
+        for_each_line(stdout, |line| {
+            if let Some(fraction) = parse_progress_line(line, total_s) {
+                // A closed receiver means the run is over; keep draining so ffmpeg never blocks.
+                let _ = tx.send(fraction);
             }
-        }
+        });
     });
-    let stderr_thread: JoinHandle<VecDeque<String>> = thread::spawn(move || {
-        let mut tail = VecDeque::with_capacity(STDERR_TAIL_LINES);
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if tail.len() == STDERR_TAIL_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
-        }
-        tail
-    });
+    let stderr_thread: JoinHandle<String> = thread::spawn(move || collect_tail(stderr, STDERR_TAIL_LINES));
 
     let mut last = 0.0_f64;
     let outcome = loop {
@@ -128,8 +118,11 @@ pub fn run_ffmpeg(
         }
         match rx.recv_timeout(POLL_INTERVAL) {
             Ok(fraction) => {
-                last = last.max(fraction);
-                on_progress(last);
+                // `progress=end` repeats 1.0 after the final out_time; don't report it twice.
+                if fraction > last {
+                    last = fraction;
+                    on_progress(last);
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             // stdout closed: ffmpeg is exiting. Keep polling try_wait so cancel stays responsive.
@@ -142,16 +135,41 @@ pub fn run_ffmpeg(
 
     // The child is dead or exiting, so both pipes reach EOF and the readers finish.
     let _ = stdout_thread.join();
-    let tail = stderr_thread.join().unwrap_or_default();
+    let stderr_tail = stderr_thread.join().unwrap_or_default();
 
     let status = outcome?;
     if status.success() {
         Ok(())
     } else {
-        Err(RunError::Failed {
-            stderr_tail: tail.into_iter().collect::<Vec<_>>().join("\n"),
-        })
+        Err(RunError::Failed { stderr_tail })
     }
+}
+
+/// Call `f` with each line of `reader` until EOF. Lines are decoded lossily: ffmpeg echoes
+/// metadata in legacy codepages, and a non-UTF-8 line must not stop the drain (the child would
+/// block or hit a broken pipe on its next write).
+fn for_each_line(reader: impl Read, mut f: impl FnMut(&str)) {
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => f(String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n'])),
+        }
+    }
+}
+
+/// Read `reader` to EOF and return its last `max_lines` lines joined by `\n`.
+fn collect_tail(reader: impl Read, max_lines: usize) -> String {
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(max_lines);
+    for_each_line(reader, |line| {
+        if tail.len() == max_lines {
+            tail.pop_front();
+        }
+        tail.push_back(line.to_owned());
+    });
+    tail.into_iter().collect::<Vec<_>>().join("\n")
 }
 
 /// Interpret one line of `-progress` output as a fraction of `total_s` in `[0, 1]`.
@@ -173,6 +191,31 @@ fn parse_progress_line(line: &str, total_s: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::parse_progress_line as parse;
+
+    #[test]
+    fn tail_survives_invalid_utf8_and_keeps_last_lines() {
+        let mut input = b"first\n".to_vec();
+        input.extend_from_slice(b"title : caf\xe9 \x93bad\x94\r\n"); // legacy codepage bytes
+        input.extend_from_slice(b"valid line\n");
+        let tail = super::collect_tail(&input[..], 20);
+        assert!(tail.contains("valid line"), "tail was {tail:?}");
+        assert!(tail.contains("caf"), "invalid line should be kept lossily: {tail:?}");
+        assert_eq!(tail.lines().count(), 3);
+
+        let many: String = (0..30).map(|i| format!("l{i}\n")).collect();
+        let tail = super::collect_tail(many.as_bytes(), 20);
+        assert_eq!(tail.lines().count(), 20);
+        assert_eq!(tail.lines().next(), Some("l10"));
+        assert_eq!(tail.lines().last(), Some("l29"));
+    }
+
+    #[test]
+    fn progress_survives_invalid_utf8_line() {
+        let input = b"junk \xff\xfe\nout_time_us=2500000\n";
+        let mut got = Vec::new();
+        super::for_each_line(&input[..], |l| got.extend(parse(l, 5.0)));
+        assert_eq!(got, vec![0.5]);
+    }
 
     #[test]
     fn parses_out_time_us() {

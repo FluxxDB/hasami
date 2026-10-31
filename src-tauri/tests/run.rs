@@ -104,3 +104,30 @@ fn run_failure_has_stderr() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
+
+#[test]
+fn run_progress_comes_from_out_time_not_just_end_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_multitrack_hevc(dir.path());
+    let output = dir.path().join("out.mp4");
+    let paths = FfmpegPaths::resolve().unwrap();
+
+    // Claim the clip is twice as long as it is: parsed out_time values top out near 0.5, so a
+    // value around 0.5 can only come from out_time_us parsing; 1.0 then comes from progress=end.
+    let mut seen: Vec<f64> = Vec::new();
+    run_ffmpeg(
+        &paths,
+        &transcode_args(&input, &output, "ultrafast"),
+        10.0,
+        &CancelToken::new(),
+        &mut |p| seen.push(p),
+    )
+    .expect("transcode should succeed");
+
+    let parsed_max = seen.iter().copied().filter(|p| *p < 1.0).fold(0.0, f64::max);
+    assert!(
+        (0.45..=0.55).contains(&parsed_max),
+        "expected parsed out_time near 0.5 before the end marker, got {seen:?}"
+    );
+    assert_eq!(seen.last(), Some(&1.0), "progress=end should finish at 1.0: {seen:?}");
+}
