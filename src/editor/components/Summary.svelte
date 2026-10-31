@@ -89,7 +89,7 @@
             </div>
             <span class="status cap" class:strong={r.state === 'failed'}>{status(r)}</span>
 
-            {#if r.state === 'running' && r.action !== 'discard'}
+            {#if r.state === 'running' && r.fraction > 0}
               <span class="rail" aria-hidden="true"><i style:width="{Math.round(r.fraction * 100)}%"></i></span>
             {:else if r.state === 'failed'}
               <p class="message">
