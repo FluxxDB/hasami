@@ -121,11 +121,18 @@ export function linkedIds(tl: Timeline, segId: string): string[] {
   return all.filter((s) => s.link === seg.link).map((s) => s.id);
 }
 
-/** Removes the material in [a, b) from an audio track and closes the gap. */
-function rippleAudioRange(segs: Seg[], a: number, b: number, ids: IdCounter): Seg[] {
-  // Cut at b first, then a; both keep links (this is the same material, just split).
-  const keep = (link: string) => link;
-  const cut = splitSegs(splitSegs(segs, b, ids, keep), a, ids, keep);
+/**
+ * Removes the material in [a, b) from an audio track and closes the gap. `rightLink` names the
+ * link of a split's right-hand piece, so a track never ends up with two segs sharing a link.
+ */
+function rippleAudioRange(
+  segs: Seg[],
+  a: number,
+  b: number,
+  ids: IdCounter,
+  rightLink: (link: string) => string,
+): Seg[] {
+  const cut = splitSegs(splitSegs(segs, b, ids, rightLink), a, ids, rightLink);
   const gap = b - a;
   const out: Seg[] = [];
   for (const s of cut) {
@@ -153,7 +160,17 @@ export function deleteSegs(tl: Timeline, ids: string[], linked: boolean): Timeli
     for (const r of [...removedVideo].reverse()) {
       const a = r.at;
       const b = segEnd(r);
-      audio = audio.map((tr) => ({ ...tr, segs: rippleAudioRange(tr.segs, a, b, counter) }));
+      // Right-hand remnants of one old link share one new link across tracks, as in cutAt.
+      const fresh = new Map<string, string>();
+      const rightLink = (link: string): string => {
+        let l = fresh.get(link);
+        if (l === undefined) {
+          l = `L${counter.n++}`;
+          fresh.set(link, l);
+        }
+        return l;
+      };
+      audio = audio.map((tr) => ({ ...tr, segs: rippleAudioRange(tr.segs, a, b, counter, rightLink) }));
     }
     nextId = counter.n;
   }
@@ -216,21 +233,30 @@ function moveVideoEdge(
   const video = layoutVideo(tl.video.map((s, i) => (i === vi ? { ...s, src } : s)));
   if (!linked) return { ...tl, video };
 
-  // Linked: audio segs with the same link get the same src change; the rest of each audio track
-  // after the edge shifts by the length change.
-  const audio = tl.audio.map((tr) => ({
-    ...tr,
-    segs: tr.segs.map((s) => {
-      if (s.link === seg.link) {
-        const next: [number, number] =
-          edge === 'end'
-            ? [s.src[0], clamp(s.src[1] + d, s.src[0] + frame, D)]
-            : [clamp(s.src[0] + d, 0, s.src[1] - frame), s.src[1]];
-        return { ...s, src: next };
-      }
-      return s.at >= oldEnd - EPS ? { ...s, at: s.at + lenChange } : s;
-    }),
-  }));
+  // Linked: audio segs with the same link whose matching edge sits on the dragged video edge get
+  // the same src change. Anything else on an audio track is ordinary audio. Segs after the edge
+  // shift by the length that track's moved seg actually changed, so a drag never overlaps them.
+  const aligned = (s: Seg): boolean =>
+    s.link === seg.link &&
+    (edge === 'end' ? Math.abs(segEnd(s) - oldEnd) < EPS : Math.abs(s.at - seg.at) < EPS);
+  const audio = tl.audio.map((tr) => {
+    let trackShift = lenChange;
+    const moved = tr.segs.map((s) => {
+      if (!aligned(s)) return s;
+      const next: [number, number] =
+        edge === 'end'
+          ? [s.src[0], clamp(s.src[1] + d, s.src[0] + frame, D)]
+          : [clamp(s.src[0] + d, 0, s.src[1] - frame), s.src[1]];
+      trackShift = edge === 'end' ? next[1] - s.src[1] : s.src[0] - next[0];
+      return { ...s, src: next };
+    });
+    return {
+      ...tr,
+      segs: moved.map((s) =>
+        !aligned(s) && s.at >= oldEnd - EPS ? { ...s, at: s.at + trackShift } : s,
+      ),
+    };
+  });
   return { ...tl, video, audio };
 }
 
@@ -272,10 +298,12 @@ function moveAudioEdge(
 
 export function setGain(tl: Timeline, index: number, gainDb: number): Timeline {
   const g = clamp(gainDb, MIN_GAIN_DB, MAX_GAIN_DB);
+  if (tl.audio.find((a) => a.index === index)?.gainDb === g) return tl;
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, gainDb: g } : a)) };
 }
 
 export function setMuted(tl: Timeline, index: number, muted: boolean): Timeline {
+  if (tl.audio.find((a) => a.index === index)?.muted === muted) return tl;
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, muted } : a)) };
 }
 
@@ -286,13 +314,26 @@ export function snapCandidates(
   playhead: number,
   exclude?: { segId: string; edge: 'start' | 'end' },
 ): number[] {
-  const out = [playhead, videoEnd(tl)];
-  for (const s of [...tl.video, ...tl.audio.flatMap((a) => a.segs)]) {
-    const skipStart = exclude?.segId === s.id && exclude.edge === 'start';
-    const skipEnd = exclude?.segId === s.id && exclude.edge === 'end';
-    if (!skipStart) out.push(s.at);
-    if (!skipEnd) out.push(segEnd(s));
-  }
+  const dragged = exclude ? tl.video.find((s) => s.id === exclude.segId) : undefined;
+  // Dragging a video edge moves everything from that edge on (the ripple), and the linked audio
+  // edges on the same side. None of those can be snap targets, or the edge snaps back to where it
+  // started.
+  const from = dragged && exclude ? (exclude.edge === 'start' ? dragged.at : segEnd(dragged)) : Infinity;
+  const movesWithDrag = (s: Seg, isVideo: boolean, edge: 'start' | 'end'): boolean => {
+    if (!dragged || !exclude) return false;
+    if (isVideo) return (edge === 'start' ? s.at : segEnd(s)) >= from - EPS;
+    return s.link === dragged.link && edge === exclude.edge;
+  };
+
+  const out = [playhead];
+  if (!dragged) out.push(videoEnd(tl));
+  const add = (s: Seg, isVideo: boolean) => {
+    const lit = (edge: 'start' | 'end') => exclude?.segId === s.id && exclude.edge === edge;
+    if (!lit('start') && !movesWithDrag(s, isVideo, 'start')) out.push(s.at);
+    if (!lit('end') && !movesWithDrag(s, isVideo, 'end')) out.push(segEnd(s));
+  };
+  tl.video.forEach((s) => add(s, true));
+  tl.audio.forEach((a) => a.segs.forEach((s) => add(s, false)));
   return out;
 }
 

@@ -47,7 +47,7 @@ describe('keyToCommand (spec 5.5)', () => {
   });
   it('N: toggle snapping', () => {
     expect(k('n')).toBe<Command>('toggleSnap');
-    expect(k('N')).toBe<Command>('toggleSnap');
+    expect(k('N')).toBe<Command>('toggleSnap'); // Caps Lock: no Shift held
   });
   it('Ctrl+Shift+L: toggle linked selection', () => {
     expect(k('L', { ctrl: true, shift: true })).toBe<Command>('toggleLinked');
@@ -63,6 +63,9 @@ describe('keyToCommand (spec 5.5)', () => {
     expect(k('z')).toBeNull();
     expect(k('x')).toBeNull();
     expect(k('Enter')).toBeNull();
+    expect(k('N', { shift: true })).toBeNull();
+    expect(k(' ', { shift: true })).toBeNull();
+    expect(keyToCommand({ key: 'ArrowLeft', shiftKey: false, ctrlKey: false, altKey: true })).toBeNull();
     expect(k('l', { ctrl: true })).toBeNull(); // Ctrl+L alone is not Ctrl+Shift+L
     expect(k('n', { ctrl: true })).toBeNull();
     expect(k('ArrowLeft', { ctrl: true })).toBeNull();

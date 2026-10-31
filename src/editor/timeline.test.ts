@@ -307,6 +307,106 @@ describe('snapping', () => {
   });
 });
 
+/** No track holds two segs with one link, and no track has overlapping segs. */
+function expectInvariants(tl: Timeline) {
+  const tracks = [tl.video, ...tl.audio.map((a) => a.segs)];
+  for (const segs of tracks) {
+    const sorted = [...segs].sort((a, b) => a.at - b.at);
+    expect(new Set(segs.map((s) => s.link)).size).toBe(segs.length);
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i].at).toBeGreaterThanOrEqual(sorted[i - 1].at + segLen(sorted[i - 1]) - 1e-9);
+    }
+  }
+}
+
+describe('link and overlap invariants', () => {
+  /** Reviewer's repro: audio spans a whole video range that is then linked-deleted. */
+  const spanning = () => {
+    let tl = createTimeline(D, FPS, [0]);
+    tl = cutAt(cutAt(tl, 12), 31);
+    tl = deleteSegs(tl, [tl.audio[0].segs[1].id], true); // silence 12..31 on A0
+    tl = cutAt(tl, 20); // splits video only: A0 has no material there
+    const first = tl.audio[0].segs[0];
+    tl = moveEdge(tl, first.id, 'end', 31, true); // A0 now one seg [0,31] over three video segs
+    expect(tl.audio[0].segs.map((s) => s.src)).toEqual([[0, 31], [31, 90]]);
+    return tl;
+  };
+
+  it('linked delete over a spanning audio seg gives the right remnant a fresh link', () => {
+    const tl = spanning();
+    const out = deleteSegs(tl, [tl.video[1].id], true); // video [12,20]
+    expect(src(out.audio[0].segs)).toEqual([[0, 12], [20, 31], [31, 90]]);
+    expect(at(out.audio[0].segs)).toEqual([0, 12, 23]);
+    expectInvariants(out);
+    const ids = linkedIds(out, out.video[0].id);
+    expect(ids).toContain(out.audio[0].segs[0].id);
+    expect(ids).not.toContain(out.audio[0].segs[1].id);
+  });
+
+  it('a linked video end drag after that delete moves only the audio under the dragged edge', () => {
+    const tl = spanning();
+    const out = deleteSegs(tl, [tl.video[1].id], true);
+    const dragged = moveEdge(out, out.video[0].id, 'end', 14, true);
+    expect(src(dragged.audio[0].segs)).toEqual([[0, 14], [20, 31], [31, 90]]);
+    expect(at(dragged.audio[0].segs)).toEqual([0, 14, 25]);
+    expectInvariants(dragged);
+  });
+
+  it('linked drag leaves linked audio whose edge is not on the dragged video edge alone', () => {
+    // A1 is desynced: its first seg runs to 15 while the video cut is at 12.
+    let tl = createTimeline(D, FPS, [0, 1]);
+    tl = cutAt(tl, 12);
+    tl = deleteSegs(tl, [tl.audio[1].segs[1].id], false); // silence after 12 on A1
+    tl = moveEdge(tl, tl.audio[1].segs[0].id, 'end', 15, false);
+    expect(track(tl, 1).segs[0].src).toEqual([0, 15]);
+    const out = moveEdge(tl, tl.video[0].id, 'end', 14, true);
+    expect(track(out, 0).segs[0].src).toEqual([0, 14]); // lines up with the video edge
+    expect(track(out, 0).segs[1].at).toBe(14); // and its track ripples
+    expect(track(out, 1).segs[0].src).toEqual([0, 15]); // does not line up: untouched
+    expectInvariants(out);
+  });
+
+  it('non-adjacent linked deletes and a cut afterwards keep every track in step', () => {
+    let tl = createTimeline(D, FPS, [0, 1]);
+    for (const t of [10, 20, 30, 40, 50]) tl = cutAt(tl, t);
+    tl = deleteSegs(tl, [tl.video[1].id, tl.video[3].id], true);
+    expect(src(tl.video)).toEqual([[0, 10], [20, 30], [40, 50], [50, 90]]);
+    expect(videoEnd(tl)).toBe(70);
+    for (const a of tl.audio) {
+      expect(src(a.segs)).toEqual(src(tl.video));
+      expect(at(a.segs)).toEqual(at(tl.video));
+    }
+    tl = cutAt(tl, 25);
+    expect(tl.audio[0].segs[2].link).toBe(tl.video[2].link);
+    expect(tl.audio[1].segs[2].link).toBe(tl.video[2].link);
+    expectInvariants(tl);
+  });
+});
+
+describe('snapCandidates while dragging a video edge', () => {
+  it('drops the video boundaries and video end that move with an end drag', () => {
+    const tl = cutAt(cutAt(createTimeline(D, FPS, []), 12), 31);
+    const c = snapCandidates(tl, 5, { segId: tl.video[0].id, edge: 'end' });
+    expect(c.sort((x, y) => x - y)).toEqual([0, 5]);
+  });
+
+  it('a start drag drops boundaries from the dragged position on', () => {
+    const tl = cutAt(cutAt(createTimeline(D, FPS, []), 12), 31);
+    const c = snapCandidates(tl, 5, { segId: tl.video[1].id, edge: 'start' });
+    expect(c.sort((x, y) => x - y)).toEqual([0, 5]);
+  });
+
+  it('drops same-side edges of linked audio but keeps those of other segs', () => {
+    let tl = cutAt(createTimeline(D, FPS, [0]), 12);
+    tl = deleteSegs(tl, [tl.audio[0].segs[1].id], false);
+    tl = moveEdge(tl, tl.audio[0].segs[0].id, 'end', 15, false); // A0 [0,15], link of video seg 0
+    expect(snapCandidates(tl, 0)).toContain(15);
+    expect(snapCandidates(tl, 0, { segId: tl.video[0].id, edge: 'end' })).not.toContain(15);
+    // Dragging the other video seg's end: 15 belongs to a different link and stays.
+    expect(snapCandidates(tl, 0, { segId: tl.video[1].id, edge: 'end' })).toContain(15);
+  });
+});
+
 describe('export request', () => {
   it('toExportRequest lists video pieces and per-track audio', () => {
     const tl = linkedDeleted();

@@ -26,7 +26,9 @@ export function keyToCommand(e: {
   shiftKey: boolean;
   ctrlKey: boolean;
   metaKey?: boolean;
+  altKey?: boolean;
 }): Command | null {
+  if (e.altKey) return null; // Alt+arrows are browser/WebView navigation
   const letter = e.key.length === 1 ? e.key.toLowerCase() : '';
 
   if (e.ctrlKey || e.metaKey) {
@@ -38,7 +40,7 @@ export function keyToCommand(e: {
 
   switch (e.key) {
     case ' ':
-      return 'playPause';
+      return e.shiftKey ? null : 'playPause';
     case 'ArrowLeft':
       return e.shiftKey ? 'secBack' : 'frameBack';
     case 'ArrowRight':
@@ -60,6 +62,6 @@ export function keyToCommand(e: {
   if (letter === 'j') return 'J';
   if (letter === 'k') return 'K';
   if (letter === 'l') return 'L';
-  if (letter === 'n') return 'toggleSnap';
+  if (letter === 'n' && !e.shiftKey) return 'toggleSnap';
   return null;
 }

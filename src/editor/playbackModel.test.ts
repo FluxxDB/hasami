@@ -67,6 +67,12 @@ describe('formatTimecode', () => {
     expect(formatTimecode(29 / 29.97, 29.97)).toBe('00:00:00:29');
     expect(formatTimecode(30 / 29.97, 29.97)).toBe('00:00:01:00');
   });
+  it('counts non-drop frames at 29.97 without repeating or skipping a number', () => {
+    expect(formatTimecode(1797 / 29.97, 29.97)).toBe('00:00:59:27');
+    expect(formatTimecode(1798 / 29.97, 29.97)).toBe('00:00:59:28');
+    expect(formatTimecode(1799 / 29.97, 29.97)).toBe('00:00:59:29');
+    expect(formatTimecode(1800 / 29.97, 29.97)).toBe('00:01:00:00');
+  });
   it('clamps negative time to zero', () => {
     expect(formatTimecode(-1, 60)).toBe('00:00:00:00');
   });

@@ -25,10 +25,10 @@ const pad2 = (n: number): string => String(n).padStart(2, '0');
 /** "HH:MM:SS:FF" (non-drop). The playhead is shown on the nearest frame. */
 export function formatTimecode(t: number, fps: number): string {
   const frames = Math.round(Math.max(0, t) * fps);
-  const secs = Math.floor(frames / fps + 1e-9);
-  // For fractional rates (29.97) a "second" holds round(fps) frames, so FF comes from the
-  // frames left after the whole seconds.
-  const ff = Math.min(frames - Math.round(secs * fps), Math.round(fps) - 1);
+  // Non-drop: a "second" holds round(fps) frames, so 29.97 never repeats or skips a number.
+  const nominal = Math.round(fps);
+  const secs = Math.floor(frames / nominal);
+  const ff = frames % nominal;
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   return `${pad2(h)}:${pad2(m)}:${pad2(secs % 60)}:${pad2(ff)}`;
