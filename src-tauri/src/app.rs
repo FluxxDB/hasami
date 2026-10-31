@@ -25,7 +25,7 @@ use crate::cli::{self, Action};
 use crate::compress::{plan_compress, CompressDecision};
 use crate::editor::media::{make_proxy, peaks, prepare, thumbnails, Peaks, PreparedMedia, Thumb};
 use crate::editor::request::ExportRequest;
-use crate::editor::session::{process_running, sweep_stale, EditorSessions};
+use crate::editor::session::{next_session_id, process_running, sweep_stale, EditorSessions};
 use crate::fsops;
 use crate::jobs::compress::compress;
 use crate::jobs::convert::convert;
@@ -567,11 +567,14 @@ impl Dispatcher {
             Msg::EditorReady => self.flow.on_editor_ready(),
             Msg::EditorDestroyed => {
                 // Its clips go with it. Closing waits for their ffmpeg runs to stop, so it runs on
-                // its own thread; `RunEvent::Exit` waits for it through the sessions lock.
+                // its own thread; `RunEvent::Exit` waits for it through the sessions lock. Only the
+                // sessions reserved by now are this editor's: the next editor (opened after this
+                // message) may reserve one before the cleanup thread gets the lock.
                 let app = self.app.clone();
+                let upto = next_session_id();
                 let _ = thread::Builder::new()
                     .name("hasami-editor-cleanup".into())
-                    .spawn(move || lock(&app.state::<AppState>().sessions).close_all());
+                    .spawn(move || lock(&app.state::<AppState>().sessions).close_before(upto));
                 let settled = self.settled();
                 self.flow.on_editor_closed(settled)
             }

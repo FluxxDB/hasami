@@ -130,7 +130,19 @@ impl EditorSessions {
 
     /// [`close`](Self::close) every session, waiting at most [`CLOSE_WAIT`] in all.
     pub fn close_all(&mut self) {
-        let sessions: Vec<Session> = self.open.drain().map(|(_, s)| s).collect();
+        self.close_where(|_| true);
+    }
+
+    /// [`close`](Self::close) every session reserved before [`next_session_id`] returned `upto`,
+    /// waiting at most [`CLOSE_WAIT`] in all. A closed editor's cleanup uses this, so a session
+    /// the next editor reserved before the cleanup got the lock is left open.
+    pub fn close_before(&mut self, upto: u64) {
+        self.close_where(|id| id < upto);
+    }
+
+    fn close_where(&mut self, pick: impl Fn(u64) -> bool) {
+        let ids: Vec<u64> = self.open.keys().copied().filter(|&id| pick(id)).collect();
+        let sessions: Vec<Session> = ids.iter().filter_map(|id| self.open.remove(id)).collect();
         for session in &sessions {
             session.cancel.cancel();
         }
@@ -142,6 +154,12 @@ impl Drop for EditorSessions {
     fn drop(&mut self) {
         self.close_all();
     }
+}
+
+/// The id the next [`EditorSessions::reserve`] will hand out; every session reserved so far has a
+/// smaller one. Reading it takes no lock.
+pub fn next_session_id() -> u64 {
+    NEXT_ID.load(Ordering::Relaxed)
 }
 
 fn work_dir_for(id: u64) -> PathBuf {
@@ -249,6 +267,26 @@ mod tests {
         assert!(matches!(result, Err(JobError::Message(m)) if m == "nope"));
         assert!(!r.work_dir.exists());
         assert_eq!(sessions.input(r.id), None);
+    }
+
+    #[test]
+    fn closing_an_editor_spares_sessions_reserved_after_it() {
+        let mut sessions = EditorSessions::new();
+        let old = sessions.reserve(Path::new("a.mp4"));
+        std::fs::create_dir_all(&old.work_dir).unwrap();
+        // The editor window is destroyed here; the next editor opens a clip before the cleanup runs.
+        let upto = next_session_id();
+        let new = sessions.reserve(Path::new("b.mp4"));
+        std::fs::create_dir_all(&new.work_dir).unwrap();
+
+        sessions.close_before(upto);
+        assert!(old.cancel.is_cancelled());
+        assert!(!old.work_dir.exists());
+        assert_eq!(sessions.input(old.id), None);
+        assert!(!new.cancel.is_cancelled(), "the next editor's clip is left alone");
+        assert!(new.work_dir.exists());
+        assert_eq!(sessions.input(new.id), Some(Path::new("b.mp4")));
+        sessions.close(new.id);
     }
 
     #[test]
