@@ -8,7 +8,7 @@
 // playhead, the transport and the audio still run.
 
 import { STOPPED, audioSourceAt, videoSourceAt, type Shuttle } from './playbackModel';
-import { MIN_GAIN_DB, segLen, videoEnd, type Timeline } from './timeline';
+import { isSilent, segLen, videoEnd, type Timeline } from './timeline';
 
 /** How far an <audio> element may drift from where it should be before it's re-seeked. */
 export const DRIFT_TOLERANCE_S = 0.04;
@@ -28,7 +28,7 @@ const clamp = (x: number, lo: number, hi: number): number => Math.min(Math.max(x
 
 /** A track's linear gain: 10^(dB/20), or 0 when muted or at the bottom of the fader (−∞). */
 export function trackGain(db: number, muted: boolean): number {
-  return muted || db <= MIN_GAIN_DB ? 0 : 10 ** (db / 20);
+  return isSilent(db, muted) ? 0 : 10 ** (db / 20);
 }
 
 /**

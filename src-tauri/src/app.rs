@@ -25,7 +25,7 @@ use crate::cli::{self, Action};
 use crate::compress::{plan_compress, CompressDecision};
 use crate::editor::media::{make_proxy, peaks, prepare, thumbnails, Peaks, PreparedMedia, Thumb};
 use crate::editor::request::ExportRequest;
-use crate::editor::session::{process_running, sweep_stale, EditorSessions};
+use crate::editor::session::{next_session_id, process_running, sweep_stale, EditorSessions};
 use crate::fsops;
 use crate::jobs::compress::compress;
 use crate::jobs::convert::convert;
@@ -128,6 +128,7 @@ pub fn run(action: Action) {
         paths,
         sessions: Mutex::new(EditorSessions::new()),
         editor_files: Mutex::new(Vec::new()),
+        recycling: Mutex::new(()),
     };
     tauri::Builder::default()
         // Must be the first plugin: a second instance forwards its argv here and exits.
@@ -189,9 +190,13 @@ pub fn run(action: Action) {
             // Closing the last window must not end the process while jobs remain; the dispatcher
             // calls `exit` (which carries a code) once the queue has drained.
             RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
-            // Waits (briefly) for the editor's cleanup, and catches a clip that finished opening
-            // after the editor closed.
-            RunEvent::Exit => lock(&app.state::<AppState>().sessions).close_all(),
+            // Waits for an immediate discard still recycling its clip, then (briefly) for the
+            // editor's cleanup, and catches a clip that finished opening after the editor closed.
+            RunEvent::Exit => {
+                let state = app.state::<AppState>();
+                drop(lock(&state.recycling));
+                lock(&state.sessions).close_all();
+            }
             _ => {}
         });
 }
@@ -215,6 +220,9 @@ struct AppState {
     sessions: Mutex<EditorSessions>,
     /// The files the current editor window was opened with; later ones arrive as `Files` events.
     editor_files: Mutex<Vec<String>>,
+    /// Held while an immediate discard (`editor_discard` with no `after`) recycles its clip, so
+    /// the process doesn't exit halfway through. Flow tracks deferred discards itself.
+    recycling: Mutex<()>,
 }
 
 impl AppState {
@@ -484,6 +492,7 @@ async fn editor_export(app: AppHandle, request: ExportRequest) -> Result<u64, St
 async fn editor_discard(app: AppHandle, path: String, after: Vec<u64>) -> Result<(), String> {
     blocking(app, move |_, state| {
         if after.is_empty() {
+            let _recycling = lock(&state.recycling);
             return recycle(&path);
         }
         let (reply, recorded) = mpsc::channel();
@@ -567,11 +576,14 @@ impl Dispatcher {
             Msg::EditorReady => self.flow.on_editor_ready(),
             Msg::EditorDestroyed => {
                 // Its clips go with it. Closing waits for their ffmpeg runs to stop, so it runs on
-                // its own thread; `RunEvent::Exit` waits for it through the sessions lock.
+                // its own thread; `RunEvent::Exit` waits for it through the sessions lock. Only the
+                // sessions reserved by now are this editor's: the next editor (opened after this
+                // message) may reserve one before the cleanup thread gets the lock.
                 let app = self.app.clone();
+                let upto = next_session_id();
                 let _ = thread::Builder::new()
                     .name("hasami-editor-cleanup".into())
-                    .spawn(move || lock(&app.state::<AppState>().sessions).close_all());
+                    .spawn(move || lock(&app.state::<AppState>().sessions).close_before(upto));
                 let settled = self.settled();
                 self.flow.on_editor_closed(settled)
             }
@@ -747,10 +759,14 @@ pub(crate) struct Flow {
     finished: HashMap<u64, bool>,
     /// Deferred discards not yet resolved. The app doesn't exit while there are any.
     discards: Vec<PendingDiscard>,
-    /// Ids for discard outcomes shown in the progress window, counting down from `u64::MAX`, well
-    /// clear of the queue's job ids.
+    /// Ids for discard outcomes shown in the progress window, counting down from
+    /// [`FIRST_NOTICE_ID`], well clear of the queue's job ids.
     next_notice_id: u64,
 }
+
+/// The first synthetic notice id: 2^53 − 1, the largest integer a JS number holds exactly, so the
+/// page can tell neighbouring ids apart.
+const FIRST_NOTICE_ID: u64 = (1 << 53) - 1;
 
 impl Flow {
     pub(crate) fn new() -> Self {
@@ -768,7 +784,7 @@ impl Flow {
             exports: HashMap::new(),
             finished: HashMap::new(),
             discards: Vec::new(),
-            next_notice_id: u64::MAX,
+            next_notice_id: FIRST_NOTICE_ID,
         }
     }
 
@@ -1890,7 +1906,7 @@ mod tests {
         let effects = f.on_recycled("t.mp4".into(), Err(DISCARD_FAILED.into()), true);
         assert_eq!(effects, vec![OPEN_EXPORT]);
         assert!(f.on_ready().contains(&Effect::Emit(JobEvent::Failed {
-            id: u64::MAX,
+            id: 9_007_199_254_740_991, // Number.MAX_SAFE_INTEGER
             message: DISCARD_FAILED.into(),
             original_intact: true
         })));

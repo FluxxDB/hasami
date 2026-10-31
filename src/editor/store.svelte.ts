@@ -229,14 +229,21 @@ export class EditorStore {
 
   /**
    * Adds files to the end of the queue, once per path among those not dealt with yet (a file
-   * already exported, skipped, kept or failed can be trimmed again; one waiting to be recycled
-   * can't). At the summary, the first opens.
+   * already exported, skipped, kept or failed can be trimmed again; one waiting to be recycled,
+   * or to be replaced or moved by a Quick / Save raw export still to finish, can't). At the
+   * summary, the first opens.
    */
   addFiles(paths: string[]): void {
     const resume = this.showSummary;
-    // A clip waiting to be recycled is as good as gone: don't open it again.
-    const waiting = this.log.flatMap((l) => (l.action === 'discard' && l.state === 'waiting' ? [l.input] : []));
-    const pending = new Set([...this.queue.files.slice(this.queue.index), ...waiting]);
+    // A clip waiting to be recycled or moved is as good as gone: don't open it again.
+    const running = new Set(this.exports.running);
+    const leaving = this.log.flatMap((l) =>
+      (l.action === 'discard' && l.state === 'waiting') ||
+      ((l.action === 'quick' || l.action === 'save_raw') && running.has(l.id))
+        ? [l.input]
+        : [],
+    );
+    const pending = new Set([...this.queue.files.slice(this.queue.index), ...leaving]);
     for (const p of paths) {
       if (pending.has(p)) continue;
       pending.add(p);

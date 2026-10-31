@@ -207,3 +207,18 @@ pub fn fixture_webm_vp9_opus(dir: &Path) -> PathBuf {
     ]);
     out
 }
+
+/// 2 s of 320x180 VP8 video with one Opus track, in a WebM container (a browser recorder's kind).
+pub fn fixture_webm_vp8_opus(dir: &Path) -> PathBuf {
+    let out = out_path(dir, "clip_vp8.webm");
+    ffmpeg(&[
+        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "500k",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "libopus", "-ac", "2",
+        "-t", "2",
+        s(&out),
+    ]);
+    out
+}
