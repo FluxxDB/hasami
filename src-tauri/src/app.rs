@@ -239,12 +239,15 @@ impl Dispatcher {
     }
 
     fn apply(&mut self, effects: Vec<Effect>) {
-        for effect in effects {
+        let mut todo = std::collections::VecDeque::from(effects);
+        while let Some(effect) = todo.pop_front() {
             match effect {
                 Effect::OpenWindow { kind, ext } => {
                     if let Err(e) = self.open_window(kind, ext) {
                         eprintln!("hasami: could not open the progress window: {e}");
-                        self.flow.on_open_failed();
+                        // With no window coming, this may have been the last thing to wait for.
+                        let settled = self.settled();
+                        todo.extend(self.flow.on_open_failed(settled));
                     }
                 }
                 Effect::Emit(event) => {
@@ -394,9 +397,14 @@ impl Flow {
         out
     }
 
-    /// An `OpenWindow` effect could not be carried out; the next event tries again.
-    pub(crate) fn on_open_failed(&mut self) {
+    /// An `OpenWindow` effect could not be carried out; the next event tries again. If nothing
+    /// else is coming (the window was for a trim notice or the final drain), exit instead of
+    /// waiting forever with no window.
+    pub(crate) fn on_open_failed(&mut self, settled: bool) -> Vec<Effect> {
+        let mut out = Vec::new();
         self.forget_window();
+        self.exit_if_finished(settled, &mut out);
+        out
     }
 
     fn forget_window(&mut self) {
@@ -851,9 +859,28 @@ mod tests {
     fn a_failed_window_open_is_retried_on_the_next_event() {
         let mut f = Flow::new();
         assert_eq!(f.on_job_event(queued(1, 1), false), vec![OPEN_COMPRESS]);
-        f.on_open_failed();
+        assert_eq!(f.on_open_failed(false), vec![], "jobs remain, so no exit");
         assert_eq!(f.on_job_event(started(1), false), vec![OPEN_COMPRESS]);
         assert_eq!(f.on_ready(), emits(&[queued(1, 1), started(1)]));
+    }
+
+    #[test]
+    fn a_failed_window_open_with_nothing_left_exits() {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
+        assert_eq!(f.on_tick(t0 + ms(400), true), vec![OPEN_COMPRESS]);
+        assert_eq!(f.on_open_failed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_failed_window_open_waits_while_a_batch_is_collected() {
+        let t0 = Instant::now();
+        let mut f = Flow::new();
+        f.on_action(Action::Trim(files(&["t.mp4"])), t0);
+        assert_eq!(f.on_tick(t0 + ms(400), true), vec![OPEN_COMPRESS]);
+        f.on_action(Action::Compress(files(&["a.mp4"])), t0 + ms(450));
+        assert_eq!(f.on_open_failed(true), vec![]);
     }
 
     #[test]
