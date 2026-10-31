@@ -620,6 +620,21 @@ describe('EditorStore queue and exports', () => {
     expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0], FILES[2]]);
   });
 
+  it("a file whose Quick / Save raw export is still queued isn't trimmed again; one exporting audio is", async () => {
+    const s = await queued(FILES);
+    await s.exportClip('audio'); // job 100 only reads a.mp4, and stays on it
+    await s.skip();
+    await s.exportClip('quick'); // job 101 will recycle b.mp4
+    await s.exportClip('save_raw'); // job 102 will move c.mp4 to Raw
+    expect(s.showSummary).toBe(true);
+    s.applyEvent({ type: 'Files', paths: [FILES[1], FILES[2], FILES[0]] });
+    expect(s.queue.files).toEqual([...FILES, FILES[0]]);
+    // Once the export has ended (here it failed and left the original), a retry is allowed.
+    s.applyEvent({ type: 'ExportFailed', id: 101, input: FILES[1], message: 'No.', original_intact: true });
+    s.applyEvent({ type: 'Files', paths: [FILES[1], FILES[2]] });
+    expect(s.queue.files).toEqual([...FILES, FILES[0], FILES[1]]);
+  });
+
   it('files arriving at the summary open the next one', async () => {
     const s = await queued(FILES.slice(0, 2));
     await s.skip();
