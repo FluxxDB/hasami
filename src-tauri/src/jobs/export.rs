@@ -12,7 +12,6 @@
 //! its name; the original is touched last. On any error or cancel the temp file is deleted.
 
 use std::ffi::OsString;
-use std::fs;
 use std::path::Path;
 
 use super::compress::{create_work_dir, encode_to_limit, RemoveOnDrop};
@@ -29,6 +28,8 @@ use crate::verify::{verify_output, VerifyError};
 
 /// Shown for an audio export when every audio track is muted or the source has none.
 const NO_AUDIO: &str = "This clip has no audio to export.";
+/// Shown for a video export whose timeline has no video left in it.
+const NO_VIDEO: &str = "Couldn't export this clip: there's no video left in it.";
 /// Shown when the rendered result fails verification for a reason other than its size.
 const DIDNT_CHECK_OUT: &str = "Couldn't export this clip: the result didn't check out.";
 /// Shown when a Fit to 20 MB result is still over the limit at the final check.
@@ -64,6 +65,8 @@ fn export_in(
             return Err(JobError::Message(NO_AUDIO.to_owned()));
         }
         (Render::Mp3, graph)
+    } else if req.video.is_empty() {
+        return Err(JobError::Message(NO_VIDEO.to_owned()));
     } else if req.fit_20mb {
         (Render::Fit, build_graph(req))
     } else {
@@ -71,11 +74,13 @@ fn export_in(
     };
 
     let final_path = clipped_path(&req.input, render.extension());
-    let temp = temp_path_for(&final_path);
-    let job = Job { paths, req, info: &info, graph: &graph, render, temp: &temp, work_root };
+    // Deleted however this ends (a committed temp is already gone), unless a failed commit
+    // left the only copy of the result there.
+    let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
+    let job = Job { paths, req, info: &info, graph: &graph, render, temp: temp.path(), work_root };
     let result = job.run(&final_path, cancel, on_progress);
-    if result.as_ref().is_err_and(|e| !e.keeps_new_file()) {
-        let _ = fs::remove_file(&temp);
+    if result.as_ref().is_err_and(JobError::keeps_new_file) {
+        temp.keep();
     }
     result
 }
@@ -198,7 +203,8 @@ impl Job<'_> {
     }
 
     /// Fit to 20 MB: render the edit to an intermediate in a fresh work folder (pass 1), then
-    /// remux it as is if it already fits, or run the two Compress passes on it (passes 2–3).
+    /// run the two Compress passes on it (passes 2–3), or, if it already fits, just remux it
+    /// (reported as pass 3, so the bar still ends full).
     /// The work folder is removed however this ends.
     fn fit(&self, cancel: &CancelToken, on_progress: &mut dyn FnMut(JobProgress)) -> Result<(), JobError> {
         let work = RemoveOnDrop::dir(create_work_dir(self.work_root, "hasami-export")?);
@@ -212,7 +218,7 @@ impl Job<'_> {
         match plan_compress(&info)? {
             CompressDecision::AlreadySmall => {
                 let args = remux_args(&intermediate, self.temp);
-                run_ffmpeg(self.paths, &args, info.duration_s, cancel, &mut |f| on_progress(at_pass(2, f)))?;
+                run_ffmpeg(self.paths, &args, info.duration_s, cancel, &mut |f| on_progress(at_pass(3, f)))?;
             }
             CompressDecision::Encode(plan) => {
                 // Its passes 1–2 are this export's passes 2–3.
@@ -319,6 +325,7 @@ fn remux_args(input: &Path, out: &Path) -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use super::*;
@@ -459,7 +466,8 @@ mod tests {
         let outcome = export_in(&paths, &fit_request(&input), &cancel, &mut |_| cancel.cancel(), root.path());
         assert!(matches!(outcome, Err(JobError::Cancelled)), "{outcome:?}");
         assert!(empty(root.path()), "work folder left behind after cancel");
-        assert!(input.exists());
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["clip.mkv"], "only the untouched input may remain");
 
         let mut passes = Vec::new();
         let mut record = |p: JobProgress| passes.push((p.pass, p.passes));
@@ -467,8 +475,24 @@ mod tests {
         let Ok(JobOutcome::Done { output, .. }) = outcome else { panic!("{outcome:?}") };
         assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
         assert!(empty(root.path()), "work folder left behind after success");
-        // A small edit already fits, so the intermediate is just remuxed, as pass 2 of 3.
-        assert!(passes.contains(&(1, 3)), "{passes:?}");
-        assert!(passes.iter().all(|&(pass, of)| of == 3 && pass <= 2), "{passes:?}");
+        // A small edit already fits, so the intermediate is just remuxed, as the last pass.
+        assert!(passes.contains(&(1, 3)) && passes.contains(&(3, 3)), "{passes:?}");
+        assert!(passes.iter().all(|&(pass, of)| of == 3 && pass != 2), "{passes:?}");
+    }
+
+    #[test]
+    fn video_export_without_video_is_refused() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        for (mode, fit) in [(ExportMode::Quick, false), (ExportMode::SaveRaw, true)] {
+            let req = ExportRequest { mode, fit_20mb: fit, video: Vec::new(), ..fit_request(&input) };
+            let mut ran = false;
+            let err = export_in(&paths, &req, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+            assert_eq!(err.to_string(), NO_VIDEO);
+            assert!(!ran, "ffmpeg must not run");
+        }
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["clip.mkv"]);
     }
 }

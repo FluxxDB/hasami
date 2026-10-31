@@ -315,3 +315,76 @@ fn cancel_leaves_original() {
     assert_eq!(fs::read(&input).unwrap(), original);
     assert_eq!(names_in(dir.path()), ["clip.mp4"]);
 }
+
+/// Duration in seconds of `file`'s first audio stream, as ffprobe reports it.
+fn audio_stream_duration(paths: &FfmpegPaths, file: &Path) -> f64 {
+    let output = hidden_command(&paths.ffprobe)
+        .args(["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "csv=p=0"])
+        .arg(file)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse().unwrap_or_else(|_| panic!("no audio stream duration: {text:?}"))
+}
+
+/// Only the first second of track 0 is kept, on a 3 s timeline.
+fn early_audio_request(input: &Path, mode: ExportMode) -> ExportRequest {
+    ExportRequest {
+        video: vec![VideoPiece { src_start: 0.0, src_end: 3.0 }],
+        audio: vec![AudioTrackRequest {
+            index: 0,
+            gain_db: 0.0,
+            pieces: vec![AudioPiece { at: 0.0, src_start: 0.0, src_end: 1.0 }],
+        }],
+        ..cut_request(input, mode)
+    }
+}
+
+#[test]
+fn audio_export_pads_to_the_video_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = clip_in(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+
+    let output = done(run_export(&early_audio_request(&input, ExportMode::Audio)));
+
+    let info = probe(&paths, &output).unwrap();
+    assert!((info.duration_s - 3.0).abs() < 0.1, "duration was {}", info.duration_s);
+}
+
+#[test]
+fn video_export_audio_runs_to_the_video_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = clip_in(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+
+    let output = done(run_export(&early_audio_request(&input, ExportMode::Quick)));
+
+    let audio_s = audio_stream_duration(&paths, &output);
+    assert!((audio_s - 3.0).abs() < 0.1, "audio stream lasts {audio_s} s");
+}
+
+#[test]
+fn fit_all_muted_has_no_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_big_h264(dir.path(), 4);
+    let paths = FfmpegPaths::resolve().unwrap();
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw,
+        fit_20mb: true,
+        duration_s: 4.0,
+        video: vec![VideoPiece { src_start: 0.0, src_end: 4.0 }],
+        audio: vec![],
+    };
+
+    let output = done(run_export(&req));
+
+    assert_eq!(output, dir.path().join("[CLIPPED] big_h264.mp4"));
+    assert!(fs::metadata(&output).unwrap().len() <= 20_000_000);
+    let info = probe(&paths, &output).unwrap();
+    assert_eq!(info.video.as_ref().unwrap().codec, "h264");
+    assert_eq!(info.audio.len(), 0);
+    assert!(leftover_temp_files(dir.path()).is_empty());
+}

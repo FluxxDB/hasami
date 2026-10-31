@@ -71,7 +71,8 @@ fn num(n: f64) -> String {
 
 /// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`; each
 /// audio track's pieces trimmed, delayed to their place on the timeline, mixed and gained into
-/// `[t<k>]`; all tracks mixed, cut to the output length and made stereo into `[aout]`.
+/// `[t<k>]`; all tracks mixed, padded with silence and cut to exactly the output length (kept
+/// audio may end before the video does), and made stereo into `[aout]`.
 pub fn build_graph(req: &ExportRequest) -> Graph {
     let mut parts: Vec<String> = Vec::new();
 
@@ -126,10 +127,10 @@ pub fn build_graph(req: &ExportRequest) -> Graph {
         } else {
             String::new()
         };
+        let dur = num(req.duration_s);
         parts.push(format!(
-            "{}{mix}atrim=end={},aformat=channel_layouts=stereo[aout]",
-            track_labels.concat(),
-            num(req.duration_s)
+            "{}{mix}apad=whole_dur={dur},atrim=end={dur},aformat=channel_layouts=stereo[aout]",
+            track_labels.concat()
         ));
         Some("[aout]".to_owned())
     };
@@ -291,7 +292,7 @@ mod tests {
         assert!(f.contains("[0:a:2]atrim=start=0:end=12"), "{f}");
         assert!(f.contains("volume=-6.00dB"), "{f}");
         assert!(f.contains("amix=inputs=2:normalize=0:duration=longest"), "{f}");
-        assert!(f.ends_with("atrim=end=71,aformat=channel_layouts=stereo[aout]"), "{f}");
+        assert!(f.ends_with("apad=whole_dur=71,atrim=end=71,aformat=channel_layouts=stereo[aout]"), "{f}");
         assert_eq!(g.audio_out.as_deref(), Some("[aout]"));
     }
 
