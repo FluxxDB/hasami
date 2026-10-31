@@ -65,6 +65,12 @@ impl JobKind {
         }
     }
 
+    /// Whether the job is one of the progress window's files ("File 3 of 12"). Exports belong to
+    /// the editor: they get no `Queued` snapshots and don't count in them.
+    fn in_batch(&self) -> bool {
+        !matches!(self, JobKind::Export(_))
+    }
+
     /// Output extension of a convert job, without the dot.
     pub fn ext(&self) -> Option<&'static str> {
         match self {
@@ -197,24 +203,31 @@ impl JobQueue {
         Self { shared }
     }
 
-    /// Append one job per input. Emits `Queued` with the updated batch size.
+    /// Append one job per input. Emits `Queued` with the updated batch size (not for exports).
     pub fn enqueue(&self, kind: JobKind, inputs: Vec<PathBuf>) {
         if inputs.is_empty() {
             return;
         }
         let mut st = self.shared.lock();
+        let in_batch = kind.in_batch();
         for input in inputs {
             st.push(kind.clone(), input);
         }
-        st.emit_snapshot();
+        if in_batch {
+            st.emit_snapshot();
+        }
         self.shared.wake.notify_all();
     }
 
-    /// Append one job and return its id. Emits `Queued` with the updated batch size.
+    /// Append one job and return its id. Emits `Queued` with the updated batch size (not for
+    /// exports).
     pub fn enqueue_one(&self, kind: JobKind, input: PathBuf) -> u64 {
         let mut st = self.shared.lock();
+        let in_batch = kind.in_batch();
         let id = st.push(kind, input);
-        st.emit_snapshot();
+        if in_batch {
+            st.emit_snapshot();
+        }
         self.shared.wake.notify_all();
         id
     }
@@ -232,12 +245,14 @@ impl JobQueue {
         let Some(at) = st.pending.iter().position(|spec| spec.id == id) else {
             return;
         };
-        st.pending.remove(at);
-        st.batch_total -= 1;
+        let dropped = st.pending.remove(at).expect("position is in range");
+        if dropped.kind.in_batch() {
+            st.batch_total -= 1;
+        }
         (st.emit)(JobEvent::Failed { id, message: CANCELLED.into(), original_intact: true });
         if st.current.is_none() && st.pending.is_empty() {
             st.drain();
-        } else {
+        } else if dropped.kind.in_batch() {
             st.emit_snapshot();
         }
     }
@@ -280,7 +295,8 @@ struct State {
     emit: Box<dyn Fn(JobEvent) + Send>,
     pending: VecDeque<JobSpec>,
     next_id: u64,
-    /// Jobs in the current batch (since the last `Drained`), minus dropped ones.
+    /// Jobs in the current batch (since the last `Drained`), minus dropped ones. Exports are not
+    /// counted (see [`JobKind::in_batch`]).
     batch_total: usize,
     /// Jobs of the current batch that have started, including the running one.
     batch_started: usize,
@@ -306,8 +322,10 @@ impl State {
     fn push(&mut self, kind: JobKind, input: PathBuf) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        if kind.in_batch() {
+            self.batch_total += 1;
+        }
         self.pending.push_back(JobSpec { id, kind, input });
-        self.batch_total += 1;
         id
     }
 
@@ -347,7 +365,9 @@ impl Shared {
                     st = self.wake.wait(st).unwrap_or_else(|p| p.into_inner());
                 };
                 let cancel = CancelToken::new();
-                st.batch_started += 1;
+                if spec.kind.in_batch() {
+                    st.batch_started += 1;
+                }
                 st.current = Some(Current { id: spec.id, cancel: cancel.clone(), confirm: Confirm::NotAsked });
                 (spec, cancel)
             };
@@ -358,7 +378,9 @@ impl Shared {
             let preview = panic::catch_unwind(AssertUnwindSafe(|| runner.preview(&spec))).ok().flatten();
             {
                 let st = self.lock();
-                st.emit_snapshot();
+                if spec.kind.in_batch() {
+                    st.emit_snapshot();
+                }
                 (st.emit)(JobEvent::Started {
                     id: spec.id,
                     input: spec.input.display().to_string(),
@@ -898,6 +920,53 @@ mod tests {
             "{started:?}"
         );
         assert!(all.iter().any(done(id)));
+    }
+
+    /// Exports belong to the editor: they never appear in the progress window's "File N of M"
+    /// snapshots. This pins the event sequence the app's Flow tests model.
+    #[test]
+    fn exports_emit_no_snapshots() {
+        let (queue, events, _log) = queue_with(|spec, _, _, _| done_outcome(spec));
+        let job = JobKind::Export(ExportJob(Arc::new(export_request("clip.mp4"))));
+        let id = queue.enqueue_one(job.clone(), PathBuf::from("clip.mp4"));
+        let all = events.wait_drained();
+        assert!(matches!(&all[..], [JobEvent::Started { .. }, JobEvent::Done { .. }, JobEvent::Drained]), "{all:?}");
+
+        // Beside a compress batch, only the compress files are counted.
+        let (queue, events, _log) = queue_with(|spec, _, _, _| done_outcome(spec));
+        queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
+        queue.enqueue_one(job, PathBuf::from("clip.mp4"));
+        queue.enqueue(JobKind::Compress, paths(&["b.mp4"]));
+        let all = events.wait_drained();
+        let snapshots: Vec<_> = all
+            .iter()
+            .filter_map(|e| match e {
+                JobEvent::Queued { snapshot } => Some((snapshot.current_index, snapshot.total)),
+                _ => None,
+            })
+            .collect();
+        assert!(snapshots.iter().all(|&(i, total)| i <= total && total <= 2), "{snapshots:?}");
+        assert!(snapshots.contains(&(2, 2)), "{snapshots:?}");
+        let _ = id;
+    }
+
+    #[test]
+    fn a_cancelled_waiting_export_emits_no_snapshot() {
+        let (queue, events, _log) = queue_with(|spec, _, cancel, _| {
+            if spec.id == 1 {
+                until_cancelled(cancel)
+            } else {
+                done_outcome(spec)
+            }
+        });
+        queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
+        events.wait_for("Started 1", started(1));
+        let id = queue.enqueue_one(JobKind::Export(ExportJob(Arc::new(export_request("clip.mp4")))), PathBuf::from("clip.mp4"));
+        queue.cancel(id);
+        queue.cancel(1);
+        let all = events.wait_drained();
+        let after_start = &all[pos(&all, started(1)) + 1..];
+        assert!(!after_start.iter().any(|e| matches!(e, JobEvent::Queued { .. })), "{all:?}");
     }
 
     #[test]
