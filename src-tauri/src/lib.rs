@@ -4,6 +4,7 @@
 pub mod app;
 pub mod cli;
 pub mod compress;
+pub mod editor;
 pub mod fsops;
 pub mod jobs;
 pub mod media;
