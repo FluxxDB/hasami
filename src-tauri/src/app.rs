@@ -128,6 +128,7 @@ pub fn run(action: Action) {
         paths,
         sessions: Mutex::new(EditorSessions::new()),
         editor_files: Mutex::new(Vec::new()),
+        recycling: Mutex::new(()),
     };
     tauri::Builder::default()
         // Must be the first plugin: a second instance forwards its argv here and exits.
@@ -189,9 +190,13 @@ pub fn run(action: Action) {
             // Closing the last window must not end the process while jobs remain; the dispatcher
             // calls `exit` (which carries a code) once the queue has drained.
             RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
-            // Waits (briefly) for the editor's cleanup, and catches a clip that finished opening
-            // after the editor closed.
-            RunEvent::Exit => lock(&app.state::<AppState>().sessions).close_all(),
+            // Waits for an immediate discard still recycling its clip, then (briefly) for the
+            // editor's cleanup, and catches a clip that finished opening after the editor closed.
+            RunEvent::Exit => {
+                let state = app.state::<AppState>();
+                drop(lock(&state.recycling));
+                lock(&state.sessions).close_all();
+            }
             _ => {}
         });
 }
@@ -215,6 +220,9 @@ struct AppState {
     sessions: Mutex<EditorSessions>,
     /// The files the current editor window was opened with; later ones arrive as `Files` events.
     editor_files: Mutex<Vec<String>>,
+    /// Held while an immediate discard (`editor_discard` with no `after`) recycles its clip, so
+    /// the process doesn't exit halfway through. Flow tracks deferred discards itself.
+    recycling: Mutex<()>,
 }
 
 impl AppState {
@@ -484,6 +492,7 @@ async fn editor_export(app: AppHandle, request: ExportRequest) -> Result<u64, St
 async fn editor_discard(app: AppHandle, path: String, after: Vec<u64>) -> Result<(), String> {
     blocking(app, move |_, state| {
         if after.is_empty() {
+            let _recycling = lock(&state.recycling);
             return recycle(&path);
         }
         let (reply, recorded) = mpsc::channel();
