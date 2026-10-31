@@ -8,9 +8,11 @@
     valuetext: string;
     disabled?: boolean;
     oninput?: (value: number) => void;
+    /** On release (or each keyboard step). */
+    onchange?: (value: number) => void;
   }
 
-  let { value, label, valuetext, disabled = false, oninput }: Props = $props();
+  let { value, label, valuetext, disabled = false, oninput, onchange }: Props = $props();
 </script>
 
 <div class="slider" style:--pos={value}>
@@ -19,12 +21,13 @@
     type="range"
     min="0"
     max="1"
-    step="0.001"
+    step="0.01"
     {value}
     {disabled}
     aria-label={label}
     aria-valuetext={valuetext}
     oninput={(e) => oninput?.(Number(e.currentTarget.value))}
+    onchange={(e) => onchange?.(Number(e.currentTarget.value))}
   />
 </div>
 

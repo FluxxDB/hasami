@@ -4,7 +4,14 @@
   import type { EditorStore } from '../store.svelte';
   import { videoEnd } from '../timeline';
 
-  let { store }: { store: EditorStore } = $props();
+  interface Props {
+    store: EditorStore;
+    /** The picture element; the playback engine owns its source. */
+    video?: HTMLVideoElement;
+    onVideoError?: () => void;
+  }
+
+  let { store, video = $bindable(), onVideoError }: Props = $props();
 
   // Room around the frame: top padding, the gap above the transport, the transport, bottom padding.
   const PAD_TOP = 18;
@@ -31,8 +38,6 @@
   });
   const transportW = $derived(Math.min(Math.max(frame.w, MIN_TRANSPORT_W), Math.max(0, w - 32)));
 
-  const videoSrc = $derived(media ? api.src(media.path) : '');
-
   // Until the video has a frame to show, the nearest thumbnail stands in for it.
   const poster = $derived.by(() => {
     const thumbs = store.thumbs;
@@ -44,6 +49,7 @@
   });
 
   const playing = $derived(store.shuttle.dir !== 0);
+  const preparing = $derived(store.proxyFraction);
   const badge = $derived(
     store.shuttle.dir === -1 || store.shuttle.speed > 1
       ? `${store.shuttle.dir === -1 ? '−' : ''}${store.shuttle.speed}×`
@@ -53,8 +59,22 @@
 
 <section class="viewer" aria-label="Viewer" bind:clientWidth={w} bind:clientHeight={h}>
   <div class="frame" style:width="{frame.w}px" style:height="{frame.h}px">
-    {#if media?.video}
-      <video src={videoSrc || undefined} poster={poster || undefined} muted playsinline preload="auto"></video>
+    <!-- Always present (hidden for audio-only files), because the engine's clock lives on it. -->
+    <video
+      bind:this={video}
+      class:none={!media?.video}
+      poster={poster || undefined}
+      muted
+      playsinline
+      preload="auto"
+      onerror={() => onVideoError?.()}
+    ></video>
+    {#if preparing !== null}
+      <div class="preparing" role="status">
+        <span class="cap">Preparing preview</span>
+        <div class="meter" aria-hidden="true"><i style:width="{Math.round(preparing * 100)}%"></i></div>
+        <span class="pct">{Math.round(preparing * 100)}%</span>
+      </div>
     {/if}
     {#if store.error}
       <p class="message">{store.error}</p>
@@ -67,23 +87,23 @@
       {#if badge}<span class="speed cap">{badge}</span>{/if}
     </div>
     <div class="tbtns">
-      <button type="button" class="ibtn" aria-label="Jump to start" disabled={!media}>
+      <button type="button" class="ibtn" aria-label="Jump to start" disabled={!media} onclick={() => store.command('home')}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 20 9 12l10-8v16Z" /><path d="M5 19V5" /></svg>
       </button>
-      <button type="button" class="ibtn" aria-label="Previous frame" disabled={!media}>
+      <button type="button" class="ibtn" aria-label="Previous frame" disabled={!media} onclick={() => store.command('frameBack')}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
       </button>
-      <button type="button" class="ibtn play" aria-label={playing ? 'Pause' : 'Play'} disabled={!media}>
+      <button type="button" class="ibtn play" aria-label={playing ? 'Pause' : 'Play'} disabled={!media} onclick={() => store.command('playPause')}>
         {#if playing}
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></svg>
         {:else}
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a.5.5 0 0 0 .77.42l11.5-7.5a.5.5 0 0 0 0-.84L7.77 4.08A.5.5 0 0 0 7 4.5Z" /></svg>
         {/if}
       </button>
-      <button type="button" class="ibtn" aria-label="Next frame" disabled={!media}>
+      <button type="button" class="ibtn" aria-label="Next frame" disabled={!media} onclick={() => store.command('frameFwd')}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
       </button>
-      <button type="button" class="ibtn" aria-label="Jump to end" disabled={!media}>
+      <button type="button" class="ibtn" aria-label="Jump to end" disabled={!media} onclick={() => store.command('end')}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 4 10 8-10 8V4Z" /><path d="M19 5v14" /></svg>
       </button>
     </div>
@@ -111,11 +131,47 @@
   }
   video {
     display: block;
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
     background: var(--black);
   }
+  video.none {
+    display: none;
+  }
+
+  /* Shown while an H.264 stand-in is made for a video this webview can't decode. */
+  .preparing {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(0, 0, 0, 0.72);
+    color: var(--bone);
+  }
+  .meter {
+    width: 180px;
+    height: 1px;
+    background: var(--iron);
+  }
+  .meter i {
+    display: block;
+    height: 1px;
+    background: var(--bone);
+    transition: width 0.2s ease-out;
+  }
+  .pct {
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--pebble);
+    font-variant-numeric: tabular-nums;
+  }
+
   .message {
     position: absolute;
     inset: 0;
@@ -196,7 +252,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .ibtn {
+    .ibtn,
+    .meter i {
       transition: none;
     }
   }
