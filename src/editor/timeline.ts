@@ -233,28 +233,40 @@ function moveVideoEdge(
   const video = layoutVideo(tl.video.map((s, i) => (i === vi ? { ...s, src } : s)));
   if (!linked) return { ...tl, video };
 
-  // Linked: audio segs with the same link whose matching edge sits on the dragged video edge get
-  // the same src change. Anything else on an audio track is ordinary audio. Segs after the edge
-  // shift by the length that track's moved seg actually changed, so a drag never overlaps them.
+  // Linked: an audio seg with the same link whose matching edge sits on the dragged video edge
+  // gets the same src change, and the segs after it on its track shift by the length it actually
+  // changed. A track with no such seg is ordinary audio: its segs after the edge shift by the
+  // video's length change, but never into a seg that stays put. Either way a drag cannot overlap.
   const aligned = (s: Seg): boolean =>
     s.link === seg.link &&
     (edge === 'end' ? Math.abs(segEnd(s) - oldEnd) < EPS : Math.abs(s.at - seg.at) < EPS);
   const audio = tl.audio.map((tr) => {
-    let trackShift = lenChange;
-    const moved = tr.segs.map((s) => {
-      if (!aligned(s)) return s;
-      const next: [number, number] =
+    const hit = tr.segs.find(aligned);
+    let from = oldEnd;
+    let shift = lenChange;
+    let hitSrc: [number, number] | undefined;
+    if (hit) {
+      hitSrc =
         edge === 'end'
-          ? [s.src[0], clamp(s.src[1] + d, s.src[0] + frame, D)]
-          : [clamp(s.src[0] + d, 0, s.src[1] - frame), s.src[1]];
-      trackShift = edge === 'end' ? next[1] - s.src[1] : s.src[0] - next[0];
-      return { ...s, src: next };
-    });
+          ? [hit.src[0], clamp(hit.src[1] + d, hit.src[0] + frame, D)]
+          : [clamp(hit.src[0] + d, 0, hit.src[1] - frame), hit.src[1]];
+      from = segEnd(hit);
+      shift = edge === 'end' ? hitSrc[1] - hit.src[1] : hit.src[0] - hitSrc[0];
+    } else if (shift < 0) {
+      // Shrinking: followers may close up only as far as the segs that do not move.
+      const followers = tr.segs.filter((s) => s.at >= from - EPS);
+      const fixedEnd = Math.max(0, ...tr.segs.filter((s) => s.at < from - EPS).map(segEnd));
+      if (followers.length > 0) {
+        const room = Math.min(...followers.map((s) => s.at)) - fixedEnd;
+        shift = Math.max(shift, -Math.max(room, 0));
+      }
+    }
     return {
       ...tr,
-      segs: moved.map((s) =>
-        !aligned(s) && s.at >= oldEnd - EPS ? { ...s, at: s.at + trackShift } : s,
-      ),
+      segs: tr.segs.map((s) => {
+        if (s === hit && hitSrc) return { ...s, src: hitSrc };
+        return s.at >= from - EPS ? { ...s, at: s.at + shift } : s;
+      }),
     };
   });
   return { ...tl, video, audio };
@@ -298,12 +310,14 @@ function moveAudioEdge(
 
 export function setGain(tl: Timeline, index: number, gainDb: number): Timeline {
   const g = clamp(gainDb, MIN_GAIN_DB, MAX_GAIN_DB);
-  if (tl.audio.find((a) => a.index === index)?.gainDb === g) return tl;
+  const track = tl.audio.find((a) => a.index === index);
+  if (!track || track.gainDb === g) return tl;
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, gainDb: g } : a)) };
 }
 
 export function setMuted(tl: Timeline, index: number, muted: boolean): Timeline {
-  if (tl.audio.find((a) => a.index === index)?.muted === muted) return tl;
+  const track = tl.audio.find((a) => a.index === index);
+  if (!track || track.muted === muted) return tl;
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, muted } : a)) };
 }
 

@@ -383,6 +383,103 @@ describe('link and overlap invariants', () => {
   });
 });
 
+describe('linked edge drags on desynced audio never overlap', () => {
+  it('shrinking a video end edge does not pull later audio over a seg that stays put', () => {
+    let tl = cutAt(createTimeline(D, FPS, [0, 1]), 12);
+    tl = moveEdge(tl, tl.audio[1].segs[1].id, 'start', 15, false); // A1 [15,90]@15
+    tl = moveEdge(tl, tl.audio[1].segs[0].id, 'end', 15, false); // A1 [0,15]
+    expect(at(track(tl, 1).segs)).toEqual([0, 15]);
+    const out = moveEdge(tl, tl.video[0].id, 'end', 8, true);
+    expect(src(out.video)).toEqual([[0, 8], [12, 90]]);
+    expect(src(track(out, 0).segs)).toEqual([[0, 8], [12, 90]]); // aligned track ripples
+    expect(at(track(out, 0).segs)).toEqual([0, 8]);
+    expect(at(track(out, 1).segs)).toEqual([0, 15]); // desynced track cannot close up
+    expectInvariants(out);
+  });
+
+  it('a start-edge extend that lengthens a shorter aligned seg pushes its neighbour along', () => {
+    let tl = cutAt(cutAt(createTimeline(D, FPS, [0, 1]), 12), 40);
+    const a1 = tl.audio[1].segs;
+    tl = moveEdge(tl, a1[1].id, 'end', 30, false); // A1 [12,30]@12
+    tl = moveEdge(tl, a1[2].id, 'start', 31, false); // A1 [31,90]@31
+    expect(at(track(tl, 1).segs)).toEqual([0, 12, 31]);
+    const out = moveEdge(tl, tl.video[1].id, 'start', 10, true); // video [10,40]@12
+    expect(src(track(out, 1).segs)).toEqual([[0, 12], [10, 30], [31, 90]]);
+    expect(at(track(out, 1).segs)).toEqual([0, 12, 33]);
+    expectInvariants(out);
+    const shrunk = moveEdge(tl, tl.video[1].id, 'start', 20, true); // video [20,40]@12
+    expect(src(track(shrunk, 1).segs)[1]).toEqual([20, 30]);
+    expect(at(track(shrunk, 1).segs)).toEqual([0, 12, 23]);
+    expectInvariants(shrunk);
+  });
+});
+
+describe('randomized edit sequences keep the invariants', () => {
+  // mulberry32: small seeded PRNG, so a failure reproduces from the printed seed.
+  const prng = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const TOL = 1e-6;
+
+  function check(tl: Timeline, where: string) {
+    const fail = (msg: string) => {
+      throw new Error(`${where}: ${msg}\n${JSON.stringify(tl)}`);
+    };
+    let t = 0;
+    for (const s of tl.video) {
+      if (Math.abs(s.at - t) > TOL) fail(`video not contiguous at ${s.id}`);
+      t += segLen(s);
+    }
+    const tracks = [tl.video, ...tl.audio.map((a) => a.segs)];
+    for (const segs of tracks) {
+      const sorted = [...segs].sort((a, b) => a.at - b.at);
+      if (new Set(segs.map((s) => s.link)).size !== segs.length) fail('shared link on one track');
+      if (new Set(segs.map((s) => s.id)).size !== segs.length) fail('duplicate id');
+      for (let i = 0; i < sorted.length; i++) {
+        const x = sorted[i];
+        if (x.at < -TOL) fail(`negative at ${x.id}`);
+        if (x.src[0] < -TOL || x.src[1] > tl.sourceDuration + TOL) fail(`src out of range ${x.id}`);
+        if (segLen(x) < 1 / tl.fps - TOL) fail(`shorter than a frame ${x.id}`);
+        if (i > 0 && x.at < sorted[i - 1].at + segLen(sorted[i - 1]) - TOL) fail(`overlap at ${x.id}`);
+      }
+    }
+  }
+
+  it('holds across 300 seeded sequences of cuts, deletes and edge drags', () => {
+    for (let seed = 1; seed <= 300; seed++) {
+      const rnd = prng(seed);
+      const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
+      let tl = createTimeline(D, FPS, [0, 1]);
+      for (let step = 0; step < 30; step++) {
+        const allSegs = [...tl.video, ...tl.audio.flatMap((a) => a.segs)];
+        const linked = rnd() < 0.6;
+        const r = rnd();
+        let label: string;
+        if (r < 0.25) {
+          const t = rnd() * (videoEnd(tl) + 5);
+          label = `cutAt(${t})`;
+          tl = cutAt(tl, t);
+        } else if (r < 0.45) {
+          const target = pick(allSegs);
+          const ids = rnd() < 0.5 ? linkedIds(tl, target.id) : [target.id];
+          label = `deleteSegs(${ids.join(',')}, ${linked})`;
+          tl = deleteSegs(tl, ids, linked);
+        } else {
+          const target = pick(allSegs);
+          const edge = rnd() < 0.5 ? 'start' : 'end';
+          const to = rnd() * (D + 20) - 5;
+          label = `moveEdge(${target.id}, ${edge}, ${to}, ${linked})`;
+          tl = moveEdge(tl, target.id, edge, to, linked);
+        }
+        check(tl, `seed ${seed} step ${step} ${label}`);
+      }
+    }
+  });
+});
+
 describe('snapCandidates while dragging a video edge', () => {
   it('drops the video boundaries and video end that move with an end drag', () => {
     const tl = cutAt(cutAt(createTimeline(D, FPS, []), 12), 31);

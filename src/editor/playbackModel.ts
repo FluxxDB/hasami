@@ -26,7 +26,7 @@ const pad2 = (n: number): string => String(n).padStart(2, '0');
 export function formatTimecode(t: number, fps: number): string {
   const frames = Math.round(Math.max(0, t) * fps);
   // Non-drop: a "second" holds round(fps) frames, so 29.97 never repeats or skips a number.
-  const nominal = Math.round(fps);
+  const nominal = Math.max(1, Math.round(fps));
   const secs = Math.floor(frames / nominal);
   const ff = frames % nominal;
   const h = Math.floor(secs / 3600);
