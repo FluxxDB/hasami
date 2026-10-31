@@ -15,11 +15,18 @@ pub mod verify;
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match cli::parse_args(&args) {
-        Ok(cli::Action::Register | cli::Action::Unregister) => {
-            // TODO(Task 10): run the shell-menu register/unregister here, then return without
-            // starting Tauri, so no window opens and nothing joins a running instance.
+        Ok(action) => {
+            // The installer runs `register`/`unregister`; they must exit without starting Tauri
+            // (no window, and nothing joins a running instance).
+            if let Some(code) = shell_menu::handle_action(
+                &action,
+                std::env::current_exe(),
+                shell_menu::DEFAULT_CLASSES_ROOT,
+            ) {
+                std::process::exit(code);
+            }
+            app::run(action)
         }
-        Ok(action) => app::run(action),
         Err(e) => {
             eprintln!("hasami: {e}");
             std::process::exit(2);
