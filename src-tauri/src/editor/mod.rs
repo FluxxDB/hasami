@@ -1,4 +1,6 @@
-//! The Quick Trim editor: media preparation, export requests and the ffmpeg graphs built from them.
+//! The Quick Trim editor: media preparation, sessions, export requests and the ffmpeg graphs built
+//! from them.
 
 pub mod media;
 pub mod request;
+pub mod session;

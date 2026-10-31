@@ -19,9 +19,10 @@ export type JobEvent =
       id: number;
       input: string;
       input_bytes: number;
-      // Optional display hints. Not part of the Plan 1 Rust contract; the window
-      // falls back to its `?kind=` query when they are absent (see state.ts).
-      kind?: 'compress' | 'convert' | 'trim';
+      // Optional display hints; the window falls back to its `?kind=` query when they
+      // are absent (see state.ts). `export` is a Quick Trim export whose failure is shown
+      // here because the editor window that started it has closed.
+      kind?: 'compress' | 'convert' | 'export';
       ext?: string;
       width?: number;
       height?: number;

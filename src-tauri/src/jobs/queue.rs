@@ -1,12 +1,14 @@
 //! Serial job queue (Task 9).
 //!
-//! One worker thread runs jobs one at a time, in enqueue order. Everything the progress window
-//! needs is reported through the `emit` callback as [`JobEvent`]s, which the app forwards as the
-//! `"hasami://job"` Tauri event. Events are emitted while the queue's lock is held, so they arrive
+//! One worker thread runs jobs one at a time, in enqueue order: compress and convert batches from
+//! the right-click menu, and exports from the Quick Trim editor. Everything about them is reported
+//! through the `emit` callback as [`JobEvent`]s, which the app routes to the progress window (as
+//! the `"hasami://job"` Tauri event) or, for exports, to the editor. Events are emitted while the queue's lock is held, so they arrive
 //! in a consistent order even when `enqueue`, `cancel` and the worker race. `emit` must therefore
 //! be quick and must not call back into the queue.
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -17,6 +19,7 @@ use serde::Serialize;
 
 use super::{JobError, JobOutcome, JobProgress};
 use crate::cli::Target;
+use crate::editor::request::ExportRequest;
 use crate::media::run::CancelToken;
 
 /// `Failed.message` for every user cancel. The progress window keys on this exact string.
@@ -29,21 +32,43 @@ const UNEXPECTED: &str = "Something went wrong while processing this file.";
 pub enum JobKind {
     Compress,
     Convert(Target),
+    /// Render one Quick Trim edit.
+    Export(ExportJob),
+}
+
+/// One export the editor asked for. Two exports are the same job only if they share the request,
+/// never because their requests happen to be equal.
+#[derive(Debug, Clone)]
+pub struct ExportJob(pub Arc<ExportRequest>);
+
+impl PartialEq for ExportJob {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ExportJob {}
+
+impl Hash for ExportJob {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
 }
 
 impl JobKind {
-    /// `"compress"` or `"convert"`, as the progress window expects in `Started.kind`.
+    /// `"compress"`, `"convert"` or `"export"`, as the progress window expects in `Started.kind`.
     pub fn name(&self) -> &'static str {
         match self {
             JobKind::Compress => "compress",
             JobKind::Convert(_) => "convert",
+            JobKind::Export(_) => "export",
         }
     }
 
     /// Output extension of a convert job, without the dot.
     pub fn ext(&self) -> Option<&'static str> {
         match self {
-            JobKind::Compress => None,
+            JobKind::Compress | JobKind::Export(_) => None,
             JobKind::Convert(Target::Mp4) => Some("mp4"),
             JobKind::Convert(Target::Mov) => Some("mov"),
             JobKind::Convert(Target::Mp3) => Some("mp3"),
@@ -179,13 +204,19 @@ impl JobQueue {
         }
         let mut st = self.shared.lock();
         for input in inputs {
-            let id = st.next_id;
-            st.next_id += 1;
-            st.pending.push_back(JobSpec { id, kind: kind.clone(), input });
-            st.batch_total += 1;
+            st.push(kind.clone(), input);
         }
         st.emit_snapshot();
         self.shared.wake.notify_all();
+    }
+
+    /// Append one job and return its id. Emits `Queued` with the updated batch size.
+    pub fn enqueue_one(&self, kind: JobKind, input: PathBuf) -> u64 {
+        let mut st = self.shared.lock();
+        let id = st.push(kind, input);
+        st.emit_snapshot();
+        self.shared.wake.notify_all();
+        id
     }
 
     /// Cancel a job. The running job is stopped; a waiting job is dropped. Either way the queue
@@ -271,6 +302,15 @@ enum Confirm {
 }
 
 impl State {
+    /// Add a job to the end of the queue; the caller emits the snapshot.
+    fn push(&mut self, kind: JobKind, input: PathBuf) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pending.push_back(JobSpec { id, kind, input });
+        self.batch_total += 1;
+        id
+    }
+
     fn emit_snapshot(&self) {
         (self.emit)(JobEvent::Queued {
             snapshot: QueueSnapshot {
@@ -438,6 +478,7 @@ impl EtaTracker {
 mod tests {
     use super::*;
     use crate::compress::CompressPlan;
+    use crate::editor::request::ExportMode;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -813,6 +854,60 @@ mod tests {
             started[0]
         );
         assert!(matches!(started[1], JobEvent::Started { width: None, height: None, fps: None, .. }));
+    }
+
+    #[test]
+    fn enqueue_one_returns_increasing_ids() {
+        let (queue, events, _log) = queue_with(|spec, _, _, _| done_outcome(spec));
+        assert_eq!(queue.enqueue_one(JobKind::Compress, PathBuf::from("a.mp4")), 1);
+        assert_eq!(queue.enqueue_one(JobKind::Compress, PathBuf::from("b.mp4")), 2);
+        // Ids are shared with batch enqueues.
+        queue.enqueue(JobKind::Compress, paths(&["c.mp4"]));
+        assert_eq!(queue.enqueue_one(JobKind::Compress, PathBuf::from("d.mp4")), 4);
+        events.wait_for("Done 4", done(4));
+    }
+
+    fn export_request(input: &str) -> ExportRequest {
+        ExportRequest {
+            session: 1,
+            input: PathBuf::from(input),
+            mode: ExportMode::Quick,
+            fit_20mb: false,
+            duration_s: 2.0,
+            video: Vec::new(),
+            audio: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn export_jobs_run_through_the_runner() {
+        let seen: Arc<Mutex<Vec<JobKind>>> = Arc::default();
+        let record = seen.clone();
+        let (queue, events, _log) = queue_with(move |spec, _, _, _| {
+            record.lock().unwrap().push(spec.kind.clone());
+            done_outcome(spec)
+        });
+        let job = ExportJob(Arc::new(export_request("clip.mp4")));
+        let id = queue.enqueue_one(JobKind::Export(job.clone()), PathBuf::from("clip.mp4"));
+        let all = events.wait_drained();
+
+        assert_eq!(*seen.lock().unwrap(), vec![JobKind::Export(job)]);
+        let started = all.iter().find(|e| started(id)(e)).expect("Started");
+        assert!(
+            matches!(started, JobEvent::Started { kind: Some(k), ext: None, input, .. } if k == "export" && input == "clip.mp4"),
+            "{started:?}"
+        );
+        assert!(all.iter().any(done(id)));
+    }
+
+    #[test]
+    fn export_jobs_are_equal_only_to_themselves() {
+        let a = ExportJob(Arc::new(export_request("clip.mp4")));
+        let b = ExportJob(Arc::new(export_request("clip.mp4")));
+        assert_eq!(a, a.clone());
+        assert_ne!(a, b, "equal requests are still different jobs");
+        let kind = JobKind::Export(a);
+        assert_eq!((kind.name(), kind.ext()), ("export", None));
     }
 
     #[test]

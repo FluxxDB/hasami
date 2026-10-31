@@ -1,6 +1,7 @@
 import type { JobEvent } from '../lib/jobs';
 
-export type Kind = 'compress' | 'convert' | 'trim';
+/** Shown in the title bar as "HASAMI <kind>". */
+export type Kind = 'compress' | 'convert' | 'export';
 
 export type Phase =
   | 'waiting' // window open, no job started yet
