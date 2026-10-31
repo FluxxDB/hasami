@@ -566,6 +566,21 @@ describe('EditorStore queue and exports', () => {
     expect(s.queue.files).toEqual(FILES);
   });
 
+  it('a file already handled can be trimmed again: a retry after a failure is appended and opens', async () => {
+    const s = await queued(FILES.slice(0, 2));
+    await s.exportClip('quick');
+    await s.skip();
+    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'No.', original_intact: true });
+    expect(s.showSummary).toBe(true);
+    s.applyEvent({ type: 'Files', paths: [FILES[0]] });
+    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0]]);
+    await vi.waitFor(() => expect(s.media?.path).toBe(FILES[0]));
+    expect(s.queue.index).toBe(2);
+    // Still once per path among the files not dealt with yet.
+    s.applyEvent({ type: 'Files', paths: [FILES[0], FILES[2], FILES[2]] });
+    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0], FILES[2]]);
+  });
+
   it('files arriving at the summary open the next one', async () => {
     const s = await queued(FILES.slice(0, 2));
     await s.skip();
@@ -610,7 +625,7 @@ describe('EditorStore queue and exports', () => {
     await s.discard();
     expect(s.confirm).toBeNull();
     expect(api.close).toHaveBeenCalledWith(1);
-    expect(api.discard).toHaveBeenCalledWith(FILES[0]);
+    expect(api.discard).toHaveBeenCalledWith(FILES[0], []);
     // The session lets go of the file before it's recycled.
     expect(vi.mocked(api.close).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(api.discard).mock.invocationCallOrder[0],
@@ -628,7 +643,7 @@ describe('EditorStore queue and exports', () => {
     expect(api.discard).not.toHaveBeenCalled();
     closed();
     await discarding;
-    expect(api.discard).toHaveBeenCalledWith(FILES[0]);
+    expect(api.discard).toHaveBeenCalledWith(FILES[0], []);
   });
 
   it('discard of an edited clip asks first', async () => {
@@ -643,30 +658,45 @@ describe('EditorStore queue and exports', () => {
     expect(s.media?.path).toBe(FILES[0]);
   });
 
-  it('discard after Export audio waits for that export before recycling the clip', async () => {
+  it('discard after Export audio hands the discard to Rust to do after that export', async () => {
     const s = await queued();
     await s.exportClip('audio');
     await s.discard();
-    expect(api.discard).not.toHaveBeenCalled();
+    expect(api.discard).toHaveBeenCalledWith(FILES[0], [100]);
     expect(s.media?.path).toBe(FILES[1]); // moved on at once
     expect(s.results[1]).toMatchObject({ input: FILES[0], action: 'discard', state: 'running' });
     s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'a.mp3', bytes: 1 });
-    expect(api.discard).toHaveBeenCalledWith(FILES[0]);
-    await vi.waitFor(() => expect(s.results[1].state).toBe('none'));
+    expect(s.results[1].state).toBe('running'); // the page never recycles by itself
+    s.applyEvent({ type: 'DiscardDone', path: FILES[0] });
+    expect(s.results[1].state).toBe('none');
+    expect(api.discard).toHaveBeenCalledTimes(1);
   });
 
-  it('the summary waits for a deferred discard, and a failed one keeps it open', async () => {
+  it('a discard kept because its export failed shows as kept, and the summary stays', async () => {
     const s = await queued(FILES.slice(0, 2));
-    vi.mocked(api.discard).mockRejectedValueOnce("Couldn't send this clip to the Recycle Bin.");
     await s.exportClip('audio');
     await s.discard();
     await s.skip();
     expect(s.showSummary).toBe(true);
     expect(s.shouldClose).toBe(false);
-    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'a.mp3', bytes: 1 });
-    await vi.waitFor(() => expect(s.results[1].state).toBe('failed'));
-    expect(s.results[1].message).toBe("Couldn't send this clip to the Recycle Bin.");
+    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'No.', original_intact: true });
+    expect(s.results[1].state).toBe('running');
+    const message = 'Kept "a.mp4": its export didn\'t finish, so it wasn\'t sent to the Recycle Bin.';
+    s.applyEvent({ type: 'DiscardKept', path: FILES[0], message });
+    expect(s.results[1]).toMatchObject({ action: 'discard', state: 'failed', message });
+    expect(api.discard).toHaveBeenCalledTimes(1);
     expect(s.shouldClose).toBe(false);
+  });
+
+  it('the summary waits for a deferred discard to be done before closing', async () => {
+    const s = await queued(FILES.slice(0, 2));
+    await s.exportClip('audio');
+    await s.discard();
+    await s.skip();
+    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'a.mp3', bytes: 1 });
+    expect(s.shouldClose).toBe(false);
+    s.applyEvent({ type: 'DiscardDone', path: FILES[0] });
+    expect(s.shouldClose).toBe(true);
   });
 
   it('a failed discard says so and reopens the clip', async () => {

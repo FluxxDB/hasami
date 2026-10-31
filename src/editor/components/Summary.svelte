@@ -24,7 +24,8 @@
 
   const results = $derived(store.results);
   const running = $derived(store.exports.running.length);
-  const failed = $derived(results.filter((r) => r.state === 'failed').length);
+  // Clips, not rows: one clip can have a failed export and a kept discard.
+  const failed = $derived(new Set(results.filter((r) => r.state === 'failed').map((r) => r.input)).size);
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
   const heading = $derived(
@@ -51,6 +52,7 @@
 
   function status(r: Result): string {
     if (r.action === 'discard' && r.state === 'running') return 'Waiting';
+    if (r.action === 'discard' && r.state === 'failed') return 'Kept';
     // The job queue runs one export at a time; the rest haven't reported progress yet.
     if (r.state === 'running') return r.fraction > 0 ? formatPercent(r.fraction) : 'Queued';
     if (r.state === 'done') return 'Done';

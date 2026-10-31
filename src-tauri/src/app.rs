@@ -10,7 +10,7 @@
 //! listens, when to exit) live in the pure [`Flow`] struct, which turns inputs into [`Effect`]s;
 //! the dispatcher only carries them out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -55,6 +55,7 @@ const THUMBS_FAILED: &str = "Couldn't make the timeline pictures for this clip."
 const PROXY_FAILED: &str = "Couldn't prepare a preview of this clip.";
 const EXPORT_WONT_START: &str = "Couldn't start the export.";
 const DISCARD_FAILED: &str = "Couldn't move this clip to the Recycle Bin.";
+const DISCARD_WONT_WAIT: &str = "Couldn't set this clip aside for the Recycle Bin.";
 const COMMAND_FAILED: &str = "Something went wrong.";
 
 /// The one place that decides what runs a job.
@@ -239,6 +240,10 @@ enum Msg {
     /// Enqueue an export and send back its job id. Enqueued by the dispatcher so it stays the only
     /// thread that enqueues (see [`Dispatcher::settled`]).
     Export(Box<ExportRequest>, Sender<u64>),
+    /// Recycle `path` once every export in `after` is done; answers once it's recorded.
+    Discard { path: String, after: Vec<u64>, reply: Sender<()> },
+    /// A deferred discard's recycle finished.
+    Recycled { path: String, result: Result<(), String> },
 }
 
 /// What the editor window is told. Mirrored in `src/editor/api.ts`.
@@ -253,6 +258,17 @@ pub enum EditorEvent {
     ExportDone { id: u64, input: String, output: String, bytes: u64 },
     ExportFailed { id: u64, input: String, message: String, original_intact: bool },
     ProxyProgress { session: u64, fraction: f64 },
+    /// A deferred discard sent the clip to the Recycle Bin.
+    DiscardDone { path: String },
+    /// A deferred discard left the clip where it was (an export it waited for didn't finish, or
+    /// the recycle failed).
+    DiscardKept { path: String, message: String },
+}
+
+/// Why a deferred discard left the clip in place.
+fn kept_message(path: &str) -> String {
+    let name = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+    format!("Kept \"{name}\": its export didn't finish, so it wasn't sent to the Recycle Bin.")
 }
 
 /// A clip opened in the editor, as `editor_open` returns it. Paths are absolute; the page turns
@@ -461,16 +477,27 @@ async fn editor_export(app: AppHandle, request: ExportRequest) -> Result<u64, St
     .await
 }
 
-/// Send a clip the user discarded to the Recycle Bin.
+/// Send a clip the user discarded to the Recycle Bin: now when `after` is empty, otherwise once
+/// every export in `after` is done (if one fails, the clip stays; `Discard*` events say which).
+/// A deferred discard is recorded before this returns, so it happens even if the window closes.
 #[tauri::command]
-async fn editor_discard(app: AppHandle, path: String) -> Result<(), String> {
-    blocking(app, move |_, _| {
-        fsops::recycle(Path::new(&path)).map_err(|e| {
-            eprintln!("hasami: {DISCARD_FAILED} {e:?}");
-            DISCARD_FAILED.to_owned()
-        })
+async fn editor_discard(app: AppHandle, path: String, after: Vec<u64>) -> Result<(), String> {
+    blocking(app, move |_, state| {
+        if after.is_empty() {
+            return recycle(&path);
+        }
+        let (reply, recorded) = mpsc::channel();
+        state.tx.send(Msg::Discard { path, after, reply }).map_err(|_| DISCARD_WONT_WAIT)?;
+        recorded.recv().map_err(|_| DISCARD_WONT_WAIT.to_owned())
     })
     .await
+}
+
+fn recycle(path: &str) -> Result<(), String> {
+    fsops::recycle(Path::new(path)).map_err(|e| {
+        eprintln!("hasami: {DISCARD_FAILED} {e:?}");
+        DISCARD_FAILED.to_owned()
+    })
 }
 
 /// The editor is done with a clip: stop its work and delete its work folder.
@@ -556,6 +583,15 @@ impl Dispatcher {
                 let _ = reply.send(id);
                 Vec::new()
             }
+            Msg::Discard { path, after, reply } => {
+                let effects = self.flow.on_discard(path, after);
+                let _ = reply.send(());
+                effects
+            }
+            Msg::Recycled { path, result } => {
+                let settled = self.settled();
+                self.flow.on_recycled(path, result, settled)
+            }
         }
     }
 
@@ -595,6 +631,14 @@ impl Dispatcher {
                     }
                 }
                 Effect::Enqueue(kind, files) => self.queue.enqueue(kind, files),
+                Effect::Recycle(path) => {
+                    // The shell's recycle can take a moment; its result comes back as a message.
+                    let tx = self.app.state::<AppState>().tx.clone();
+                    let _ = thread::Builder::new().name("hasami-recycle".into()).spawn(move || {
+                        let result = recycle(&path);
+                        let _ = tx.send(Msg::Recycled { path, result });
+                    });
+                }
                 Effect::Decline(id) => self.queue.confirm(id, false),
                 Effect::Exit => self.app.exit(0),
             }
@@ -645,6 +689,9 @@ pub(crate) enum Effect {
     Enqueue(JobKind, Vec<PathBuf>),
     /// Answer a pending low-resolution question with "no".
     Decline(u64),
+    /// Send this file to the Recycle Bin (a deferred discard); the result comes back to
+    /// [`Flow::on_recycled`].
+    Recycle(String),
     Exit,
 }
 
@@ -652,6 +699,17 @@ pub(crate) enum Effect {
 struct ExportInfo {
     input: String,
     editor: u64,
+}
+
+/// A clip discarded while exports of it were still to finish.
+struct PendingDiscard {
+    path: String,
+    /// The exports still to end `Done`.
+    waiting: HashSet<u64>,
+    /// Which editor window asked for it.
+    editor: u64,
+    /// Handed to the dispatcher to recycle; waiting for [`Flow::on_recycled`].
+    recycling: bool,
 }
 
 /// The dispatcher's decisions, free of Tauri and threads so they can be unit-tested.
@@ -677,6 +735,14 @@ pub(crate) struct Flow {
     /// Exports not yet finished, by job id. Their events go to the editor, never the progress
     /// window (the queue sends no `Queued` snapshots for them, so every export event has its id).
     exports: HashMap<u64, ExportInfo>,
+    /// Exports that ended, by job id: whether they ended `Done`. A discard may name one that
+    /// ended before the discard arrived.
+    finished: HashMap<u64, bool>,
+    /// Deferred discards not yet resolved. The app doesn't exit while there are any.
+    discards: Vec<PendingDiscard>,
+    /// Ids for discard outcomes shown in the progress window, counting down from `u64::MAX`, well
+    /// clear of the queue's job ids.
+    next_notice_id: u64,
 }
 
 impl Flow {
@@ -693,6 +759,9 @@ impl Flow {
             editor_buffer: Vec::new(),
             editor_count: 0,
             exports: HashMap::new(),
+            finished: HashMap::new(),
+            discards: Vec::new(),
+            next_notice_id: u64::MAX,
         }
     }
 
@@ -737,6 +806,82 @@ impl Flow {
     /// The dispatcher enqueued export `id` of `input` for the current editor window.
     pub(crate) fn on_export_enqueued(&mut self, id: u64, input: String) {
         self.exports.insert(id, ExportInfo { input, editor: self.editor_count });
+    }
+
+    /// The current editor discarded `path`, to be recycled once every export in `after` ends
+    /// `Done`. One that already ended otherwise (or that this app never ran) keeps the clip now.
+    pub(crate) fn on_discard(&mut self, path: String, after: Vec<u64>) -> Vec<Effect> {
+        let mut out = Vec::new();
+        let mut waiting = HashSet::new();
+        let mut doomed = false;
+        for id in after {
+            if self.exports.contains_key(&id) {
+                waiting.insert(id);
+            } else if self.finished.get(&id) != Some(&true) {
+                doomed = true;
+            }
+        }
+        let mut discard = PendingDiscard { path, waiting, editor: self.editor_count, recycling: false };
+        if doomed {
+            let event = EditorEvent::DiscardKept { message: kept_message(&discard.path), path: discard.path.clone() };
+            self.report_discard(&discard, event, &mut out);
+        } else {
+            if discard.waiting.is_empty() {
+                discard.recycling = true;
+                out.push(Effect::Recycle(discard.path.clone()));
+            }
+            self.discards.push(discard);
+        }
+        out
+    }
+
+    /// A deferred discard's recycle finished.
+    pub(crate) fn on_recycled(&mut self, path: String, result: Result<(), String>, settled: bool) -> Vec<Effect> {
+        let mut out = Vec::new();
+        if let Some(i) = self.discards.iter().position(|d| d.recycling && d.path == path) {
+            let discard = self.discards.remove(i);
+            let event = match result {
+                Ok(()) => EditorEvent::DiscardDone { path },
+                Err(message) => EditorEvent::DiscardKept { path, message },
+            };
+            self.report_discard(&discard, event, &mut out);
+        }
+        self.exit_if_finished(settled, &mut out);
+        out
+    }
+
+    /// Export `id` ended (`ok`: it ended `Done`): move on the discards waiting for it.
+    fn on_export_finished(&mut self, id: u64, ok: bool, out: &mut Vec<Effect>) {
+        self.finished.insert(id, ok);
+        let mut i = 0;
+        while i < self.discards.len() {
+            let d = &mut self.discards[i];
+            if d.recycling || !d.waiting.remove(&id) {
+                i += 1;
+            } else if !ok {
+                let discard = self.discards.remove(i);
+                let event = EditorEvent::DiscardKept { message: kept_message(&discard.path), path: discard.path.clone() };
+                self.report_discard(&discard, event, out);
+            } else {
+                if d.waiting.is_empty() {
+                    d.recycling = true;
+                    out.push(Effect::Recycle(d.path.clone()));
+                }
+                i += 1;
+            }
+        }
+    }
+
+    /// Tell the editor that asked; with it gone, a kept clip shows in the progress window (like a
+    /// late export failure) and a recycled one needs no word.
+    fn report_discard(&mut self, discard: &PendingDiscard, event: EditorEvent, out: &mut Vec<Effect>) {
+        if self.editor_open && discard.editor == self.editor_count {
+            self.send_editor(event, out);
+        } else if let EditorEvent::DiscardKept { path, message } = event {
+            let id = self.next_notice_id;
+            self.next_notice_id -= 1;
+            self.show_export_failure(id, path, message, true, out);
+        }
     }
 
     pub(crate) fn on_job_event(&mut self, event: JobEvent, settled: bool) -> Vec<Effect> {
@@ -803,12 +948,21 @@ impl Flow {
             }
             JobEvent::Queued { .. } | JobEvent::Drained => return,
         };
+        let ended = match &editor_event {
+            EditorEvent::ExportDone { .. } => Some(true),
+            EditorEvent::ExportFailed { .. } => Some(false),
+            _ => None,
+        };
         if to_editor {
             self.send_editor(editor_event, out);
         } else if let EditorEvent::ExportFailed { message, original_intact, .. } = editor_event {
             if message != CANCELLED {
                 self.show_export_failure(id, input, message, original_intact, out);
             }
+        }
+        // After the export's own outcome, so the editor hears of it first.
+        if let Some(ok) = ended {
+            self.on_export_finished(id, ok, out);
         }
     }
 
@@ -924,7 +1078,7 @@ impl Flow {
     }
 
     fn exit_if_finished(&self, settled: bool, out: &mut Vec<Effect>) {
-        if settled && !self.window_open && !self.editor_open && self.collector.is_empty() {
+        if settled && !self.window_open && !self.editor_open && self.collector.is_empty() && self.discards.is_empty() {
             out.push(Effect::Exit);
         }
     }
@@ -1350,7 +1504,7 @@ mod tests {
     // ---- Editor ----
 
     /// A real [`JobQueue`] whose jobs wait for [`RealQueue::release`], then report one progress
-    /// tick (pass 1 of 1, half done) and finish. Its events are collected in emission order, so
+    /// tick (pass 1 of 1, half done) and finish (they fail when the input's name starts with "fail"). Its events are collected in emission order, so
     /// a Flow can be fed exactly what the queue sends.
     struct RealQueue {
         queue: JobQueue,
@@ -1377,6 +1531,9 @@ mod tests {
                 is_open = cv.wait_timeout(is_open, ms(10)).unwrap().0;
             }
             progress(JobProgress { pass: 1, passes: 1, fraction: 0.5 });
+            if spec.input.to_string_lossy().starts_with("fail") {
+                return Err(JobError::Message("Couldn't export this clip.".into()));
+            }
             Ok(JobOutcome::Done { output: spec.input.with_extension("out.mp4"), bytes: 2 })
         }
     }
@@ -1640,6 +1797,121 @@ mod tests {
         let mut f = exporting();
         let ask = JobEvent::NeedsConfirm { id: 5, width: 426, height: 240, fps: 15.0 };
         assert_eq!(f.on_job_event(ask, false), vec![Effect::Decline(5)]);
+    }
+
+
+    // ---- Deferred discards ----
+
+    /// `editing()` with an export of `input` enqueued on a real queue, and Discard of `input`
+    /// registered to wait for it.
+    fn discarding_after_export(input: &str) -> (Flow, RealQueue, u64) {
+        let mut f = editing();
+        let rq = RealQueue::new();
+        let id = rq.queue.enqueue_one(export_job(input), PathBuf::from(input));
+        f.on_export_enqueued(id, input.into());
+        assert_eq!(f.on_discard(input.into(), vec![id]), vec![], "nothing happens until the export ends");
+        (f, rq, id)
+    }
+
+    fn kept(path: &str) -> EditorEvent {
+        EditorEvent::DiscardKept { path: path.into(), message: kept_message(path) }
+    }
+
+    #[test]
+    fn a_discard_after_a_done_export_recycles_the_file() {
+        let (mut f, rq, _) = discarding_after_export("t.mp4");
+        let effects = feed(&mut f, rq.drained());
+        assert!(effects.contains(&Effect::Recycle("t.mp4".into())), "{effects:?}");
+        assert_eq!(
+            f.on_recycled("t.mp4".into(), Ok(()), true),
+            to_editor(&[EditorEvent::DiscardDone { path: "t.mp4".into() }])
+        );
+        assert_eq!(f.on_editor_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_discard_after_a_failed_export_keeps_the_file_and_says_so() {
+        let (mut f, rq, _) = discarding_after_export("fail.mp4");
+        let effects = feed(&mut f, rq.drained());
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Recycle(_))), "{effects:?}");
+        let failure = effects.iter().position(|e| matches!(e, Effect::EmitEditor(EditorEvent::ExportFailed { .. })));
+        let kept_at = effects.iter().position(|e| *e == Effect::EmitEditor(kept("fail.mp4")));
+        assert!(failure.is_some() && kept_at > failure, "{effects:?}");
+        assert!(kept_message("C:\\v\\fail.mp4").starts_with("Kept \"fail.mp4\": "));
+        // Nothing is left pending: closing the editor ends the app.
+        assert_eq!(f.on_editor_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_discard_still_happens_after_the_editor_closes() {
+        let (mut f, rq, _) = discarding_after_export("t.mp4");
+        assert_eq!(f.on_editor_closed(false), vec![]);
+        let effects = feed(&mut f, rq.drained());
+        assert!(effects.contains(&Effect::Recycle("t.mp4".into())), "{effects:?}");
+        assert!(!effects.contains(&Effect::Exit), "the app waits for the recycle: {effects:?}");
+        // Success needs no window; then the app exits.
+        assert_eq!(f.on_recycled("t.mp4".into(), Ok(()), true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_kept_file_after_the_editor_closes_shows_in_the_progress_window() {
+        let (mut f, rq, _) = discarding_after_export("fail.mp4");
+        assert_eq!(f.on_editor_closed(false), vec![]);
+        let effects = feed(&mut f, rq.drained());
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Recycle(_))), "{effects:?}");
+        assert_eq!(effects.iter().filter(|e| **e == OPEN_EXPORT).count(), 1, "{effects:?}");
+        let shown = f.on_ready();
+        let messages: Vec<_> = shown
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Emit(JobEvent::Failed { message, original_intact, .. }) => Some((message.clone(), *original_intact)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            vec![("Couldn't export this clip.".to_string(), true), (kept_message("fail.mp4"), true)]
+        );
+        assert_eq!(f.on_window_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_failed_recycle_after_the_editor_closes_shows_in_the_progress_window() {
+        let (mut f, rq, _) = discarding_after_export("t.mp4");
+        f.on_editor_closed(false);
+        feed(&mut f, rq.drained());
+        let effects = f.on_recycled("t.mp4".into(), Err(DISCARD_FAILED.into()), true);
+        assert_eq!(effects, vec![OPEN_EXPORT]);
+        assert!(f.on_ready().contains(&Effect::Emit(JobEvent::Failed {
+            id: u64::MAX,
+            message: DISCARD_FAILED.into(),
+            original_intact: true
+        })));
+    }
+
+    #[test]
+    fn a_discard_of_exports_that_already_ended_resolves_at_once() {
+        let mut f = exporting();
+        f.on_job_event(done(5), false);
+        assert_eq!(f.on_discard("t.mp4".into(), vec![5]), vec![Effect::Recycle("t.mp4".into())]);
+
+        let mut f = exporting();
+        f.on_job_event(failed(5, "boom"), false);
+        assert_eq!(f.on_discard("t.mp4".into(), vec![5]), to_editor(&[kept("t.mp4")]));
+        // An export this app never ran can't vouch for anything either.
+        assert_eq!(f.on_discard("u.mp4".into(), vec![99]), to_editor(&[kept("u.mp4")]));
+    }
+
+    #[test]
+    fn discard_events_serialize_to_the_ui_contract() {
+        assert_eq!(
+            serde_json::to_value(EditorEvent::DiscardDone { path: "C:\\v\\a.mp4".into() }).unwrap(),
+            serde_json::json!({"type": "DiscardDone", "path": "C:\\v\\a.mp4"})
+        );
+        assert_eq!(
+            serde_json::to_value(EditorEvent::DiscardKept { path: "a.mp4".into(), message: "m".into() }).unwrap(),
+            serde_json::json!({"type": "DiscardKept", "path": "a.mp4", "message": "m"})
+        );
     }
 
     #[test]

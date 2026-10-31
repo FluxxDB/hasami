@@ -53,7 +53,13 @@
         <div class="queue">
           <span class="pos cap">{store.queue.index + 1} of {store.queue.files.length}</span>
           <button type="button" class="link cap" disabled={store.busy} onclick={() => store.skip()}>Skip</button>
-          <button type="button" class="link cap" disabled={store.busy} onclick={() => store.discard()}>Discard</button>
+          <!-- Not while the clip is still opening: the file is being read. -->
+      <button
+        type="button"
+        class="link cap"
+        disabled={store.busy || (!media && !store.error)}
+        onclick={() => store.discard()}>Discard</button
+      >
         </div>
       {/if}
       {#if running > 0}

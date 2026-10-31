@@ -56,7 +56,9 @@
 
 <dialog
   bind:this={dialog}
-  aria-labelledby="confirm-message"
+  role="alertdialog"
+  aria-label="Unsaved edits"
+  aria-describedby="confirm-message"
   oncancel={onCancel}
   onclose={onClose}
   onkeydown={onKeydown}
@@ -65,7 +67,10 @@
     <p id="confirm-message">{TEXT[kind].message}</p>
     <div class="actions">
       <button type="button" class="btn cap" onclick={() => store.answer(true)}>{TEXT[kind].action}</button>
-      <button type="button" class="btn keep cap" bind:this={keep} onclick={() => store.answer(false)}>Keep editing</button>
+      <!-- svelte-ignore a11y_autofocus -->
+      <button type="button" class="btn keep cap" autofocus bind:this={keep} onclick={() => store.answer(false)}
+        >Keep editing</button
+      >
     </div>
   {/if}
 </dialog>

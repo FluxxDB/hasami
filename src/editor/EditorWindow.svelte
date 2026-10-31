@@ -29,9 +29,13 @@
   const FIT_MARGIN_PX = 24; // room after the last frame, so the end edge stays grabbable
   const PREVIEW_FAILED = "Couldn't show a preview of this video. Cuts and exports still work.";
 
-  // The summary closes the window once every export has finished and none failed.
+  // The summary closes the window once every export has finished and none failed (once: later
+  // events would otherwise ask again while it's closing).
+  let closing = false;
   $effect(() => {
-    if (store.shouldClose) untrack(onClose);
+    if (!store.shouldClose || closing) return;
+    closing = true;
+    untrack(onClose);
   });
 
   // A newly loaded clip fits the lanes as soon as their width is known.

@@ -36,8 +36,11 @@ export type ExportMode = ExportRequest['mode'];
 type LogEntry =
   | { action: ExportMode; id: number; input: string }
   | { action: 'skip'; input: string }
-  /** A discard waits for the clip's own exports (an Export audio still queued reads the file). */
-  | { action: 'discard'; input: string; state: 'waiting' | 'recycling' | 'done' | 'failed'; message?: string };
+  /**
+   * A discard of a clip with exports still to finish (an Export audio still queued reads the
+   * file) is carried out by the Rust side once they're done; `Discard*` events report it.
+   */
+  | { action: 'discard'; input: string; state: 'waiting' | 'done' | 'kept'; message?: string };
 /** What the unsaved-edits dialog is asking about. */
 export type ConfirmKind = 'close' | 'skip' | 'discard';
 
@@ -45,7 +48,7 @@ export type ConfirmKind = 'close' | 'skip' | 'discard';
 export interface Result {
   input: string;
   action: ExportMode | 'skip' | 'discard';
-  /** `none` for a skip or a finished discard; `running` for a discard waiting on an export. */
+  /** `none` for a skip or a done discard; `running` while a discard waits; `failed` when it kept the clip. */
   state: 'running' | 'done' | 'failed' | 'none';
   fraction: number;
   output?: string;
@@ -182,7 +185,7 @@ export class EditorStore {
     return this.log.map((entry): Result => {
       if (entry.action === 'skip') return { input: entry.input, action: 'skip', state: 'none', fraction: 0 };
       if (entry.action === 'discard') {
-        const state = entry.state === 'done' ? 'none' : entry.state === 'failed' ? 'failed' : 'running';
+        const state = entry.state === 'done' ? 'none' : entry.state === 'kept' ? 'failed' : 'running';
         return { input: entry.input, action: 'discard', state, fraction: 0, message: entry.message };
       }
       const { id, input, action } = entry;
@@ -224,10 +227,18 @@ export class EditorStore {
 
   // --- queue -------------------------------------------------------------------------------
 
-  /** Adds files to the end of the queue (once per path). At the summary, the first new one opens. */
+  /**
+   * Adds files to the end of the queue, once per path among those not dealt with yet (a file
+   * already exported, skipped or failed can be trimmed again). At the summary, the first opens.
+   */
   addFiles(paths: string[]): void {
     const resume = this.showSummary;
-    for (const p of paths) if (!this.queue.files.includes(p)) this.queue.files.push(p);
+    const pending = new Set(this.queue.files.slice(this.queue.index));
+    for (const p of paths) {
+      if (pending.has(p)) continue;
+      pending.add(p);
+      this.queue.files.push(p);
+    }
     const next = this.currentPath;
     if (resume && next) void this.openFile(next);
   }
@@ -268,9 +279,7 @@ export class EditorStore {
   /** Leaves the current clip and opens the next queued file; with none left, the summary shows. */
   async advance(): Promise<void> {
     void this.leave();
-    this.queue.index += 1;
-    const next = this.currentPath;
-    if (next) await this.openFile(next);
+    await this.next();
   }
 
   /** Hands the edit to the job queue. A video export then moves on; Export audio stays. */
@@ -322,22 +331,18 @@ export class EditorStore {
       if (this.edited && !(await this.ask('discard'))) return;
       // The session's ffmpeg runs (thumbnails, waveforms) let go of the file before it's recycled.
       await this.leave();
-      if (this.exporting(path)) {
-        // Its Export audio is still queued or running: recycle it once that finishes (`finish`).
-        this.log.push({ action: 'discard', input: path, state: 'waiting' });
-      } else {
-        try {
-          await api.discard(path);
-        } catch (err) {
-          await this.openFile(path);
-          this.notice = plain(err, DISCARD_FAILED);
-          return;
-        }
-        this.log.push({ action: 'discard', input: path, state: 'done' });
+      // An export of this clip still to finish (an Export audio) needs the file: the Rust side
+      // recycles it after that, or keeps it if the export fails.
+      const after = this.runningExportsOf(path);
+      try {
+        await api.discard(path, after);
+      } catch (err) {
+        await this.openFile(path);
+        this.notice = plain(err, DISCARD_FAILED);
+        return;
       }
-      this.queue.index += 1;
-      const next = this.currentPath;
-      if (next) await this.openFile(next);
+      this.log.push({ action: 'discard', input: path, state: after.length > 0 ? 'waiting' : 'done' });
+      await this.next();
     } finally {
       this.busy = false;
     }
@@ -381,7 +386,22 @@ export class EditorStore {
       case 'ProxyProgress':
         if (e.session === this.media?.session && this.proxyFraction !== null) this.proxyFraction = e.fraction;
         return;
+      case 'DiscardDone':
+      case 'DiscardKept': {
+        const entry = this.log.find((l) => l.action === 'discard' && l.input === e.path && l.state === 'waiting');
+        if (entry?.action !== 'discard') return;
+        entry.state = e.type === 'DiscardDone' ? 'done' : 'kept';
+        if (e.type === 'DiscardKept') entry.message = e.message;
+        return;
+      }
     }
+  }
+
+  /** Moves to the next queued file (the current one has been left); none left: the summary. */
+  private async next(): Promise<void> {
+    this.queue.index += 1;
+    const path = this.currentPath;
+    if (path) await this.openFile(path);
   }
 
   /** Follows export `id` until it finishes (a no-op for one already followed or finished). */
@@ -394,29 +414,12 @@ export class EditorStore {
     const x = this.exports;
     x.running = x.running.filter((r) => r !== id);
     delete x.progress[id];
-    for (const entry of this.log) {
-      if (entry.action === 'discard' && entry.state === 'waiting' && !this.exporting(entry.input)) {
-        void this.recycle(entry);
-      }
-    }
   }
 
-  /** Whether an export of `path` is still queued or running. */
-  private exporting(path: string): boolean {
+  /** The job ids of exports of `path` still queued or running. */
+  private runningExportsOf(path: string): number[] {
     const running = new Set(this.exports.running);
-    return this.log.some((l) => 'id' in l && l.input === path && running.has(l.id));
-  }
-
-  /** The deferred half of a discard; a failure shows in the summary. */
-  private async recycle(entry: Extract<LogEntry, { action: 'discard' }>): Promise<void> {
-    entry.state = 'recycling';
-    try {
-      await api.discard(entry.input);
-      entry.state = 'done';
-    } catch (err) {
-      entry.state = 'failed';
-      entry.message = plain(err, DISCARD_FAILED);
-    }
+    return this.log.flatMap((l) => ('id' in l && l.input === path && running.has(l.id) ? [l.id] : []));
   }
 
   /**

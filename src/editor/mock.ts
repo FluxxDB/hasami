@@ -9,7 +9,7 @@
 //
 // `?mock=queue` opens a trim queue of three clips (as opened, no demo edits) whose exports run one
 // at a time for a few seconds each, like the job queue; `?mock=queue-fail` makes the second
-// clip's export fail, so the summary stays up.
+// clip's exports fail, so the summary stays up (and a Discard waiting on one keeps the clip).
 //
 // There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
 import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
@@ -121,12 +121,14 @@ let sessions = 0;
 let jobs = 0;
 /** The job queue runs one export at a time. */
 let lastExport: Promise<void> = Promise.resolve();
+/** Each export's outcome (true when Done), for discards that wait on them. */
+const outcomes = new Map<number, Promise<boolean>>();
 
 function emit(e: EditorEvent): void {
   for (const cb of listeners) cb(e);
 }
 
-function runExport(id: number, input: string, mode: string): Promise<void> {
+function runExport(id: number, input: string, mode: string): Promise<boolean> {
   return new Promise((resolve) => {
     emit({ type: 'ExportStarted', id, input });
     let fraction = 0;
@@ -135,14 +137,15 @@ function runExport(id: number, input: string, mode: string): Promise<void> {
       emit({ type: 'ExportProgress', id, fraction });
       if (fraction < 1) return;
       clearInterval(timer);
-      if (input === FAILING && mode !== 'audio') {
+      const ok = input !== FAILING;
+      if (!ok) {
         emit({ type: 'ExportFailed', id, input, message: "Couldn't export this clip: the result didn't check out.", original_intact: true });
       } else {
         const name = fileName(input).replace(/\.[^.]+$/, mode === 'audio' ? '.mp3' : '.mp4');
         const output = input.replace(/[^\\]+$/, `[CLIPPED] ${name}`);
         emit({ type: 'ExportDone', id, input, output, bytes: mode === 'audio' ? 1_400_000 : 18_600_000 });
       }
-      resolve();
+      resolve(ok);
     }, EXPORT_MS / 20);
   });
 }
@@ -156,11 +159,27 @@ export const mockApi: EditorApi = {
   exportClip: (request) => {
     console.info('[mock] editor_export', request);
     const id = ++jobs;
-    lastExport = lastExport.then(() => runExport(id, request.input, request.mode));
+    const outcome = lastExport.then(() => runExport(id, request.input, request.mode));
+    outcomes.set(id, outcome);
+    lastExport = outcome.then(() => undefined);
     return later(id);
   },
-  discard: (path) => {
-    console.info('[mock] editor_discard', { path });
+  // Like the Rust side: with `after`, recycle once those exports are Done, else keep the clip.
+  discard: (path, after) => {
+    console.info('[mock] editor_discard', { path, after });
+    if (after.length > 0) {
+      void Promise.all(after.map((id) => outcomes.get(id) ?? Promise.resolve(false))).then((oks) =>
+        emit(
+          oks.every(Boolean)
+            ? { type: 'DiscardDone', path }
+            : {
+                type: 'DiscardKept',
+                path,
+                message: `Kept "${fileName(path)}": its export didn't finish, so it wasn't sent to the Recycle Bin.`,
+              },
+        ),
+      );
+    }
     return later(undefined);
   },
   close: (session) => {
