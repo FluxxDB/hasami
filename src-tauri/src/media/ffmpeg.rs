@@ -23,7 +23,8 @@ impl FfmpegPaths {
     /// Find the binaries. First match wins:
     /// 1. directory in `HASAMI_FFMPEG_DIR` (`ffmpeg.exe`, `ffprobe.exe`),
     /// 2. the current executable's directory (`ffmpeg.exe`, `ffprobe.exe`),
-    /// 3. dev fallback: `<crate>/binaries/{ffmpeg,ffprobe}-x86_64-pc-windows-msvc.exe`.
+    /// 3. debug builds only: `<crate>/binaries/{ffmpeg,ffprobe}-x86_64-pc-windows-msvc.exe`
+    ///    (release builds must not embed the build machine's path).
     pub fn resolve() -> Result<Self, MediaError> {
         let mut searched = Vec::new();
 
@@ -40,15 +41,18 @@ impl FfmpegPaths {
             }
         }
 
-        let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
-        if let Some(found) = Self::in_dir(
-            &dev_dir,
-            "ffmpeg-x86_64-pc-windows-msvc.exe",
-            "ffprobe-x86_64-pc-windows-msvc.exe",
-        ) {
-            return Ok(found);
+        #[cfg(debug_assertions)]
+        {
+            let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
+            if let Some(found) = Self::in_dir(
+                &dev_dir,
+                "ffmpeg-x86_64-pc-windows-msvc.exe",
+                "ffprobe-x86_64-pc-windows-msvc.exe",
+            ) {
+                return Ok(found);
+            }
+            searched.push(dev_dir);
         }
-        searched.push(dev_dir);
 
         Err(MediaError::BinariesNotFound { searched })
     }

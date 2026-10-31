@@ -27,9 +27,23 @@ pub fn run() {
             }
             app::run(action)
         }
+        // Started from the Start menu or the installer's "Run Hasami": say where Hasami lives.
+        Err(cli::CliError::MissingVerb) => show_menu_hint(),
         Err(e) => {
             eprintln!("hasami: {e}");
             std::process::exit(2);
         }
+    }
+}
+
+/// Shown when Hasami is started with no arguments.
+pub const MENU_HINT: &str = "Hasami lives in your right-click menu. Right-click a video → Hasami.";
+
+/// A plain Windows message box with [`MENU_HINT`]; returns once the user closes it.
+fn show_menu_hint() {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+    unsafe {
+        MessageBoxW(None, &HSTRING::from(MENU_HINT), &HSTRING::from("Hasami"), MB_OK | MB_ICONINFORMATION);
     }
 }
