@@ -6,6 +6,7 @@ import {
   deleteSegs,
   hasAudibleAudio,
   linkedIds,
+  MIN_GAIN_DB,
   moveEdge,
   quantize,
   segLen,
@@ -582,6 +583,18 @@ describe('export request', () => {
     expect(req.duration_s).toBe(50);
   });
 
+  it('a fader at −∞ (MIN_GAIN_DB or below) is skipped like a mute', () => {
+    const silent = setGain(tl2, 1, MIN_GAIN_DB);
+    expect(toExportRequest(silent, 1, 'x.mp4', 'quick', false).audio.map((a) => a.index)).toEqual([0]);
+    expect(toExportRequest(silent, 1, 'x.mp4', 'audio', false).audio.map((a) => a.index)).toEqual([0]);
+    // One step above the bottom is still exported, at its gain.
+    const quiet = setGain(tl2, 1, MIN_GAIN_DB + 0.5);
+    expect(toExportRequest(quiet, 1, 'x.mp4', 'quick', false).audio.map((a) => [a.index, a.gain_db])).toEqual([
+      [0, 0],
+      [1, MIN_GAIN_DB + 0.5],
+    ]);
+  });
+
   it('drops pieces that start at or after the video end and tracks left with none', () => {
     // Video is [0,12] only; A0 is [0,12]@0 and [12,90]@12 and so on.
     const tl = deleteSegs(tl2, [tl2.video[1].id, tl2.video[2].id], false);
@@ -599,6 +612,14 @@ describe('export request', () => {
     expect(hasAudibleAudio(oneMuted)).toBe(true);
     expect(hasAudibleAudio(setMuted(oneMuted, 1, true))).toBe(false);
     expect(hasAudibleAudio(createTimeline(D, FPS, []))).toBe(false);
+  });
+
+  it('hasAudibleAudio counts a fader at −∞ as silent', () => {
+    const oneDown = setGain(tl0, 0, MIN_GAIN_DB);
+    expect(hasAudibleAudio(oneDown)).toBe(true);
+    expect(hasAudibleAudio(setGain(oneDown, 1, MIN_GAIN_DB))).toBe(false);
+    expect(hasAudibleAudio(setMuted(oneDown, 1, true))).toBe(false);
+    expect(hasAudibleAudio(setGain(oneDown, 1, MIN_GAIN_DB + 0.5))).toBe(true);
   });
 
   it('hasAudibleAudio ignores material that is entirely past the video end', () => {

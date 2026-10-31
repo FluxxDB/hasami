@@ -29,6 +29,14 @@ export interface Timeline {
 export const MIN_GAIN_DB = -60; // shown as −∞
 export const MAX_GAIN_DB = 6;
 
+/**
+ * A track nobody hears: muted, or its fader at the bottom (−∞). The preview plays it at gain 0,
+ * and exports leave it out entirely, so the two always agree.
+ */
+export function isSilent(gainDb: number, muted: boolean): boolean {
+  return muted || gainDb <= MIN_GAIN_DB;
+}
+
 // Comparison slack for times that went through float arithmetic.
 const EPS = 1e-9;
 
@@ -391,7 +399,7 @@ export function toExportRequest(
   const end = videoEnd(tl);
   const audio: ExportRequest['audio'] = [];
   for (const tr of tl.audio) {
-    if (tr.muted) continue;
+    if (isSilent(tr.gainDb, tr.muted)) continue;
     const pieces = sortByAt(tr.segs).flatMap((s) => {
       const len = Math.min(segLen(s), end - s.at); // clip to the end of the video
       return len > EPS ? [{ at: s.at, src_start: s.src[0], src_end: s.src[0] + len }] : [];
@@ -409,8 +417,9 @@ export function toExportRequest(
   };
 }
 
-/** True when some unmuted track has material before the end of the video. */
+/** True when some track that isn't silent (muted or at −∞) has material before the end of the video. */
 export function hasAudibleAudio(tl: Timeline): boolean {
   const end = videoEnd(tl);
-  return tl.audio.some((a) => !a.muted && a.segs.some((s) => s.at < end - EPS && segLen(s) > EPS));
+  const live = (s: Seg) => s.at < end - EPS && segLen(s) > EPS;
+  return tl.audio.some((a) => !isSilent(a.gainDb, a.muted) && a.segs.some(live));
 }
