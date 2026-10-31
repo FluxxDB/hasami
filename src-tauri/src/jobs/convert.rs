@@ -131,7 +131,7 @@ pub fn convert(
     let temp = temp_path_for(&final_path);
 
     let result = encode_and_commit(paths, input, &info, &target, plan, &final_path, &temp, cancel, on_progress);
-    if result.is_err() {
+    if result.as_ref().is_err_and(|e| !e.keeps_new_file()) {
         let _ = std::fs::remove_file(&temp);
     }
     result

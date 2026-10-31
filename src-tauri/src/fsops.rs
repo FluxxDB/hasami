@@ -1,12 +1,14 @@
 //! Temp/final/unique file names, commit and recycle helpers (Task 4).
 //!
 //! This is the safety core: the user's original must never be lost. Every
-//! function here either completes its whole job or leaves the original at its
-//! original path with its original bytes.
+//! function here either completes its whole job, leaves the original at its
+//! original path with its original bytes, or (in the one case where neither is
+//! possible) keeps the new file and says exactly where both files are.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// A file-operation failure. `message` is plain language and goes straight to
 /// the progress window; `source` keeps the underlying error for logs.
@@ -14,20 +16,40 @@ use std::path::{Path, PathBuf};
 #[error("{message}")]
 pub struct FsError {
     pub message: String,
+    /// False when the original is no longer at its own path (it went to the
+    /// Recycle Bin). True for every failure that left the original untouched.
+    pub original_intact: bool,
+    /// The finished new file, kept because it couldn't be given its final name
+    /// after the original was already recycled. Callers must not delete it.
+    pub kept_new_file: Option<PathBuf>,
     #[source]
     pub source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
 impl FsError {
-    fn new(message: impl Into<String>) -> Self {
-        FsError { message: message.into(), source: None }
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        FsError { message: message.into(), original_intact: true, kept_new_file: None, source: None }
     }
 
     fn with_source(
         message: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        FsError { message: message.into(), source: Some(Box::new(source)) }
+        FsError { source: Some(Box::new(source)), ..FsError::new(message) }
+    }
+
+    /// The original is in the Recycle Bin but the new file couldn't be moved to
+    /// its final name: it stays at `temp`.
+    pub(crate) fn stranded(temp: &Path, source: io::Error) -> Self {
+        FsError {
+            message: format!(
+                "Couldn't finish saving the new file. It's saved as \"{}\", and the original is in the Recycle Bin.",
+                temp.display()
+            ),
+            original_intact: false,
+            kept_new_file: Some(temp.to_path_buf()),
+            source: Some(Box::new(source)),
+        }
     }
 
     /// Wrap an I/O error, choosing the wording from what went wrong.
@@ -44,6 +66,9 @@ impl FsError {
             }
             _ if err.kind() == io::ErrorKind::NotFound => {
                 "Couldn't replace the file because it could no longer be found."
+            }
+            _ if err.kind() == io::ErrorKind::AlreadyExists => {
+                "Couldn't save the new file because a file with that name already exists."
             }
             _ => "Couldn't replace the file.",
         };
@@ -113,74 +138,74 @@ pub fn with_extension(original: &Path, ext: &str) -> PathBuf {
 /// Replace `original` with the finished `temp` file, saved as `final_path`.
 ///
 /// On any error the original is back at its own path with its own bytes and the
-/// temp file is deleted.
+/// temp file is deleted, except in one case: the original was already recycled
+/// and the new file then couldn't take its name. Then the temp file is kept and
+/// the error says where it is (`kept_new_file`, `original_intact == false`).
 pub fn commit_replace(temp: &Path, original: &Path, final_path: &Path) -> Result<(), FsError> {
-    commit_replace_with(temp, original, final_path, &recycle)
+    commit_replace_with(temp, original, final_path, &recycle, &rename_no_replace)
 }
 
-/// `commit_replace` with the recycle step injectable, so the rollback paths can
-/// be tested deterministically.
+/// Renames a file, failing (never overwriting) if the destination exists.
+type RenameFn<'a> = &'a dyn Fn(&Path, &Path) -> io::Result<()>;
+/// Sends a file to the Recycle Bin.
+type RecycleFn<'a> = &'a dyn Fn(&Path) -> Result<(), FsError>;
+
+/// `commit_replace` with the recycle and rename steps injectable, so every
+/// failure path can be tested deterministically.
 fn commit_replace_with(
     temp: &Path,
     original: &Path,
     final_path: &Path,
-    recycle: &dyn Fn(&Path) -> Result<(), FsError>,
+    recycle: RecycleFn,
+    rename: RenameFn,
 ) -> Result<(), FsError> {
-    let result = if same_path(final_path, original) {
-        replace_in_place(temp, original, final_path, recycle)
+    let result = if !temp.is_file() {
+        // Never touch the original unless there is a finished file to replace it with.
+        Err(FsError::new("Couldn't save the new file because it could no longer be found."))
+    } else if same_path(final_path, original) {
+        replace_in_place(temp, original, final_path, recycle, rename)
     } else {
-        replace_with_new_name(temp, original, final_path, recycle)
+        replace_with_new_name(temp, original, final_path, recycle, rename)
     };
-    if result.is_err() {
-        // Best effort; if the temp already moved away this is a harmless no-op.
-        let _ = std::fs::remove_file(temp);
+    if let Err(e) = &result {
+        if e.kept_new_file.is_none() {
+            // Best effort; if the temp already moved away this is a harmless no-op.
+            let _ = std::fs::remove_file(temp);
+        }
     }
     result
 }
 
-/// Output has the same path as the original: park the original, move the new
-/// file in, then recycle the parked original.
+/// Output has the same path as the original: recycle the original under its
+/// real name (so Restore brings back the right file), then move the new file
+/// in with a rename that can never overwrite anything.
 fn replace_in_place(
     temp: &Path,
     original: &Path,
     final_path: &Path,
-    recycle: &dyn Fn(&Path) -> Result<(), FsError>,
+    recycle: RecycleFn,
+    rename: RenameFn,
 ) -> Result<(), FsError> {
-    let old = free_old_path(original)?;
+    // Find out now, before anything moves, whether the original can be deleted.
+    ensure_deletable(original)?;
 
-    std::fs::rename(original, &old).map_err(FsError::from_io)?;
-
-    if let Err(e) = std::fs::rename(temp, final_path) {
-        // Put the original back. If even that fails, the original still exists
-        // at `old`; say so rather than pretend.
-        return Err(match std::fs::rename(&old, original) {
-            Ok(()) => FsError::from_io(e),
-            Err(restore) => FsError::with_source(
-                format!(
-                    "Couldn't replace the file, and the original is saved as \"{}\".",
-                    old.display()
-                ),
-                restore,
-            ),
-        });
-    }
-
-    if let Err(e) = recycle(&old) {
-        if !old.exists() {
-            // The original is already gone, so the replacement is complete.
-            return Ok(());
-        }
-        // Undo: discard the new file and restore the original so the user's
-        // folder looks exactly as it did before.
-        if std::fs::remove_file(final_path).is_ok() && std::fs::rename(&old, original).is_ok() {
+    if let Err(e) = recycle(original) {
+        if occupied(original) {
+            // Nothing moved: the original is untouched.
             return Err(e);
         }
-        return Err(FsError::new(format!(
-            "Couldn't move the original to the Recycle Bin. It is saved as \"{}\".",
-            old.display()
-        )));
+        // The original is gone anyway (Windows reported a failure after the
+        // move); finish the replacement.
     }
-    Ok(())
+    if occupied(original) {
+        // Recycling reported success, yet something is still at the path. A
+        // rename now would fail at best; stop here and leave it alone.
+        return Err(FsError::new("Couldn't replace the file."));
+    }
+
+    // From here the original is in the Recycle Bin, so the new file must never
+    // be deleted: if it can't take its name, keep it where it is and say so.
+    rename_with_retry(rename, temp, final_path).map_err(|e| FsError::stranded(temp, e))
 }
 
 /// Output has a different name (e.g. new extension): move the new file in, then
@@ -189,21 +214,18 @@ fn replace_with_new_name(
     temp: &Path,
     original: &Path,
     final_path: &Path,
-    recycle: &dyn Fn(&Path) -> Result<(), FsError>,
+    recycle: RecycleFn,
+    rename: RenameFn,
 ) -> Result<(), FsError> {
-    // `rename` silently overwrites on Windows; never let it eat someone's file.
-    if final_path.exists() {
-        return Err(FsError::new(
-            "Couldn't save the new file because a file with that name already exists.",
-        ));
-    }
     // Find out now, before anything moves, whether the original can be deleted.
     ensure_deletable(original)?;
 
-    std::fs::rename(temp, final_path).map_err(FsError::from_io)?;
+    // Non-replacing: if another file took the final name meanwhile, this fails
+    // instead of overwriting it.
+    rename_with_retry(rename, temp, final_path).map_err(FsError::from_io)?;
 
     if let Err(e) = recycle(original) {
-        if !original.exists() {
+        if !occupied(original) {
             // The original is already gone, so the replacement is complete.
             return Ok(());
         }
@@ -212,6 +234,80 @@ fn replace_with_new_name(
         return Err(e);
     }
     Ok(())
+}
+
+/// Whether anything is at `path`. When that can't be determined, assume it is,
+/// which is the cautious answer for every caller.
+fn occupied(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(e) => e.kind() != io::ErrorKind::NotFound,
+    }
+}
+
+/// Attempts at the final rename, and the pause between them. Antivirus scanners
+/// and Explorer's thumbnailer briefly open fresh files; a moment later they let go.
+const RENAME_ATTEMPTS: u32 = 5;
+const RENAME_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+/// `rename`, retried a few times while the file is briefly held by someone else.
+fn rename_with_retry(rename: RenameFn, from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < RENAME_ATTEMPTS && is_transient(&e) => {
+                attempt += 1;
+                std::thread::sleep(RENAME_RETRY_DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Sharing, lock or access errors: what another program holding the file looks like.
+fn is_transient(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33))
+}
+
+/// Rename `from` to `to` with `MoveFileExW` and no flags, which fails if `to`
+/// exists. (`std::fs::rename` replaces existing files on Windows.)
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+
+    let (from, to) = (verbatim_wide(from)?, verbatim_wide(to)?);
+    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }
+        .map_err(|e| {
+            // Win32 errors arrive as HRESULTs (0x8007xxxx); hand back the plain
+            // Windows error code so `raw_os_error` matches what std::fs reports.
+            let hr = e.code().0 as u32;
+            if hr & 0xFFFF_0000 == 0x8007_0000 {
+                io::Error::from_raw_os_error((hr & 0xFFFF) as i32)
+            } else {
+                io::Error::other(e)
+            }
+        })
+}
+
+/// Absolute, `\\?\`-prefixed, NUL-terminated UTF-16 form of `path`, so paths
+/// past 260 characters work as they do through `std::fs`.
+fn verbatim_wide(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let absolute = std::path::absolute(path)?;
+    let wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    let text = String::from_utf16_lossy(&wide);
+    let (prefix, rest) = if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
+        ("", &wide[..])
+    } else if text.starts_with(r"\\") {
+        (r"\\?\UNC\", &wide[2..]) // \\server\share\… → \\?\UNC\server\share\…
+    } else {
+        (r"\\?\", &wide[..])
+    };
+    let mut out: Vec<u16> = prefix.encode_utf16().chain(rest.iter().copied()).collect();
+    out.push(0);
+    Ok(out)
 }
 
 /// Probe with the same access the Recycle Bin needs (DELETE, sharing everything
@@ -227,22 +323,6 @@ fn ensure_deletable(path: &Path) -> Result<(), FsError> {
         .open(path)
         .map(|_| ())
         .map_err(FsError::from_io)
-}
-
-/// `.<name>.hasami-old`, or a numbered variant if a leftover from an earlier
-/// crashed run is sitting there (it may be someone's only copy; never overwrite it).
-fn free_old_path(original: &Path) -> Result<PathBuf, FsError> {
-    let first = sibling_with_suffix(original, ".hasami-old");
-    if !first.exists() {
-        return Ok(first);
-    }
-    for n in 2..1000 {
-        let candidate = sibling_with_suffix(original, &format!(".hasami-old{n}"));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(FsError::new("Couldn't replace the file because too many leftover backup files are in the folder."))
 }
 
 const RECYCLE_FAILED: &str = "Couldn't move the original to the Recycle Bin.";
@@ -360,6 +440,16 @@ mod tests {
         );
     }
 
+    /// Every name in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
     #[test]
     fn commit_replace_same_name() {
         let dir = test_dir();
@@ -371,8 +461,7 @@ mod tests {
         commit_replace(&temp, &original, &original).unwrap();
 
         assert_eq!(fs::read(&original).unwrap(), b"new");
-        assert!(!temp.exists());
-        assert!(!sibling_with_suffix(&original, ".hasami-old").exists());
+        assert_eq!(names(dir.path()), vec!["hasami-test-same.mp4"], "no temp or parked file left");
     }
 
     #[test]
@@ -401,28 +490,13 @@ mod tests {
         fs::write(&final_path, b"someone else's").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        assert!(commit_replace(&temp, &original, &final_path).is_err());
+        let err = commit_replace(&temp, &original, &final_path).unwrap_err();
+        assert!(err.message.contains("already exists"), "{}", err.message);
+        assert!(err.original_intact);
 
         assert_eq!(fs::read(&original).unwrap(), b"old");
         assert_eq!(fs::read(&final_path).unwrap(), b"someone else's");
         assert!(!temp.exists());
-    }
-
-    #[test]
-    fn commit_replace_keeps_leftover_old_file() {
-        let dir = test_dir();
-        let original = dir.path().join("hasami-test-c.mp4");
-        let temp = temp_path_for(&original);
-        let leftover = sibling_with_suffix(&original, ".hasami-old");
-        fs::write(&original, b"old").unwrap();
-        fs::write(&leftover, b"leftover").unwrap();
-        fs::write(&temp, b"new").unwrap();
-
-        commit_replace(&temp, &original, &original).unwrap();
-
-        assert_eq!(fs::read(&original).unwrap(), b"new");
-        assert_eq!(fs::read(&leftover).unwrap(), b"leftover");
-        assert!(!sibling_with_suffix(&original, ".hasami-old2").exists());
     }
 
     #[cfg(windows)]
@@ -444,11 +518,11 @@ mod tests {
 
         let err = commit_replace(&temp, &original, &original).unwrap_err();
         assert!(err.message.contains("another program"), "{}", err.message);
+        assert!(err.original_intact);
 
         drop(_lock);
         assert_eq!(fs::read(&original).unwrap(), b"precious");
-        assert!(!temp.exists());
-        assert!(!sibling_with_suffix(&original, ".hasami-old").exists());
+        assert_eq!(names(dir.path()), vec!["hasami-test-locked.mp4"]);
     }
 
     #[cfg(windows)]
@@ -488,17 +562,50 @@ mod tests {
         Err(FsError::new(RECYCLE_FAILED))
     }
 
+    /// Recycler that deletes the file (standing in for a real move to the Bin).
+    fn delete_ok(p: &Path) -> Result<(), FsError> {
+        fs::remove_file(p).unwrap();
+        Ok(())
+    }
+
+    fn never_rename(_: &Path, _: &Path) -> io::Result<()> {
+        panic!("rename must not be called");
+    }
+
     #[test]
-    fn in_place_restores_original_when_second_rename_fails() {
+    fn in_place_recycles_the_original_under_its_real_name() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-real-name.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        let recycled = std::cell::RefCell::new(Vec::new());
+        let record = |p: &Path| {
+            recycled.borrow_mut().push((p.to_path_buf(), fs::read(p).unwrap()));
+            delete_ok(p)
+        };
+        commit_replace_with(&temp, &original, &original, &record, &rename_no_replace).unwrap();
+
+        assert_eq!(*recycled.borrow(), vec![(original.clone(), b"old".to_vec())]);
+        assert_eq!(fs::read(&original).unwrap(), b"new");
+        assert_eq!(names(dir.path()), vec!["hasami-test-real-name.mp4"]);
+    }
+
+    #[test]
+    fn in_place_never_touches_the_original_without_a_new_file() {
         let dir = test_dir();
         let original = dir.path().join("hasami-test-r1.mp4");
-        let temp = temp_path_for(&original); // never created, so the rename fails
+        let temp = temp_path_for(&original); // never created
         fs::write(&original, b"precious").unwrap();
 
-        assert!(commit_replace(&temp, &original, &original).is_err());
+        let recycle_called = |_: &Path| -> Result<(), FsError> { panic!("must not recycle") };
+        let err = commit_replace_with(&temp, &original, &original, &recycle_called, &never_rename)
+            .unwrap_err();
+        assert!(err.original_intact);
 
         assert_eq!(fs::read(&original).unwrap(), b"precious");
-        assert!(!sibling_with_suffix(&original, ".hasami-old").exists());
+        assert_eq!(names(dir.path()), vec!["hasami-test-r1.mp4"]);
     }
 
     #[test]
@@ -509,12 +616,13 @@ mod tests {
         fs::write(&original, b"precious").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        let err = commit_replace_with(&temp, &original, &original, &failing_recycle).unwrap_err();
+        let err = commit_replace_with(&temp, &original, &original, &failing_recycle, &never_rename)
+            .unwrap_err();
         assert!(err.message.contains("Recycle Bin"), "{}", err.message);
+        assert!(err.original_intact);
 
         assert_eq!(fs::read(&original).unwrap(), b"precious");
-        assert!(!temp.exists());
-        assert!(!sibling_with_suffix(&original, ".hasami-old").exists());
+        assert_eq!(names(dir.path()), vec!["hasami-test-r2.mp4"], "temp deleted");
     }
 
     #[test]
@@ -525,9 +633,84 @@ mod tests {
         fs::write(&original, b"old").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        commit_replace_with(&temp, &original, &original, &delete_then_fail).unwrap();
+        commit_replace_with(&temp, &original, &original, &delete_then_fail, &rename_no_replace)
+            .unwrap();
 
         assert_eq!(fs::read(&original).unwrap(), b"new");
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn in_place_stops_if_the_original_survives_recycling() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-survivor.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"precious").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        // Reports success but leaves the file: a rename now could overwrite it.
+        let pretend = |_: &Path| -> Result<(), FsError> { Ok(()) };
+        let err = commit_replace_with(&temp, &original, &original, &pretend, &never_rename)
+            .unwrap_err();
+        assert!(err.original_intact);
+
+        assert_eq!(fs::read(&original).unwrap(), b"precious");
+        assert_eq!(names(dir.path()), vec!["hasami-test-survivor.mp4"]);
+    }
+
+    #[test]
+    fn in_place_retries_a_rename_while_the_file_is_busy() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-busy.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        let calls = std::cell::Cell::new(0);
+        let busy_twice = |from: &Path, to: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() <= 2 {
+                Err(io::Error::from_raw_os_error(32)) // ERROR_SHARING_VIOLATION
+            } else {
+                rename_no_replace(from, to)
+            }
+        };
+        commit_replace_with(&temp, &original, &original, &delete_ok, &busy_twice).unwrap();
+
+        assert_eq!(calls.get(), 3);
+        assert_eq!(fs::read(&original).unwrap(), b"new");
+        assert_eq!(names(dir.path()), vec!["hasami-test-busy.mp4"]);
+    }
+
+    #[test]
+    fn in_place_keeps_the_new_file_when_it_cant_take_its_name() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-stranded.mp4");
+        let temp = temp_path_for(&original);
+        fs::write(&original, b"old").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        let calls = std::cell::Cell::new(0);
+        let always_denied = |_: &Path, _: &Path| {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from_raw_os_error(5)) // ERROR_ACCESS_DENIED
+        };
+        let err = commit_replace_with(&temp, &original, &original, &delete_ok, &always_denied)
+            .unwrap_err();
+
+        assert_eq!(calls.get(), RENAME_ATTEMPTS, "retried before giving up");
+        assert!(!err.original_intact);
+        assert_eq!(err.kept_new_file.as_deref(), Some(temp.as_path()));
+        assert_eq!(
+            err.message,
+            format!(
+                "Couldn't finish saving the new file. It's saved as \"{}\", and the original is in the Recycle Bin.",
+                temp.display()
+            )
+        );
+        // The only copy of the new file must survive the error path.
+        assert_eq!(fs::read(&temp).unwrap(), b"new");
+        assert!(!original.exists());
     }
 
     #[test]
@@ -539,7 +722,9 @@ mod tests {
         fs::write(&original, b"precious").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        assert!(commit_replace_with(&temp, &original, &final_path, &failing_recycle).is_err());
+        let err = commit_replace_with(&temp, &original, &final_path, &failing_recycle, &rename_no_replace)
+            .unwrap_err();
+        assert!(err.original_intact);
 
         assert_eq!(fs::read(&original).unwrap(), b"precious");
         assert!(!final_path.exists());
@@ -555,10 +740,49 @@ mod tests {
         fs::write(&original, b"old").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        commit_replace_with(&temp, &original, &final_path, &delete_then_fail).unwrap();
+        commit_replace_with(&temp, &original, &final_path, &delete_then_fail, &rename_no_replace)
+            .unwrap();
 
         assert_eq!(fs::read(&final_path).unwrap(), b"new");
         assert!(!original.exists());
+    }
+
+    #[test]
+    fn new_name_failed_rename_leaves_the_original_alone() {
+        let dir = test_dir();
+        let original = dir.path().join("hasami-test-r6.mkv");
+        let final_path = with_extension(&original, "mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&original, b"precious").unwrap();
+        fs::write(&temp, b"new").unwrap();
+
+        let recycle_called = |_: &Path| -> Result<(), FsError> { panic!("must not recycle") };
+        let refuse = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(183)); // ERROR_ALREADY_EXISTS
+        let err = commit_replace_with(&temp, &original, &final_path, &recycle_called, &refuse)
+            .unwrap_err();
+        assert!(err.message.contains("already exists"), "{}", err.message);
+        assert!(err.original_intact);
+        assert!(err.kept_new_file.is_none());
+
+        assert_eq!(fs::read(&original).unwrap(), b"precious");
+        assert_eq!(names(dir.path()), vec!["hasami-test-r6.mkv"]);
+    }
+
+    #[test]
+    fn rename_no_replace_moves_but_never_overwrites() {
+        let dir = test_dir();
+        let a = dir.path().join("a [x] 'é'.bin");
+        let b = dir.path().join("b.bin");
+        fs::write(&a, b"a").unwrap();
+        rename_no_replace(&a, &b).unwrap();
+        assert_eq!(fs::read(&b).unwrap(), b"a");
+        assert!(!a.exists());
+
+        fs::write(&a, b"a2").unwrap();
+        let err = rename_no_replace(&a, &b).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err:?}");
+        assert_eq!(fs::read(&b).unwrap(), b"a");
+        assert_eq!(fs::read(&a).unwrap(), b"a2");
     }
 
     #[test]

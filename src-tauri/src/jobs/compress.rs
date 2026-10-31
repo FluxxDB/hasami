@@ -88,7 +88,7 @@ fn compress_in(
     }
 
     let final_path = unique_path(&desired_output(input), Some(input));
-    let temp = RemoveOnDrop::file(temp_path_for(&final_path));
+    let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
     let work = RemoveOnDrop::dir(create_work_dir(work_root)?);
     let passlog = work.path().join("x264");
 
@@ -115,7 +115,13 @@ fn compress_in(
     if cancel.is_cancelled() {
         return Err(JobError::Cancelled);
     }
-    commit_replace(temp.path(), input, &final_path)?;
+    if let Err(e) = commit_replace(temp.path(), input, &final_path) {
+        if e.kept_new_file.is_some() {
+            // The original is already in the Recycle Bin; this is the only copy of the result.
+            temp.keep();
+        }
+        return Err(e.into());
+    }
     Ok(JobOutcome::Done {
         output: final_path,
         bytes: verified.size_bytes,
@@ -349,6 +355,7 @@ fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
 struct RemoveOnDrop {
     path: PathBuf,
     is_dir: bool,
+    kept: bool,
 }
 
 impl RemoveOnDrop {
@@ -356,20 +363,33 @@ impl RemoveOnDrop {
         Self {
             path,
             is_dir: false,
+            kept: false,
         }
     }
 
     fn dir(path: PathBuf) -> Self {
-        Self { path, is_dir: true }
+        Self {
+            path,
+            is_dir: true,
+            kept: false,
+        }
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Don't delete it after all.
+    fn keep(&mut self) {
+        self.kept = true;
+    }
 }
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
         let _ = if self.is_dir {
             fs::remove_dir_all(&self.path)
         } else {
@@ -572,6 +592,20 @@ mod tests {
             plain_verify_error(JobError::Cancelled),
             JobError::Cancelled
         ));
+    }
+
+    #[test]
+    fn remove_on_drop_deletes_unless_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gone, kept) = (dir.path().join("gone"), dir.path().join("kept"));
+        fs::write(&gone, b"x").unwrap();
+        fs::write(&kept, b"x").unwrap();
+        drop(RemoveOnDrop::file(gone.clone()));
+        let mut guard = RemoveOnDrop::file(kept.clone());
+        guard.keep();
+        drop(guard);
+        assert!(!gone.exists());
+        assert!(kept.exists());
     }
 
     /// Write a small `.mkv` (so it is never "already small") into `dir`.

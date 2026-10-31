@@ -47,6 +47,14 @@ pub enum JobError {
     Encode(String),
 }
 
+impl JobError {
+    /// True when the finished new file was kept (see [`FsError::kept_new_file`]); the job must
+    /// not delete its temp file.
+    pub fn keeps_new_file(&self) -> bool {
+        matches!(self, JobError::Fs(e) if e.kept_new_file.is_some())
+    }
+}
+
 impl From<RunError> for JobError {
     fn from(e: RunError) -> Self {
         match e {
