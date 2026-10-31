@@ -16,6 +16,8 @@
   const idle = $derived(!!media && !store.busy);
   const audioOk = $derived(idle && store.canExportAudio);
   const NO_AUDIO = 'This clip has no audio to export';
+  /** Said while the next clip opens, or when it couldn't be opened; empty once it's open. */
+  const opening = $derived(media || !path ? '' : store.error ? "Couldn't open" : 'Opening…');
   const running = $derived(store.exports.running.length);
   // Exports run one at a time, so the first one still running is the one making progress.
   const fraction = $derived(running > 0 ? (store.exports.progress[store.exports.running[0]] ?? 0) : 0);
@@ -32,16 +34,20 @@
   <div class="vsep brand-sep"></div>
   <div class="file">
     {#if media}
+      <!-- The name and meta line take the pointer for their tooltips (they're cut short in a
+           narrow window) and are drag regions themselves, so the window still moves from them. -->
       <div class="name">
-        <span class="fname" title={media.file_name}>{media.file_name}</span>
+        <h1 class="fname" title={media.file_name} data-tauri-drag-region>{media.file_name}</h1>
         {#if store.edited}<span class="dot" aria-hidden="true"></span><span class="cap edited">Edited</span>{/if}
       </div>
-      <div class="meta cap">{metaLine(media)}</div>
+      <div class="meta cap" title={metaLine(media)} data-tauri-drag-region>{metaLine(media)}</div>
     {:else if path}
       <!-- Opening the next clip, or it couldn't be opened (the viewer says why). -->
-      <div class="name"><span class="fname" title={fileName(path)}>{fileName(path)}</span></div>
-      <div class="meta cap">{store.error ? "Couldn't open" : 'Opening…'}</div>
+      <div class="name"><h1 class="fname" title={fileName(path)} data-tauri-drag-region>{fileName(path)}</h1></div>
+      <div class="meta cap">{opening}</div>
     {/if}
+    <!-- Always mounted, so a change of its text ("Opening…", "Couldn't open") is announced. -->
+    <span class="sr-only" role="status">{opening}</span>
   </div>
   <div class="spacer" data-tauri-drag-region></div>
 
@@ -171,9 +177,15 @@
     line-height: 1.25;
   }
   .fname {
+    margin: 0;
+    font: inherit;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .fname,
+  .meta[title] {
+    pointer-events: auto;
   }
   .dot {
     width: 7px;

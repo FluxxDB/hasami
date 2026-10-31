@@ -18,7 +18,9 @@
   }
 </script>
 
-<div class="tlbar" role="toolbar" aria-label="Timeline tools">
+<!-- A group, not role="toolbar": a toolbar promises arrow-key movement between its buttons, and
+     here the arrows step frames (spec 5.5), so each tool stays its own Tab stop. -->
+<div class="tlbar" role="group" aria-label="Timeline tools">
   <button
     type="button"
     class="tool cap"

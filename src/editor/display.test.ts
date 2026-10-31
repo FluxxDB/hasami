@@ -48,11 +48,16 @@ describe('metaLine', () => {
     video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
     tracks: [
       { index: 0, empty: false, file: null },
-      { index: 1, empty: true, file: null },
+      { index: 1, empty: false, file: null },
+      { index: 2, empty: true, file: null },
     ],
   };
   it('lists resolution, fps, codec, tracks, duration and size', () => {
     expect(metaLine(media)).toBe('1920×1080 · 60 fps · HEVC · 2 audio tracks · 1:30 · 412 MB');
+  });
+  it('counts only tracks that hold audio, as the timeline shows them', () => {
+    const tracks = [media.tracks[0], media.tracks[2]];
+    expect(metaLine({ ...media, tracks })).toBe('1920×1080 · 60 fps · HEVC · 1 audio track · 1:30 · 412 MB');
   });
   it('drops the video parts for an audio-only file and singularises one track', () => {
     expect(metaLine({ ...media, video: null, tracks: [media.tracks[0]] })).toBe('1 audio track · 1:30 · 412 MB');

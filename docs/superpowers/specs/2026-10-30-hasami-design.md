@@ -137,6 +137,7 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
 | ↑ / ↓ | Previous / next cut point (DaVinci default) |
 | Home / End | Timeline start / end |
 | Ctrl+B | Cut at playhead, all tracks |
+| Shift+V | Select the video clip under the playhead, with its linked audio when Linked is on (on a cut, the clip that starts there; no video there, no change). *Not a Resolve default: added in the Task 12 accessibility review so clips can be selected and deleted without a mouse.* |
 | Delete / Backspace | Remove selection |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | N | Toggle snapping (DaVinci default) |

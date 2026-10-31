@@ -79,7 +79,8 @@
 
   <section class="body" aria-labelledby="summary-heading">
     <div class="column">
-      <h1 id="summary-heading">{heading}</h1>
+      <!-- Polite: "Finishing 2 exports" turning into "All clips done" is the news here. -->
+      <h1 id="summary-heading" aria-live="polite">{heading}</h1>
       {#if note}<p class="note">{note}</p>{/if}
 
       <ol class="results">

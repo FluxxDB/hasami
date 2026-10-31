@@ -51,7 +51,8 @@ export function metaLine(m: EditorMedia): string {
   if (m.video) {
     parts.push(`${m.video.width}×${m.video.height}`, `${formatFps(m.video.fps)} fps`, m.video.codec.toUpperCase());
   }
-  const n = m.tracks.length;
+  // Empty tracks sit behind "+N empty tracks" on the timeline, so they don't count here either.
+  const n = m.tracks.filter((t) => !t.empty).length;
   parts.push(`${n} audio ${n === 1 ? 'track' : 'tracks'}`, formatClock(m.duration_s), formatBytes(m.size_bytes));
   return parts.join(' · ');
 }

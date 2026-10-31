@@ -49,6 +49,14 @@ describe('keyToCommand (spec 5.5)', () => {
     expect(k('n')).toBe<Command>('toggleSnap');
     expect(k('N')).toBe<Command>('toggleSnap'); // Caps Lock: no Shift held
   });
+  it('Shift+V: select the clip at the playhead (added for keyboard access)', () => {
+    expect(k('V', { shift: true })).toBe<Command>('selectAtPlayhead');
+    expect(k('v', { shift: true })).toBe<Command>('selectAtPlayhead'); // Caps Lock on
+    expect(k('v')).toBeNull();
+    expect(k('V')).toBeNull(); // Caps Lock, no Shift held
+    expect(k('V', { ctrl: true, shift: true })).toBeNull();
+    expect(keyToCommand({ key: 'V', shiftKey: true, ctrlKey: false, altKey: true })).toBeNull();
+  });
   it('Ctrl+Shift+L: toggle linked selection', () => {
     expect(k('L', { ctrl: true, shift: true })).toBe<Command>('toggleLinked');
     expect(k('l', { ctrl: true, shift: true })).toBe<Command>('toggleLinked');
