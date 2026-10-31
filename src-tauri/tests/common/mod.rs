@@ -120,8 +120,42 @@ pub fn fixture_six_tracks(dir: &Path) -> PathBuf {
     out
 }
 
-/// Peak level in dBFS of the `n`th audio stream of `file`, measured with ffmpeg's `volumedetect`.
-pub fn max_volume_db(file: &Path, n: usize) -> f64 {
+/// `secs` seconds of 1920x1080 @ 30 fps H.264 at a very low bitrate plus one AAC track, in
+/// `.mkv` so it is never "already small". Cheap to generate even for long durations.
+pub fn fixture_long_1080p_mkv(dir: &Path, secs: u32) -> PathBuf {
+    let out = out_path(dir, "long_1080p.mkv");
+    let video = format!("testsrc2=size=1920x1080:rate=30:duration={secs}");
+    let audio = format!("sine=frequency=440:sample_rate=48000:duration={secs}");
+    ffmpeg(&[
+        "-f", "lavfi", "-i", &video,
+        "-f", "lavfi", "-i", &audio,
+        "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "100k", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "32k", "-ac", "1",
+        s(&out),
+    ]);
+    out
+}
+
+/// 3 s of a 440 Hz AAC sine in `.mkv`, with no video stream.
+pub fn fixture_audio_only_mkv(dir: &Path) -> PathBuf {
+    let out = out_path(dir, "audio_only.mkv");
+    ffmpeg(&[
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+        "-c:a", "aac", "-ac", "2",
+        s(&out),
+    ]);
+    out
+}
+
+/// Stream-copy `src` into `dst` (the container follows `dst`'s extension) and return `dst`.
+pub fn remux(src: &Path, dst: &Path) -> PathBuf {
+    ffmpeg(&["-i", s(src), "-map", "0", "-c", "copy", s(dst)]);
+    dst.to_path_buf()
+}
+
+/// Run `volumedetect` on the `n`th audio stream of `file` and return the value after `key`
+/// (`max_volume:` or `mean_volume:`), in dB.
+fn volumedetect(file: &Path, n: usize, key: &str) -> f64 {
     let paths = FfmpegPaths::resolve().expect("bundled ffmpeg not found");
     let map = format!("0:a:{n}");
     let output = hidden_command(&paths.ffmpeg)
@@ -134,7 +168,17 @@ pub fn max_volume_db(file: &Path, n: usize) -> f64 {
     assert!(output.status.success(), "volumedetect failed:\n{stderr}");
     stderr
         .lines()
-        .find_map(|l| l.split("max_volume:").nth(1))
+        .find_map(|l| l.split(key).nth(1))
         .and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok())
-        .unwrap_or_else(|| panic!("no max_volume in volumedetect output:\n{stderr}"))
+        .unwrap_or_else(|| panic!("no {key} in volumedetect output:\n{stderr}"))
+}
+
+/// Peak level in dBFS of the `n`th audio stream of `file`, measured with ffmpeg's `volumedetect`.
+pub fn max_volume_db(file: &Path, n: usize) -> f64 {
+    volumedetect(file, n, "max_volume:")
+}
+
+/// Mean (RMS) level in dBFS of the `n`th audio stream of `file`, measured with `volumedetect`.
+pub fn mean_volume_db(file: &Path, n: usize) -> f64 {
+    volumedetect(file, n, "mean_volume:")
 }
