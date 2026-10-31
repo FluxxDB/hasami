@@ -99,8 +99,9 @@ pub fn fixture_six_tracks(dir: &Path) -> PathBuf {
     let out = out_path(dir, "six_tracks.mp4");
     let mut args: Vec<&str> = vec![
         "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=3",
-        // 10^(-12/20) = 0.2512
-        "-f", "lavfi", "-i", "aevalsrc=0.2512*sin(2*PI*440*t):s=48000:d=3",
+        // 10^(-12/20) = 0.2512. Two expressions make the source stereo, so `-ac 2` below
+        // doesn't downmix/upmix and rescale it.
+        "-f", "lavfi", "-i", "aevalsrc=0.2512*sin(2*PI*440*t)|0.2512*sin(2*PI*440*t):s=48000:d=3",
     ];
     for _ in 0..5 {
         args.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
@@ -117,4 +118,23 @@ pub fn fixture_six_tracks(dir: &Path) -> PathBuf {
     ]);
     ffmpeg(&args);
     out
+}
+
+/// Peak level in dBFS of the `n`th audio stream of `file`, measured with ffmpeg's `volumedetect`.
+pub fn max_volume_db(file: &Path, n: usize) -> f64 {
+    let paths = FfmpegPaths::resolve().expect("bundled ffmpeg not found");
+    let map = format!("0:a:{n}");
+    let output = hidden_command(&paths.ffmpeg)
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(file)
+        .args(["-map", &map, "-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .expect("failed to spawn ffmpeg");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "volumedetect failed:\n{stderr}");
+    stderr
+        .lines()
+        .find_map(|l| l.split("max_volume:").nth(1))
+        .and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok())
+        .unwrap_or_else(|| panic!("no max_volume in volumedetect output:\n{stderr}"))
 }

@@ -54,9 +54,13 @@ fn fixtures_have_expected_shape() {
     assert!(info.size_bytes < 2 * 1024 * 1024, "small fixture is {} bytes", info.size_bytes);
     assert_eq!(info.video.unwrap().codec, "h264");
     assert_eq!(info.audio.len(), 1);
+    assert_eq!(info.audio[0].codec, "aac");
 
     let six = common::fixture_six_tracks(dir.path());
     assert_eq!(probe(&paths, &six).unwrap().audio.len(), 6);
+    let loud = common::max_volume_db(&six, 0);
+    assert!((loud + 12.0).abs() < 1.0, "loud track peaks at {loud} dB, expected about -12");
+    assert!(common::max_volume_db(&six, 1) < -60.0, "second track should be silent");
 
     let big = common::fixture_big_h264(dir.path(), 4);
     let info = probe(&paths, &big).unwrap();
