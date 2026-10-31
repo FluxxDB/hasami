@@ -128,7 +128,7 @@ pub(crate) fn encode_to_limit(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<MediaInfo, JobError> {
-    let work = RemoveOnDrop::dir(create_work_dir(work_root)?);
+    let work = RemoveOnDrop::dir(create_work_dir(work_root, "hasami-2pass")?);
     let passlog = work.path().join("x264");
 
     encode_until_fits(|scale| {
@@ -352,15 +352,15 @@ impl Args {
     }
 }
 
-/// Create a new, uniquely named folder under `root` for the two-pass logs.
-fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
+/// Create a new, uniquely named folder `<prefix>-…` under `root` for an encode's scratch files.
+pub(super) fn create_work_dir(root: &Path, prefix: &str) -> Result<PathBuf, JobError> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
     for _ in 0..100 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = root.join(format!("hasami-2pass-{}-{nanos}-{n}", std::process::id()));
+        let dir = root.join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
         match fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -374,14 +374,14 @@ fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
 
 /// Deletes a file or folder when dropped, so every exit path (error, cancel, panic) cleans up.
 /// Deleting something that is already gone (e.g. a temp file that was committed) is a no-op.
-struct RemoveOnDrop {
+pub(super) struct RemoveOnDrop {
     path: PathBuf,
     is_dir: bool,
     kept: bool,
 }
 
 impl RemoveOnDrop {
-    fn file(path: PathBuf) -> Self {
+    pub(super) fn file(path: PathBuf) -> Self {
         Self {
             path,
             is_dir: false,
@@ -389,7 +389,7 @@ impl RemoveOnDrop {
         }
     }
 
-    fn dir(path: PathBuf) -> Self {
+    pub(super) fn dir(path: PathBuf) -> Self {
         Self {
             path,
             is_dir: true,
@@ -397,12 +397,12 @@ impl RemoveOnDrop {
         }
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Don't delete it after all.
-    fn keep(&mut self) {
+    pub(super) fn keep(&mut self) {
         self.kept = true;
     }
 }
