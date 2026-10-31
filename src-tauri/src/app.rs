@@ -759,10 +759,14 @@ pub(crate) struct Flow {
     finished: HashMap<u64, bool>,
     /// Deferred discards not yet resolved. The app doesn't exit while there are any.
     discards: Vec<PendingDiscard>,
-    /// Ids for discard outcomes shown in the progress window, counting down from `u64::MAX`, well
-    /// clear of the queue's job ids.
+    /// Ids for discard outcomes shown in the progress window, counting down from
+    /// [`FIRST_NOTICE_ID`], well clear of the queue's job ids.
     next_notice_id: u64,
 }
+
+/// The first synthetic notice id: 2^53 − 1, the largest integer a JS number holds exactly, so the
+/// page can tell neighbouring ids apart.
+const FIRST_NOTICE_ID: u64 = (1 << 53) - 1;
 
 impl Flow {
     pub(crate) fn new() -> Self {
@@ -780,7 +784,7 @@ impl Flow {
             exports: HashMap::new(),
             finished: HashMap::new(),
             discards: Vec::new(),
-            next_notice_id: u64::MAX,
+            next_notice_id: FIRST_NOTICE_ID,
         }
     }
 
@@ -1902,7 +1906,7 @@ mod tests {
         let effects = f.on_recycled("t.mp4".into(), Err(DISCARD_FAILED.into()), true);
         assert_eq!(effects, vec![OPEN_EXPORT]);
         assert!(f.on_ready().contains(&Effect::Emit(JobEvent::Failed {
-            id: u64::MAX,
+            id: 9_007_199_254_740_991, // Number.MAX_SAFE_INTEGER
             message: DISCARD_FAILED.into(),
             original_intact: true
         })));
