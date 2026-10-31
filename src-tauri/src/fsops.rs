@@ -67,6 +67,22 @@ impl FsError {
         }
     }
 
+    /// A new file's final rename failed, and afterwards the temp file couldn't
+    /// be seen where it was: the rename may have worked after all. No original
+    /// is involved, so it is untouched; the new file is kept either way.
+    fn rename_unsure(temp: &Path, final_path: &Path, source: io::Error) -> Self {
+        FsError {
+            message: format!(
+                "Couldn't confirm the new file was saved. It may be saved as \"{}\" or as \"{}\".",
+                final_path.display(),
+                temp.display()
+            ),
+            original_intact: true,
+            kept_new_file: Some(temp.to_path_buf()),
+            source: Some(Box::new(source)),
+        }
+    }
+
     /// Wrap an I/O error, choosing the wording from what went wrong.
     fn from_io(err: io::Error) -> Self {
         // Windows: 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION,
@@ -148,6 +164,92 @@ pub fn unique_path(desired: &Path, allow_existing: Option<&Path>) -> PathBuf {
 /// Same folder and stem as `original`, with a new extension (`ext` without the dot).
 pub fn with_extension(original: &Path, ext: &str) -> PathBuf {
     original.with_extension(ext.trim_start_matches('.'))
+}
+
+/// Prefix of every file the Quick Trim editor writes.
+pub const CLIPPED_PREFIX: &str = "[CLIPPED] ";
+
+/// Folder (next to the clips) that originals are moved into after a trim.
+const RAW_FOLDER: &str = "Raw";
+
+/// Where a trimmed copy of `input` goes: `[CLIPPED] <stem>.<ext>` in the same
+/// folder, or in the folder above when `input` already sits in a `Raw` folder.
+/// A `[CLIPPED] ` prefix already on the stem is not doubled. The name is free
+/// (numbered like `unique_path` if it isn't).
+pub fn clipped_path(input: &Path, ext: &str) -> PathBuf {
+    let mut dir = input.parent().unwrap_or_else(|| Path::new(""));
+    if in_raw_folder(input) {
+        dir = dir.parent().unwrap_or(dir);
+    }
+    let stem = input.file_stem().unwrap_or_default();
+    let stem = match stem.to_str().and_then(|s| s.strip_prefix(CLIPPED_PREFIX)) {
+        Some(bare) => OsString::from(bare),
+        None => stem.to_os_string(),
+    };
+    let mut name = OsString::from(CLIPPED_PREFIX);
+    name.push(stem);
+    name.push(".");
+    name.push(ext.trim_start_matches('.'));
+    unique_path(&dir.join(name), None)
+}
+
+/// True when the folder holding `path` is named `Raw` (any letter case).
+pub fn in_raw_folder(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(RAW_FOLDER))
+}
+
+/// Give the finished `temp` file its name, `final_path`, without ever replacing
+/// anything: if the name is taken the commit fails. No original is touched.
+///
+/// On a definite failure the temp file is deleted. When the rename may have
+/// happened anyway (the temp can no longer be seen where it was) it is kept and
+/// the error says so (`kept_new_file`).
+pub fn commit_new(temp: &Path, final_path: &Path) -> Result<(), FsError> {
+    commit_new_with(temp, final_path, &rename_no_replace, &presence)
+}
+
+/// `commit_new` with the rename and presence check injectable, so the failure
+/// paths can be tested deterministically.
+fn commit_new_with(
+    temp: &Path,
+    final_path: &Path,
+    rename: RenameFn,
+    presence: PresenceFn,
+) -> Result<(), FsError> {
+    if !temp.is_file() {
+        return Err(FsError::new(
+            "Couldn't save the new file because it could no longer be found.",
+        ));
+    }
+    let Err(e) = rename_with_retry(rename, temp, final_path) else {
+        return Ok(());
+    };
+    // Only a definite "still there" lets the temp file be deleted; otherwise the
+    // rename may have gone through and the file must be kept.
+    if presence(temp) == Presence::Present {
+        let _ = std::fs::remove_file(temp);
+        return Err(FsError::from_io(e));
+    }
+    Err(FsError::rename_unsure(temp, final_path, e))
+}
+
+/// Move `original` into a `Raw` folder next to it (created if missing), under a
+/// free name, without replacing anything. `None` means it already sits in a
+/// `Raw` folder and was left where it is; otherwise the new path.
+pub fn move_to_raw(original: &Path) -> Result<Option<PathBuf>, FsError> {
+    if in_raw_folder(original) {
+        return Ok(None);
+    }
+    let raw = original.parent().unwrap_or_else(|| Path::new("")).join(RAW_FOLDER);
+    std::fs::create_dir_all(&raw)
+        .map_err(|e| FsError::with_source("Couldn't create the Raw folder.", e))?;
+    let target = unique_path(&raw.join(original.file_name().unwrap_or_default()), None);
+    rename_with_retry(&rename_no_replace, original, &target).map_err(|e| {
+        FsError::with_source("Couldn't move the original into the Raw folder.", e)
+    })?;
+    Ok(Some(target))
 }
 
 /// Replace `original` with the finished `temp` file, saved as `final_path`.
@@ -1033,5 +1135,176 @@ mod tests {
     fn recycle_missing_file_is_an_error() {
         let dir = test_dir();
         assert!(recycle(&dir.path().join("hasami-test-nope.txt")).is_err());
+    }
+
+    #[test]
+    fn clipped_path_prefixes_and_keeps_ext() {
+        assert_eq!(
+            clipped_path(Path::new(r"C:\d\Replay 1.mp4"), "mp4"),
+            Path::new(r"C:\d\[CLIPPED] Replay 1.mp4")
+        );
+    }
+
+    #[test]
+    fn clipped_path_never_doubles_prefix() {
+        let dir = test_dir();
+        let input = dir.path().join("[CLIPPED] Replay 1.mp4");
+        assert_eq!(clipped_path(&input, "mp4"), dir.path().join("[CLIPPED] Replay 1.mp4"));
+        // Another extension keeps the single prefix too.
+        assert_eq!(clipped_path(&input, "mkv"), dir.path().join("[CLIPPED] Replay 1.mkv"));
+    }
+
+    #[test]
+    fn clipped_path_counts_collisions() {
+        let dir = test_dir();
+        fs::write(dir.path().join("[CLIPPED] a.mp4"), b"1").unwrap();
+        assert_eq!(
+            clipped_path(&dir.path().join("a.mp4"), "mp4"),
+            dir.path().join("[CLIPPED] a (2).mp4")
+        );
+    }
+
+    #[test]
+    fn clipped_path_from_raw_folder_goes_to_parent() {
+        let dir = test_dir();
+        assert_eq!(
+            clipped_path(&dir.path().join("raw").join("a.mov"), "mp4"),
+            dir.path().join("[CLIPPED] a.mp4")
+        );
+    }
+
+    #[test]
+    fn in_raw_folder_ignores_case() {
+        assert!(in_raw_folder(Path::new(r"C:\d\Raw\a.mp4")));
+        assert!(in_raw_folder(Path::new(r"C:\d\RAW\a.mp4")));
+        assert!(!in_raw_folder(Path::new(r"C:\d\Raw2\a.mp4")));
+        assert!(!in_raw_folder(Path::new(r"C:\Raw\d\a.mp4")));
+        assert!(!in_raw_folder(Path::new("a.mp4")));
+    }
+
+    #[test]
+    fn commit_new_moves_and_never_overwrites() {
+        let dir = test_dir();
+        let final_path = dir.path().join("[CLIPPED] a.mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&temp, b"new").unwrap();
+        commit_new(&temp, &final_path).unwrap();
+        assert_eq!(fs::read(&final_path).unwrap(), b"new");
+        assert!(!temp.exists());
+
+        // The name is taken now: refuse, keep the existing bytes, clean up the temp.
+        fs::write(&temp, b"newer").unwrap();
+        let err = commit_new(&temp, &final_path).unwrap_err();
+        assert!(err.original_intact);
+        assert!(err.kept_new_file.is_none());
+        assert_eq!(fs::read(&final_path).unwrap(), b"new");
+        assert!(!temp.exists(), "the temp file is deleted");
+    }
+
+    #[test]
+    fn commit_new_with_a_missing_temp_is_an_error() {
+        let dir = test_dir();
+        let err = commit_new(&dir.path().join(".x.hasami-tmp"), &dir.path().join("x.mp4")).unwrap_err();
+        assert!(err.kept_new_file.is_none());
+        assert!(!dir.path().join("x.mp4").exists());
+    }
+
+    #[test]
+    fn commit_new_retries_a_rename_while_the_file_is_busy() {
+        let dir = test_dir();
+        let final_path = dir.path().join("x.mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&temp, b"new").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let flaky = |from: &Path, to: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 {
+                Err(io::Error::from_raw_os_error(32))
+            } else {
+                rename_no_replace(from, to)
+            }
+        };
+        commit_new_with(&temp, &final_path, &flaky, &presence).unwrap();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(fs::read(&final_path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn commit_new_keeps_the_temp_when_the_rename_may_have_happened() {
+        let dir = test_dir();
+        let final_path = dir.path().join("x.mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&temp, b"new").unwrap();
+        // The rename reports failure, yet the temp is no longer where it was.
+        let moved_then_failed = |from: &Path, to: &Path| {
+            rename_no_replace(from, to)?;
+            Err(io::Error::other("lost the reply"))
+        };
+        let err = commit_new_with(&temp, &final_path, &moved_then_failed, &presence).unwrap_err();
+        assert!(err.original_intact, "commit_new never touches an original");
+        assert_eq!(err.kept_new_file.as_deref(), Some(temp.as_path()));
+        assert_eq!(fs::read(&final_path).unwrap(), b"new", "nothing was deleted");
+    }
+
+    #[test]
+    fn commit_new_keeps_the_temp_when_it_cant_be_looked_at() {
+        let dir = test_dir();
+        let final_path = dir.path().join("x.mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&temp, b"new").unwrap();
+        let denied = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(5));
+        let err = commit_new_with(&temp, &final_path, &denied, &unreadable).unwrap_err();
+        assert_eq!(err.kept_new_file.as_deref(), Some(temp.as_path()));
+        assert_eq!(fs::read(&temp).unwrap(), b"new");
+    }
+
+    #[test]
+    fn commit_new_deletes_the_temp_on_a_definite_failure() {
+        let dir = test_dir();
+        let final_path = dir.path().join("x.mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&temp, b"new").unwrap();
+        let refused = |_: &Path, _: &Path| Err(io::Error::other("refused"));
+        let err = commit_new_with(&temp, &final_path, &refused, &presence).unwrap_err();
+        assert!(err.kept_new_file.is_none());
+        assert!(!temp.exists());
+        assert!(!final_path.exists());
+    }
+
+    #[test]
+    fn move_to_raw_creates_folder_and_numbers() {
+        let dir = test_dir();
+        let a = dir.path().join("a.mp4");
+        fs::write(&a, b"1").unwrap();
+        let moved = move_to_raw(&a).unwrap();
+        assert_eq!(moved, Some(dir.path().join("Raw").join("a.mp4")));
+        assert!(!a.exists());
+        assert_eq!(fs::read(dir.path().join("Raw").join("a.mp4")).unwrap(), b"1");
+
+        fs::write(&a, b"2").unwrap();
+        let moved = move_to_raw(&a).unwrap();
+        assert_eq!(moved, Some(dir.path().join("Raw").join("a (2).mp4")));
+        assert_eq!(fs::read(dir.path().join("Raw").join("a.mp4")).unwrap(), b"1");
+        assert_eq!(fs::read(dir.path().join("Raw").join("a (2).mp4")).unwrap(), b"2");
+    }
+
+    #[test]
+    fn move_to_raw_leaves_files_already_in_raw() {
+        let dir = test_dir();
+        let raw = dir.path().join("Raw");
+        fs::create_dir(&raw).unwrap();
+        let a = raw.join("a.mp4");
+        fs::write(&a, b"1").unwrap();
+        assert_eq!(move_to_raw(&a).unwrap(), None);
+        assert_eq!(fs::read(&a).unwrap(), b"1");
+        assert_eq!(names(&raw), vec!["a.mp4"]);
+    }
+
+    #[test]
+    fn move_to_raw_fails_cleanly_when_the_file_is_missing() {
+        let dir = test_dir();
+        let err = move_to_raw(&dir.path().join("gone.mp4")).unwrap_err();
+        assert!(err.original_intact);
+        assert!(err.kept_new_file.is_none());
     }
 }
