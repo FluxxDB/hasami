@@ -86,27 +86,16 @@ fn compress_in(
 
     let final_path = unique_path(&desired_output(input), Some(input));
     let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
-    let work = RemoveOnDrop::dir(create_work_dir(work_root)?);
-    let passlog = work.path().join("x264");
-
-    let verified = encode_until_fits(|scale| {
-        let job = Encode {
-            input,
-            info: &info,
-            plan: &plan,
-            scale,
-            passlog: &passlog,
-            output: temp.path(),
-        };
-        job.run(paths, cancel, on_progress)?;
-        Ok(verify_output(
-            paths,
-            temp.path(),
-            info.duration_s,
-            Some(SIZE_LIMIT_BYTES),
-        )?)
-    })
-    .map_err(plain_verify_error)?;
+    let verified = encode_to_limit(
+        paths,
+        input,
+        &info,
+        &plan,
+        temp.path(),
+        work_root,
+        cancel,
+        on_progress,
+    )?;
 
     // Last chance to back out; once the commit starts it runs to completion or rolls back.
     if cancel.is_cancelled() {
@@ -123,6 +112,43 @@ fn compress_in(
         output: final_path,
         bytes: verified.size_bytes,
     })
+}
+
+/// Two-pass encode of `input` per `plan` into `output`, retried smaller until it verifies at
+/// ≤ [`SIZE_LIMIT_BYTES`]. Creates and removes its own pass-log folder under `work_root`.
+/// Errors are already plain-language (`UNREADABLE` / `DIDNT_CHECK_OUT` / `NEVER_FIT` / encode).
+#[allow(clippy::too_many_arguments)] // the shape the editor export is specified against
+pub(crate) fn encode_to_limit(
+    paths: &FfmpegPaths,
+    input: &Path,
+    info: &MediaInfo,
+    plan: &CompressPlan,
+    output: &Path,
+    work_root: &Path,
+    cancel: &CancelToken,
+    on_progress: &mut dyn FnMut(JobProgress),
+) -> Result<MediaInfo, JobError> {
+    let work = RemoveOnDrop::dir(create_work_dir(work_root)?);
+    let passlog = work.path().join("x264");
+
+    encode_until_fits(|scale| {
+        let job = Encode {
+            input,
+            info,
+            plan,
+            scale,
+            passlog: &passlog,
+            output,
+        };
+        job.run(paths, cancel, on_progress)?;
+        Ok(verify_output(
+            paths,
+            output,
+            info.duration_s,
+            Some(SIZE_LIMIT_BYTES),
+        )?)
+    })
+    .map_err(plain_verify_error)
 }
 
 /// The output name before de-duplication: the input itself if it already is an `.mp4`
@@ -682,5 +708,61 @@ mod tests {
             "passlog folder left behind after cancel"
         );
         assert!(input.exists());
+    }
+
+    /// 4 s of noisy 1080p30 H.264 at 60 Mbit/s plus AAC (over 20 MB), like `fixture_big_h264`.
+    fn big_h264(paths: &FfmpegPaths, dir: &Path) -> PathBuf {
+        let out = dir.join("big_h264.mp4");
+        let status = hidden_command(&paths.ffmpeg)
+            .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args(["-vf", "noise=alls=60:allf=t"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "60M"])
+            .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-t", "4"])
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        out
+    }
+
+    #[test]
+    fn encode_to_limit_writes_to_the_given_output() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let input = big_h264(&paths, dir.path());
+        let before = fs::read(&input).unwrap();
+        let info = probe(&paths, &input).unwrap();
+        let CompressDecision::Encode(plan) = plan_compress(&info).unwrap() else {
+            panic!("a 4 s 60 Mbit/s clip must need encoding");
+        };
+        let output = dir.path().join("out.mp4");
+
+        let verified = encode_to_limit(
+            &paths,
+            &input,
+            &info,
+            &plan,
+            &output,
+            root.path(),
+            &CancelToken::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let size = fs::metadata(&output).unwrap().len();
+        assert!(size <= SIZE_LIMIT_BYTES, "{size} bytes");
+        assert_eq!(verified.size_bytes, size);
+        assert_eq!(
+            fs::read(&input).unwrap(),
+            before,
+            "the input must be untouched"
+        );
+        assert!(
+            fs::read_dir(root.path()).unwrap().next().is_none(),
+            "pass-log folder left behind under the work root"
+        );
     }
 }
