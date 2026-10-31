@@ -5,7 +5,7 @@
 //! install/uninstall hooks, so they run without starting the UI.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
@@ -74,6 +74,8 @@ pub fn register(exe: &Path, classes_root: &str) -> Result<(), MenuError> {
     let exe = exe.to_string_lossy();
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     for ext in EXTENSIONS {
+        // Start clean so verbs from an older layout don't survive an upgrade.
+        delete_menu(&hkcu, classes_root, ext)?;
         let (menu, _) = hkcu.create_subkey(menu_path(classes_root, ext))?;
         menu.set_value("MUIVerb", &"Hasami")?;
         menu.set_value("SubCommands", &"")?;
@@ -91,17 +93,47 @@ pub fn register(exe: &Path, classes_root: &str) -> Result<(), MenuError> {
     Ok(())
 }
 
+/// Runs `register`/`unregister` for the matching CLI action and returns the process exit code
+/// (0 on success, 1 on failure). Returns `None` for any other action so the caller starts the app.
+/// A failure is reported on stderr; the installer only looks at the exit code.
+pub fn handle_action(
+    action: &crate::cli::Action,
+    current_exe: io::Result<PathBuf>,
+    classes_root: &str,
+) -> Option<i32> {
+    use crate::cli::Action;
+    let result = match action {
+        Action::Register => current_exe
+            .map_err(MenuError::from)
+            .and_then(|exe| register(&exe, classes_root)),
+        Action::Unregister => unregister(classes_root),
+        _ => return None,
+    };
+    Some(match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("hasami: {e}");
+            1
+        }
+    })
+}
+
 /// Removes the Hasami cascade for every supported video extension. Missing keys are not an error.
 pub fn unregister(classes_root: &str) -> Result<(), MenuError> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     for ext in EXTENSIONS {
-        match hkcu.delete_subkey_all(menu_path(classes_root, ext)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
+        delete_menu(&hkcu, classes_root, ext)?;
     }
     Ok(())
+}
+
+/// Deletes one extension's `shell\Hasami` tree. A missing key is not an error.
+fn delete_menu(hkcu: &RegKey, classes_root: &str, ext: &str) -> Result<(), MenuError> {
+    match hkcu.delete_subkey_all(menu_path(classes_root, ext)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -187,13 +219,82 @@ mod tests {
             format!(r"{EXE},0")
         );
 
-        for verb in ["01trim", "02compress", "03mp4", "04mov", "05mp3"] {
-            assert!(has_verb("mkv", verb), "mkv is missing verb {verb}");
+        let expected = [
+            ("01trim", "Quick Trim", "trim"),
+            ("02compress", "Compress", "compress"),
+            ("03mp4", "Convert to .mp4", "convert-mp4"),
+            ("04mov", "Convert to .mov", "convert-mov"),
+            ("05mp3", "Convert to .mp3", "convert-mp3"),
+        ];
+        for (verb, label, command) in expected {
+            let key = open(&format!(
+                r"{}\shell\{verb}",
+                menu_path(TEST_CLASSES_ROOT, "mkv")
+            ))
+            .unwrap_or_else(|_| panic!("mkv is missing verb {verb}"));
+            assert_eq!(key.get_value::<String, _>("MUIVerb").unwrap(), label);
+            assert_eq!(
+                key.get_value::<String, _>("MultiSelectModel").unwrap(),
+                "Player",
+                "{verb} MultiSelectModel"
+            );
+            assert_eq!(
+                command_of("mkv", verb),
+                format!(r#""{EXE}" {command} "%1""#),
+                "{verb} command"
+            );
         }
+    }
+
+    #[test]
+    fn register_removes_stale_verbs_from_an_older_layout() {
+        let _guard = TestGuard::new();
+        register(Path::new(EXE), TEST_CLASSES_ROOT).unwrap();
+
+        // Pretend an older version registered a verb this version no longer has.
+        let stale = format!(
+            r"{}\shell\00old\command",
+            menu_path(TEST_CLASSES_ROOT, "mkv")
+        );
+        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(&stale)
+            .unwrap();
+        key.set_value("", &"old.exe").unwrap();
+        assert!(has_verb("mkv", "00old"));
+
+        register(Path::new(EXE), TEST_CLASSES_ROOT).unwrap();
+        assert!(!has_verb("mkv", "00old"), "stale verb survived re-register");
+        assert!(has_verb("mkv", "02compress"));
+    }
+
+    #[test]
+    fn menu_actions_map_to_exit_codes() {
+        use crate::cli::Action;
+        let _guard = TestGuard::new();
+        let exe = || Ok(PathBuf::from(EXE));
 
         assert_eq!(
-            command_of("mkv", "02compress"),
-            r#""C:\x\hasami.exe" compress "%1""#
+            handle_action(&Action::Register, exe(), TEST_CLASSES_ROOT),
+            Some(0)
+        );
+        assert!(has_verb("mkv", "02compress"));
+        assert_eq!(
+            handle_action(&Action::Unregister, exe(), TEST_CLASSES_ROOT),
+            Some(0)
+        );
+        assert!(!has_verb("mkv", "02compress"));
+
+        // Failure to locate the exe is a nonzero exit, not a panic.
+        let err = Err(io::Error::new(io::ErrorKind::Other, "no exe"));
+        assert_eq!(
+            handle_action(&Action::Register, err, TEST_CLASSES_ROOT),
+            Some(1)
+        );
+
+        // Anything else is not a menu action; the caller starts the app.
+        assert_eq!(
+            handle_action(&Action::Compress(vec![]), exe(), TEST_CLASSES_ROOT),
+            None
         );
     }
 
