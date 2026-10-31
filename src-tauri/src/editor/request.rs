@@ -175,7 +175,7 @@ fn rate_args(b: u64) -> Vec<String> {
 
 /// Pick an encoder that keeps the source's codec at about `bitrate` bits/s. `hw` says whether a
 /// named hardware encoder works here (normally [`encoder_available`]). Codecs without a rule
-/// here (e.g. ProRes) are encoded as H.264.
+/// here (e.g. ProRes) are encoded as H.264, or as VP9 in WebM, which can't hold H.264.
 pub fn same_codec_encoder(
     source_codec: &str,
     container: &str,
@@ -207,6 +207,8 @@ pub fn same_codec_encoder(
             }
         }
         "vp9" => VideoEncoder { codec: "libvpx-vp9", args: args(&["-b:v", &b.to_string()]) },
+        "vp8" if matches!(container, "webm" | "mkv") => VideoEncoder { codec: "libvpx", args: args(&["-b:v", &b.to_string()]) },
+        _ if container == "webm" => VideoEncoder { codec: "libvpx-vp9", args: args(&["-b:v", &b.to_string()]) },
         // h264 and anything else.
         _ => {
             if hw("h264_amf") {
@@ -341,6 +343,17 @@ mod tests {
         assert_eq!(same_codec_encoder("av1", "mp4", 5_000_000, &|n| n == "av1_amf").codec, "av1_amf");
         assert_eq!(same_codec_encoder("av1", "mp4", 5_000_000, &|_| false).codec, "libsvtav1");
         assert_eq!(same_codec_encoder("vp9", "webm", 5_000_000, &|_| true).codec, "libvpx-vp9");
+    }
+
+    #[test]
+    fn encoder_never_puts_h264_in_webm() {
+        // VP8 keeps its codec in containers that take it; WebM takes no H.264 at all.
+        let vp8 = same_codec_encoder("vp8", "webm", 5_000_000, &|_| true);
+        assert_eq!(vp8.codec, "libvpx");
+        assert_eq!(vp8.args, ["-b:v", "5000000"]);
+        assert_eq!(same_codec_encoder("vp8", "mkv", 5_000_000, &|_| true).codec, "libvpx");
+        assert_eq!(same_codec_encoder("theora", "webm", 5_000_000, &|_| true).codec, "libvpx-vp9");
+        assert_eq!(same_codec_encoder("vp8", "mp4", 5_000_000, &|_| false).codec, "libx264");
     }
 
     fn info(video_bps: Option<u64>, total_bps: Option<u64>, tracks: usize) -> MediaInfo {

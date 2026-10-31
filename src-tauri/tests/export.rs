@@ -275,6 +275,34 @@ fn video_only_source() {
 }
 
 #[test]
+fn vp8_webm_keeps_its_codec() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_webm_vp8_opus(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw, // moves the original to Raw\ rather than recycling it
+        fit_20mb: false,
+        duration_s: 1.0,
+        video: vec![VideoPiece { src_start: 0.5, src_end: 1.5 }],
+        audio: vec![AudioTrackRequest {
+            index: 0,
+            gain_db: 0.0,
+            pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 1.5 }],
+        }],
+    };
+
+    let output = done(run_export(&req));
+    assert_eq!(output, dir.path().join("[CLIPPED] clip_vp8.webm"));
+    let info = probe(&paths, &output).unwrap();
+    assert_eq!(info.video.as_ref().unwrap().codec, "vp8");
+    assert_eq!(info.audio[0].codec, "opus");
+    assert!((info.duration_s - 1.0).abs() < 0.1, "duration was {}", info.duration_s);
+    assert!(dir.path().join("Raw").join("clip_vp8.webm").exists());
+}
+
+#[test]
 fn missing_source_is_plain() {
     let dir = tempfile::tempdir().unwrap();
     let input = clip_in(dir.path());
