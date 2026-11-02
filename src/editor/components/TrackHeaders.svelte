@@ -23,7 +23,7 @@
         <span class="tag cap">{tag}</span>
         <i class="chip" aria-hidden="true"></i>
         <span class="tname cap">Audio</span>
-        <button type="button" class="mute" aria-label="Mute {tag}" aria-pressed={tr.muted} onclick={() => store.toggleMute(tr.index)}>
+        <button type="button" class="mute" aria-label="Mute {tag}" aria-pressed={tr.muted} disabled={store.locked} onclick={() => store.toggleMute(tr.index)}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5Z" />
             {#if tr.muted}<path d="m16 9 5 6M21 9l-5 6" />{:else}<path d="M16 9a5 5 0 0 1 0 6" />{/if}
@@ -35,6 +35,7 @@
           value={faderPos(tr.gainDb)}
           label="{tag} volume"
           valuetext={formatDb(tr.gainDb)}
+          disabled={store.locked}
           oninput={(p) => store.setGain(tr.index, faderDb(p), false)}
           onchange={(p) => store.setGain(tr.index, faderDb(p), true)}
         />
@@ -131,9 +132,13 @@
       border-color 0.12s ease-out,
       color 0.12s ease-out;
   }
-  .mute:hover {
+  .mute:hover:not(:disabled) {
     border-color: var(--ash);
     color: var(--bone);
+  }
+  /* A locked clip (its export is under way) takes no more edits. */
+  .mute:disabled {
+    opacity: 0.4;
   }
   .mute[aria-pressed='true'] {
     border-color: var(--ash);

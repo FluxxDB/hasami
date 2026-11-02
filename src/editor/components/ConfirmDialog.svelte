@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { ConfirmKind, EditorStore } from '../store.svelte';
 
-  // The unsaved-edits question (close, Skip or Discard of an edited clip), asked in the window.
+  // The unsaved-edits question (close or Next video with edits not exported, Discard of an edited
+  // clip), asked in the window.
   // A modal <dialog>: the editor behind it is inert, Tab stays inside, Esc keeps editing, and
   // focus starts on Keep editing so a stray Enter or Space never loses work.
 
@@ -9,7 +10,7 @@
 
   const TEXT: Record<ConfirmKind, { message: string; action: string }> = {
     close: { message: 'Close without exporting? Your edits will be lost.', action: 'Close' },
-    skip: { message: 'Skip this clip? Your edits will be lost.', action: 'Skip' },
+    next: { message: "Move on? Your edits weren't exported.", action: 'Move on' },
     discard: { message: 'Send this clip to the Recycle Bin?', action: 'Discard' },
   };
 

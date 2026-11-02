@@ -45,6 +45,7 @@ describe('metaLine', () => {
     size_bytes: 412_000_000,
     duration_s: 90,
     bit_rate: null,
+    modified_ms: 0,
     video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
     tracks: [
       { index: 0, empty: false, file: null },
