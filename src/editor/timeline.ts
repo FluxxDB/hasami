@@ -85,11 +85,20 @@ interface IdCounter {
   n: number;
 }
 
-/** Splits every seg of `segs` that strictly contains `t`. `rightLink` picks the right piece's link. */
-function splitSegs(segs: Seg[], t: number, ids: IdCounter, rightLink: (link: string) => string): Seg[] {
+/**
+ * Splits every seg of `segs` that strictly contains `t` (with `only`, just the listed ids).
+ * `rightLink` picks the right piece's link.
+ */
+function splitSegs(
+  segs: Seg[],
+  t: number,
+  ids: IdCounter,
+  rightLink: (link: string) => string,
+  only?: ReadonlySet<string>,
+): Seg[] {
   const out: Seg[] = [];
   for (const s of segs) {
-    if (s.at + EPS < t && t < segEnd(s) - EPS) {
+    if (s.at + EPS < t && t < segEnd(s) - EPS && (!only || only.has(s.id))) {
       const mid = s.src[0] + (t - s.at);
       out.push({ ...s, src: [s.src[0], mid] });
       out.push({ id: `S${ids.n++}`, link: rightLink(s.link), src: [mid, s.src[1]], at: t });
@@ -100,7 +109,9 @@ function splitSegs(segs: Seg[], t: number, ids: IdCounter, rightLink: (link: str
   return out;
 }
 
-export function cutAt(tl: Timeline, t: number): Timeline {
+/** Splits every track at `t`, or with `only`, just the segs whose id is listed. */
+export function cutAt(tl: Timeline, t: number, only?: string[]): Timeline {
+  const wanted = only && new Set(only);
   const q = quantize(t, tl.fps);
   const ids: IdCounter = { n: tl.nextId };
   // Right pieces of segs that shared a link get one new shared link.
@@ -113,9 +124,27 @@ export function cutAt(tl: Timeline, t: number): Timeline {
     }
     return l;
   };
-  const video = splitSegs(tl.video, q, ids, rightLink);
-  const audio = tl.audio.map((a) => ({ ...a, segs: splitSegs(a.segs, q, ids, rightLink) }));
+  let video = splitSegs(tl.video, q, ids, rightLink, wanted);
+  let audio = tl.audio.map((a) => ({ ...a, segs: splitSegs(a.segs, q, ids, rightLink, wanted) }));
   if (ids.n === tl.nextId) return tl; // nothing was split
+  if (wanted) {
+    // A link group split only in part: the segs left whole across `t` no longer pair with either
+    // piece, so each gets a link of its own (else linking them back would select, and Delete
+    // remove, material far longer than the piece clicked).
+    const spans = (x: Seg): boolean => x.at + EPS < q && q < segEnd(x) - EPS;
+    const all = [...tl.video, ...tl.audio.flatMap((a) => a.segs)];
+    const cutLinks = new Set(all.filter((x) => spans(x) && wanted.has(x.id)).map((x) => x.link));
+    const detached = new Map<string, string>();
+    for (const x of all) {
+      if (spans(x) && !wanted.has(x.id) && cutLinks.has(x.link)) detached.set(x.id, `L${ids.n++}`);
+    }
+    if (detached.size > 0) {
+      const relink = (segs: Seg[]): Seg[] =>
+        segs.map((x) => (detached.has(x.id) ? { ...x, link: detached.get(x.id)! } : x));
+      video = relink(video);
+      audio = audio.map((a) => ({ ...a, segs: relink(a.segs) }));
+    }
+  }
   return { ...tl, video: layoutVideo(video), audio, nextId: ids.n };
 }
 
