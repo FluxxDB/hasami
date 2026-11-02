@@ -78,6 +78,29 @@ describe('cutAt', () => {
     expect(new Set(ids).size).toBe(9);
   });
 
+  it('cutAt_only_splits_listed', () => {
+    const a1 = tl0.audio[1].segs[0];
+    const cut = cutAt(tl0, 12, [a1.id]);
+    expect(cut.video).toHaveLength(1);
+    expect(cut.audio[0].segs).toHaveLength(1);
+    expect(cut.audio[1].segs).toHaveLength(2);
+    expect(src(cut.audio[1].segs)).toEqual([[0, 12], [12, 90]]);
+    expect(cut.audio[1].segs[0].id).toBe(a1.id); // the left piece keeps its id
+    expect(cut.audio[1].segs[1].link).not.toBe(a1.link);
+  });
+
+  it('cutAt with only ignores listed segs that do not span t, and unknown ids', () => {
+    expect(cutAt(tl2, 20, [tl2.video[0].id, 'nope']).video).toHaveLength(3);
+    expect(cutAt(tl0, 12, [])).toBe(tl0);
+  });
+
+  it('cutAt with only gives right pieces that shared a link one new shared link', () => {
+    const cut = cutAt(tl0, 12, [tl0.video[0].id, tl0.audio[0].segs[0].id]);
+    expect(cut.video[1].link).toBe(cut.audio[0].segs[1].link);
+    expect(cut.video[1].link).not.toBe(tl0.video[0].link);
+    expect(cut.audio[1].segs).toHaveLength(1);
+  });
+
   it('cutAt_quantizes', () => {
     expect(cutAt(tl0, 12.004).video[0].src[1]).toBe(12);
   });
@@ -461,8 +484,14 @@ describe('randomized edit sequences keep the invariants', () => {
         let label: string;
         if (r < 0.25) {
           const t = rnd() * (videoEnd(tl) + 5);
-          label = `cutAt(${t})`;
-          tl = cutAt(tl, t);
+          if (rnd() < 0.5) {
+            label = `cutAt(${t})`;
+            tl = cutAt(tl, t);
+          } else {
+            const only = allSegs.filter(() => rnd() < 0.4).map((s) => s.id);
+            label = `cutAt(${t}, [${only.join(',')}])`;
+            tl = cutAt(tl, t, only);
+          }
         } else if (r < 0.45) {
           const target = pick(allSegs);
           const ids = rnd() < 0.5 ? linkedIds(tl, target.id) : [target.id];

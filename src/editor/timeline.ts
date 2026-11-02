@@ -85,11 +85,20 @@ interface IdCounter {
   n: number;
 }
 
-/** Splits every seg of `segs` that strictly contains `t`. `rightLink` picks the right piece's link. */
-function splitSegs(segs: Seg[], t: number, ids: IdCounter, rightLink: (link: string) => string): Seg[] {
+/**
+ * Splits every seg of `segs` that strictly contains `t` (with `only`, just the listed ids).
+ * `rightLink` picks the right piece's link.
+ */
+function splitSegs(
+  segs: Seg[],
+  t: number,
+  ids: IdCounter,
+  rightLink: (link: string) => string,
+  only?: ReadonlySet<string>,
+): Seg[] {
   const out: Seg[] = [];
   for (const s of segs) {
-    if (s.at + EPS < t && t < segEnd(s) - EPS) {
+    if (s.at + EPS < t && t < segEnd(s) - EPS && (!only || only.has(s.id))) {
       const mid = s.src[0] + (t - s.at);
       out.push({ ...s, src: [s.src[0], mid] });
       out.push({ id: `S${ids.n++}`, link: rightLink(s.link), src: [mid, s.src[1]], at: t });
@@ -100,7 +109,9 @@ function splitSegs(segs: Seg[], t: number, ids: IdCounter, rightLink: (link: str
   return out;
 }
 
-export function cutAt(tl: Timeline, t: number): Timeline {
+/** Splits every track at `t`, or with `only`, just the segs whose id is listed. */
+export function cutAt(tl: Timeline, t: number, only?: string[]): Timeline {
+  const wanted = only && new Set(only);
   const q = quantize(t, tl.fps);
   const ids: IdCounter = { n: tl.nextId };
   // Right pieces of segs that shared a link get one new shared link.
@@ -113,8 +124,8 @@ export function cutAt(tl: Timeline, t: number): Timeline {
     }
     return l;
   };
-  const video = splitSegs(tl.video, q, ids, rightLink);
-  const audio = tl.audio.map((a) => ({ ...a, segs: splitSegs(a.segs, q, ids, rightLink) }));
+  const video = splitSegs(tl.video, q, ids, rightLink, wanted);
+  const audio = tl.audio.map((a) => ({ ...a, segs: splitSegs(a.segs, q, ids, rightLink, wanted) }));
   if (ids.n === tl.nextId) return tl; // nothing was split
   return { ...tl, video: layoutVideo(video), audio, nextId: ids.n };
 }

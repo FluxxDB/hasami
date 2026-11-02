@@ -106,6 +106,50 @@ describe('EditorStore commands', () => {
     expect(s.history.past).toHaveLength(1);
   });
 
+  describe('Ctrl+B with a selection', () => {
+    const tracks = (s: EditorStore) => [s.timeline.video, ...s.timeline.audio.map((a) => a.segs)];
+
+    it('unlinked, a selected audio clip under the playhead is the only one cut', () => {
+      const s = loaded();
+      s.command('toggleLinked');
+      const a1 = s.timeline.audio[0].segs[0];
+      s.selectAt(a1.id);
+      s.seek(12);
+      s.command('cut');
+      expect(tracks(s).map((t) => t.length)).toEqual([1, 2, 1]);
+      expect(s.selection).toEqual([a1.id]); // stays on the left piece
+      expect(s.timeline.audio[0].segs[0].src).toEqual([0, 12]);
+    });
+
+    it('linked, a selected video clip cuts itself and its linked audio', () => {
+      const s = loaded();
+      s.selectAt(s.timeline.video[0].id);
+      expect(s.selection).toHaveLength(3);
+      s.seek(12);
+      s.command('cut');
+      expect(tracks(s).map((t) => t.length)).toEqual([2, 2, 2]);
+      expect(s.selection).toHaveLength(3);
+    });
+
+    it('with nothing selected, every track is cut', () => {
+      const s = loaded();
+      s.seek(12);
+      s.command('cut');
+      expect(tracks(s).map((t) => t.length)).toEqual([2, 2, 2]);
+    });
+
+    it('a selection that is not under the playhead leaves the cut on every track', () => {
+      const s = loaded();
+      s.seek(12);
+      s.command('cut');
+      s.command('toggleLinked');
+      s.selectAt(s.timeline.audio[0].segs[0].id); // [0, 12]
+      s.seek(40);
+      s.command('cut');
+      expect(tracks(s).map((t) => t.length)).toEqual([3, 3, 3]);
+    });
+  });
+
   it('delete removes a linked selection and ripples', () => {
     const s = loaded();
     s.seek(12);
