@@ -775,3 +775,106 @@ src-tauri/tests/{editor_media,export}.rs
 - [ ] **Step 3:** Run the full `cargo.exe test`, `cmd.exe /c npm test`, `npm run check`, and the impeccable detector on `src/editor`. All are clean.
 - [ ] **Step 4:** Run `cmd.exe /c npm run tauri -- build`, then a silent per-user install of the new setup. Run `trim` on one copied clip through the installed exe (Quick export works), then uninstall silently.
 - [ ] **Step 5: Commit.** `git commit -m "fix: editor design and accessibility review findings"`
+
+---
+
+## Follow-ups after Dang's hands-on test (2026-11-01)
+
+Spec §5.1, §5.3, §5.5, §5.7, §5.8 and §12 items 7 and 15 were amended on 2026-11-01. Read those sections first; they are the authority for Tasks 13–15. Tasks 13, 14 and 15 are independent and can run in parallel. Task 15 consumes Task 14's command through `api.ts`, which Task 15 writes.
+
+### Task 13: Ctrl+B cuts only the selected clips when one is under the playhead
+
+**Files:**
+- Modify: `src/editor/timeline.ts` (+ tests), the `cut` command in `src/editor/store.svelte.ts` (+ tests)
+
+**Interfaces:**
+- Produces: `cutAt(tl: Timeline, t: number, only?: string[]): Timeline`.
+  - With `only` omitted, behavior is unchanged: every track.
+  - With `only`, only segments whose id is in `only` and that span `t` are split.
+  - The link rules don't change: right-hand pieces that came from segments sharing a link get one new shared link.
+- Store `command('cut')`:
+  - if any selected segment spans the playhead (`at < t < at + len`), call `cutAt(tl, t, selection)`;
+  - otherwise call `cutAt(tl, t)`.
+  - After a selected cut, the selection stays on the left pieces.
+
+- [ ] **Step 1: Write failing tests:**
+  - `cutAt_only_splits_listed`: on `tl0` (D 90, fps 60, audio [0,1]), `cutAt(tl0, 12, [A1 seg id])` splits A1 only. Video and A0 each still have 1 seg.
+  - Running the randomized invariant test with `only` drawn from random selections still passes.
+  - Store:
+    - unlinked, select A1 only, Ctrl+B at 12 → only A1 is cut;
+    - linked, select the video → the video and its linked audio are cut, which with `tl0` is every track;
+    - nothing selected → every track;
+    - a selection not under the playhead → every track.
+- [ ] **Step 2:** Run `cmd.exe /c npm test -- src/editor` and confirm the new tests fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass.
+- [ ] **Step 5: Commit.** `git commit -m "feat: Ctrl+B cuts only the selected clips when one is under the playhead"`
+
+### Task 14: Next video in the folder (Rust)
+
+**Files:**
+- Modify: `src-tauri/src/app.rs` (the new command and its registration; `EditorMediaDto` gains `modified_ms`)
+- Create: `src-tauri/src/editor/folder.rs` (+ unit tests), and declare it in `editor/mod.rs`
+
+**Interfaces:**
+- Produces:
+  ```rust
+  pub const VIDEO_EXTS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
+  /// The next video after `current` in Explorer's "date, descending" order: siblings in the same folder with a
+  /// video extension, newest modified first, ties by file name (case-insensitive); `[CLIPPED] ` outputs skipped;
+  /// subfolders not listed. `current` may no longer exist: its position comes from `current_modified_ms` + its name.
+  pub fn next_video(current: &Path, current_modified_ms: u64) -> std::io::Result<Option<PathBuf>>
+  ```
+  - `EditorMediaDto.modified_ms: u64` is the input's modified time in milliseconds since the Unix epoch, read in `editor_open`.
+  - Command: `editor_next_file(path: String, modified_ms: u64) -> Result<Option<String>, String>`. Errors are plain language.
+- [ ] **Step 1: Write failing unit tests** in `folder.rs`, using a temp dir and `File::set_modified` to fix the times:
+  - files a (t=300), b (t=200), c (t=100) → next(a) = b, next(b) = c, next(c) = None;
+  - `[CLIPPED] x.mp4` (t=250) is skipped, so next(a) = b;
+  - a `.txt` file and a `Raw\` subfolder are ignored;
+  - equal times order by name;
+  - next(a) still works after a is deleted, given a's old time;
+  - extensions match case-insensitively (`.MP4`).
+- [ ] **Step 2:** Run `cargo.exe test editor::folder` and confirm the new tests fail.
+- [ ] **Step 3:** Implement, then wire the command and `modified_ms`.
+- [ ] **Step 4:** Run the full `cargo.exe test` and confirm it passes.
+- [ ] **Step 5: Commit.** `git commit -m "feat: find the next video in the folder in date-descending order"`
+
+### Task 15: The editor stays open: export progress, locked clip, Next video, results list
+
+**Files:**
+- Modify: `src/editor/{api.ts, mock.ts, store.svelte.ts (+ tests), EditorWindow.svelte, components/TopBar.svelte, components/Summary.svelte}`, plus whatever else the UI needs.
+
+**Interfaces:**
+- Consumes:
+  - Task 14's command `editor_next_file(path, modified_ms) -> string | null`, and `EditorMedia.modified_ms: number`. Add both to `api.ts` (`api.nextFile(path, modifiedMs)`) and to the mock, where a fake folder of 5 clips walks through.
+  - The existing `ExportStarted`/`ExportProgress`/`ExportDone`/`ExportFailed` events.
+- Rules (spec §5.7 and §5.8 as amended):
+  - **Quick export / Export + save raw:**
+    - The clip locks. Edits, Delete, Ctrl+B and edge drags are refused, and the transport still plays.
+    - A progress bar with a percentage replaces the export buttons. It is driven by that export's `ExportProgress`, and reads "Queued" until `ExportStarted`.
+    - Done → the top bar shows "Saved [CLIPPED] name".
+    - Failed → the top bar shows the message and "The original was not changed." when `original_intact`, and the clip unlocks.
+  - **Export audio:** the same progress display, and the clip stays editable.
+  - **Next video button:** always in the top bar.
+    - In queue mode it goes to the next selected file first.
+    - Otherwise it calls `api.nextFile(current.path, current.modified_ms)` and opens the result.
+    - It is disabled when nothing is next (check ahead of time so the button's disabled state is honest).
+    - It asks "Move on? Your edits weren't exported." only when the clip is edited and not exported.
+    - It never interrupts a running export.
+  - **Skip** is removed (Next video replaces it). **Discard** stays in queue mode and also appears for a single clip, and moves on through the same Next logic. Remember R18/R21: discarding behind a running export goes through the backend's deferred discard.
+  - **The window never closes itself:** remove `shouldClose` auto-close. Closing it by hand keeps the existing unsaved-edits confirmation. Exports still running is not a reason to ask.
+  - **Results list:** the "EXPORTING N" strip becomes a button that opens the results list (reusing `Summary.svelte` as a popover or panel over the editor). After the last queued file, Next continues into the folder instead of showing the summary.
+  - Visual rules are unchanged: red only on the playhead, the Quick export border and the edited dot. The progress bar is a thin bone-white fill on a neutral track, with no red and no gradient.
+- [ ] **Step 1: Write failing store tests** (with `api` mocked):
+  - quick export locks, `command('cut')` is a no-op while locked, and done shows the saved name;
+  - a failure unlocks with the right message;
+  - audio export doesn't lock;
+  - Next walks the queue then the folder;
+  - Next is disabled when `nextFile` returns null;
+  - edited and not exported → confirm, exported → no confirm;
+  - no auto-close (`shouldClose` gone or always false);
+  - Discard moves on through Next.
+- [ ] **Step 2:** Run `cmd.exe /c npm test -- src/editor` and confirm the new tests fail.
+- [ ] **Step 3:** Implement. Run the impeccable craft floor and detector on the changed UI.
+- [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass. Check the browser mock with gstack browse and save screenshots.
+- [ ] **Step 5: Commit.** `git commit -m "feat: editor stays open with export progress, Next video and a results list"`

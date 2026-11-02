@@ -95,8 +95,10 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
   - **Export audio** (text link);
   - **Export + save raw** (outlined button);
   - **Quick export** (outlined button with a red border; the primary action);
+  - **Next video** (§5.7);
   - window controls.
-- In queue mode, add "3 of 30" plus **Skip** and **Discard** (§5.8).
+- While a video export runs, a progress bar takes the export buttons' place (§5.7).
+- In queue mode, add "3 of 30" plus **Discard** (§5.8). *Updated 2026-11-01:* **Next video** replaces Skip.
 
 ### 5.2 Viewer and transport
 - The video sits on pure black.
@@ -111,7 +113,7 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
   - Deleting an audio segment on its own **leaves silence** and doesn't ripple, so sync holds.
   - Audio can run past the end of the video. That stretch is shown hatched and dimmed, labeled "Video ends", and dropped on export.
 - **Empty source tracks (my call):** detected on open and hidden behind a "+N empty tracks" toggle under the last audio track.
-- **Ctrl+B** cuts every track at the playhead.
+- **Ctrl+B** cuts at the playhead. If a selected clip is under the playhead, it cuts only the selected clips; with Linked on that includes their linked audio. With nothing selected under the playhead, it cuts every track (Dang's choice, 2026-11-01).
 - **Delete** removes the selection.
 - **Dragging a segment edge** restores previously deleted source material (extends the segment).
   - Video extends ripple the following video segments.
@@ -136,7 +138,7 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
 | Shift + ← / → | One second back / forward (DaVinci default) |
 | ↑ / ↓ | Previous / next cut point (DaVinci default) |
 | Home / End | Timeline start / end |
-| Ctrl+B | Cut at playhead, all tracks |
+| Ctrl+B | Cut at playhead: the selected clips if one is under the playhead, otherwise all tracks |
 | Shift+V | Select the video clip under the playhead, with its linked audio when Linked is on (on a cut, the clip that starts there; no video there, no change). *Not a Resolve default: added in the Task 12 accessibility review so clips can be selected and deleted without a mouse.* |
 | Delete / Backspace | Remove selection |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
@@ -162,18 +164,28 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
   - keep the source container. *Builder's call* for codec/container combos that need it, e.g. Opus audio in `.webm`.
   - Expect big files from high-bitrate raws: a 10 s trim of a 152 Mbps clip is about 190 MB. That's accepted.
 - **Fit to 20 MB** toggle (Dang's choice: one toggle that applies to both video export buttons). It switches the encode to the Compress pipeline (§7), so the output is `[CLIPPED] <name>.mp4` at 20 MB or less.
-- **Exports run in the background (Dang's choice).** Clicking a video export hands the job to Hasami's job queue (§10) right away. The window then closes, or loads the next clip in queue mode, without waiting. The original is only recycled or moved after its export verifies (§8).
+- **Exports run in Hasami's job queue (§10), and the editor stays open (Dang's choice, updated 2026-11-01).** The original is only recycled or moved after its export verifies (§8).
+  - After **Quick export** or **Export + save raw**, the clip locks: no more edits, because its original is about to move. A progress bar replaces the export buttons. When it finishes, the top bar shows the saved file's name. On failure, it shows what went wrong and that the original is untouched, and the clip unlocks so you can try again.
+  - **Export audio** shows its progress the same way, but the clip stays editable.
+  - **The window never closes by itself.** Closing it while exports run is fine: they finish, and a failure shows in the small progress window.
+- **Next video (Dang's choice, 2026-11-01):** opens the next video in the folder in Explorer's order.
+  - Dang's folders sort by date, descending, so "next" is the next older video: sibling `.mp4`/`.mov`/`.mkv`/`.webm` files by modified time, newest first, ties by name.
+  - *My call:* `[CLIPPED]` outputs are skipped, and the `Raw\` subfolder isn't listed.
+  - It still works after the current original has been recycled or moved, because it uses the clip's remembered modified time.
+  - It is disabled when there's no older video.
+  - It asks first if the clip has edits that weren't exported.
+  - In queue mode it walks the selected clips first (§5.8).
 - **Export audio** also stops at the end of the video, consistent with every other export (*my call*).
 - Closing with unsaved edits asks for confirmation (*my call*).
 - *My call:* the `[CLIPPED]` prefix is never doubled. A name collision appends " (2)", " (3)", and so on. If the source already sits in a folder named `Raw`, outputs go to that folder's parent and Save Raw leaves the original where it is.
 
 ### 5.8 Trim queue (multi-select → Quick Trim)
 - Opens the first file, with "3 of 30" in the top bar.
-- After Quick Export or Export + save raw, the next file loads.
-- **Skip** leaves the current file untouched and moves on.
+- *Updated 2026-11-01:* exporting no longer moves on by itself. The clip stays, with its progress (§5.7).
+- **Next video** moves to the next selected file. After the last one, it carries on into the folder (§5.7). It replaces Skip and leaves the current file untouched.
 - **Discard** sends the current raw to the Recycle Bin and moves on (Dang's choice).
 - While exports are still running, a small strip in the top bar shows them (e.g. "EXPORTING 2").
-- After the last file, the window switches to a short summary instead of closing if any export is still running or has failed. It lists each file's result; a failed export says what went wrong and confirms the raw was kept. If everything is done and succeeded, it closes.
+- **Results list:** opens from that strip. It lists each export's result; a failed export says what went wrong and confirms the raw was kept. It never replaces the editor, and it never closes the window.
 
 ## 6. Preview and media pipeline (guidance; details are the builder's)
 
@@ -256,8 +268,8 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 3. Empty audio tracks are hidden behind a toggle; tracks are labeled A1…An.
 4. Audio edges can't overlap their neighbors; volume range −∞ to +6 dB.
 5. J/L shuttle tops out at 8×; Shift+arrows, ↑/↓, N, and Ctrl+Shift+L follow DaVinci defaults.
-6. Export audio is named `[CLIPPED] <name>.mp3` and keeps the editor open.
-7. After a video export the window closes (or the queue advances); closing with unsaved edits asks first.
+6. Export audio is named `[CLIPPED] <name>.mp3` and keeps the clip editable.
+7. *Updated 2026-11-01 (Dang's choice):* after a video export the editor stays open with the clip locked and a progress bar; the window never closes by itself; closing with unsaved edits asks first.
 8. Never double the `[CLIPPED]` prefix; collisions get " (2)"; sources already in a `Raw` folder export to its parent.
 9. Fit to 20 MB and Compress output is H.264/AAC `.mp4` with one mixed audio track, at ≤ 20,000,000 bytes.
 10. Warn before Compress when the output would fall below 480p.
@@ -265,4 +277,4 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 12. Compress floor at ~240p/15 fps and 32 kbps mono; it fails with a message only if even that can't fit.
 13. Export audio stops at the video's end like the other exports.
 14. One running Hasami process: new Quick Trim files join the open queue, and every encode runs one at a time through a shared job queue.
-15. After a trim queue ends, a summary screen appears only if exports are still running or any failed.
+15. *Updated 2026-11-01:* export results are in a list opened from the exports strip. It never replaces the editor or closes the window. Next video skips `[CLIPPED]` outputs.
