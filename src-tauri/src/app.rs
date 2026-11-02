@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWin
 
 use crate::cli::{self, Action};
 use crate::compress::{plan_compress, CompressDecision};
+use crate::editor::folder::{self, next_video};
 use crate::editor::media::{make_proxy, peaks, prepare, thumbnails, Peaks, PreparedMedia, Thumb};
 use crate::editor::request::ExportRequest;
 use crate::editor::session::{next_session_id, process_running, sweep_stale, EditorSessions};
@@ -54,6 +55,7 @@ const PEAKS_FAILED: &str = "Couldn't read this audio track.";
 const THUMBS_FAILED: &str = "Couldn't make the timeline pictures for this clip.";
 const PROXY_FAILED: &str = "Couldn't prepare a preview of this clip.";
 const EXPORT_WONT_START: &str = "Couldn't start the export.";
+const NEXT_FAILED: &str = "Couldn't look for the next video in this folder.";
 const DISCARD_FAILED: &str = "Couldn't move this clip to the Recycle Bin.";
 const DISCARD_WONT_WAIT: &str = "Couldn't set this clip aside for the Recycle Bin.";
 const COMMAND_FAILED: &str = "Something went wrong.";
@@ -151,6 +153,7 @@ pub fn run(action: Action) {
             progress_ready,
             editor_files,
             editor_open,
+            editor_next_file,
             editor_peaks,
             editor_thumbs,
             editor_proxy,
@@ -287,6 +290,8 @@ pub struct EditorMediaDto {
     pub path: String,
     pub file_name: String,
     pub size_bytes: u64,
+    /// The input's modified time, milliseconds since the Unix epoch (what `editor_next_file` orders by).
+    pub modified_ms: u64,
     pub duration_s: f64,
     pub bit_rate: Option<u64>,
     pub video: Option<EditorVideoDto>,
@@ -310,13 +315,14 @@ pub struct EditorTrackDto {
 }
 
 impl EditorMediaDto {
-    fn new(session: u64, input: &Path, media: &PreparedMedia) -> Self {
+    fn new(session: u64, input: &Path, media: &PreparedMedia, modified_ms: u64) -> Self {
         let info = &media.info;
         Self {
             session,
             path: input.display().to_string(),
             file_name: input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             size_bytes: info.size_bytes,
+            modified_ms,
             duration_s: info.duration_s,
             bit_rate: info.bit_rate,
             video: info.video.as_ref().map(|v| EditorVideoDto {
@@ -401,7 +407,22 @@ async fn editor_open(app: AppHandle, path: String) -> Result<EditorMediaDto, Str
             lock(&state.sessions).close(session);
             return Err(OPEN_FAILED.to_owned());
         }
-        Ok(EditorMediaDto::new(session, &input, &media))
+        let modified_ms = std::fs::metadata(&input).and_then(|m| m.modified()).ok().and_then(folder::millis).unwrap_or(0);
+        Ok(EditorMediaDto::new(session, &input, &media, modified_ms))
+    })
+    .await
+}
+
+/// The video after `path` in its folder, newest modified first as Explorer sorts by date (see
+/// [`next_video`]); `modified_ms` is the open clip's modified time, so this works after the clip
+/// has gone. `None` when it is the last one. Only names a path: `editor_open` grants access to it.
+#[tauri::command]
+async fn editor_next_file(app: AppHandle, path: String, modified_ms: u64) -> Result<Option<String>, String> {
+    blocking(app, move |_, _| {
+        next_video(Path::new(&path), modified_ms).map(|next| next.map(|p| p.display().to_string())).map_err(|e| {
+            eprintln!("hasami: could not look for the video after {path}: {e}");
+            NEXT_FAILED.to_owned()
+        })
     })
     .await
 }
