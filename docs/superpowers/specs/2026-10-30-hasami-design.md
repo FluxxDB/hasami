@@ -278,3 +278,4 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 13. Export audio stops at the video's end like the other exports.
 14. One running Hasami process: new Quick Trim files join the open queue, and every encode runs one at a time through a shared job queue.
 15. *Updated 2026-11-01:* export results are in a list opened from the exports strip. It never replaces the editor or closes the window. Next video skips `[CLIPPED]` outputs.
+16. *Added 2026-11-01:* the **Next video** button uses a drawn straight forward arrow instead of §9's diagonal arrow, because it moves on rather than sending a file out (same stroke and size).
