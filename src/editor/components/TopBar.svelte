@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { formatPercent } from '../../progress/format';
   import { fileName, metaLine } from '../display';
-  import type { EditorStore } from '../store.svelte';
+  import type { EditorStore, Result } from '../store.svelte';
+  import { RESULTS_ID } from './Summary.svelte';
 
   interface Props {
     store: EditorStore;
@@ -14,13 +16,65 @@
   const media = $derived(store.media);
   const path = $derived(store.currentPath);
   const idle = $derived(!!media && !store.busy);
-  const audioOk = $derived(idle && store.canExportAudio);
+  const audio = $derived(store.audioExport);
+  const audioBusy = $derived(audio?.state === 'queued' || audio?.state === 'running');
+  const audioOk = $derived(idle && store.canExportAudio && !audioBusy);
   const NO_AUDIO = 'This clip has no audio to export';
   /** Said while the next clip opens, or when it couldn't be opened; empty once it's open. */
   const opening = $derived(media || !path ? '' : store.error ? "Couldn't open" : 'Opening…');
+
+  // A Quick / Save raw export takes the export buttons' place while it runs, and once it's done.
+  const video = $derived(store.videoExport);
+  const showVideo = $derived(!!media && store.locked && !!video);
+  const VIDEO_LABEL: Record<string, string> = { quick: 'Quick export', save_raw: 'Export + save raw' };
+
+  // The row under the bar: an outcome that needs words (why an export failed, and that the
+  // original is untouched; or Export audio's saved file). It stays until dismissed, the next
+  // export of the clip, or the next clip.
+  const KEPT = 'The original was not changed.';
+  const outcome = $derived.by((): Result | null => {
+    if (!media) return null;
+    if (video?.state === 'failed') return video;
+    if (audio?.state === 'failed' || audio?.state === 'done') return audio;
+    return null;
+  });
+  const outcomeKey = $derived(outcome ? `${store.visit}:${outcome.action}:${outcome.state}:${outcome.output ?? outcome.message}` : '');
+  let dismissed = $state('');
+  const showOutcome = $derived(!!outcome && outcomeKey !== dismissed);
+  /** Read out once per change: queued, saved or failed (not every percent). */
+  const announce = $derived.by(() => {
+    const r = showVideo ? video : (outcome ?? (audioBusy ? audio : null));
+    if (!r) return '';
+    const what = r.action === 'audio' ? 'Export audio' : VIDEO_LABEL[r.action];
+    if (r.state === 'done') return `Saved ${fileName(r.output ?? '')}`;
+    if (r.state === 'failed') return `${r.message ?? ''} ${r.originalIntact ? KEPT : ''}`;
+    return `${what} ${r.state === 'queued' ? 'queued' : 'running'}`;
+  });
+
+  const pct = (r: Result) => (r.state === 'queued' ? 'Queued' : formatPercent(r.fraction));
+
+  // Next video: always here; where it goes is said in its tooltip.
+  const nextName = $derived.by(() => {
+    const q = store.queue;
+    if (q.next < q.files.length) return fileName(q.files[q.next]);
+    return typeof store.folderNext === 'string' ? fileName(store.folderNext) : null;
+  });
+  const nextOk = $derived(!store.busy && store.canNext);
+  const NO_NEXT = 'No older video in this folder';
+  const nextTitle = $derived(nextName ? `Next: ${nextName}` : store.folderNext === undefined && path ? undefined : NO_NEXT);
+
+  // The export strip opens the results list; it stays once there's anything to list.
+  const results = $derived(store.results);
   const running = $derived(store.exports.running.length);
+  const failedCount = $derived(results.filter((r) => r.state === 'failed').length);
   // Exports run one at a time, so the first one still running is the one making progress.
   const fraction = $derived(running > 0 ? (store.exports.progress[store.exports.running[0]] ?? 0) : 0);
+  const strip = $derived(
+    running > 0 ? `Exporting ${running}` : failedCount > 0 ? `Results · ${failedCount} failed` : 'Results',
+  );
+  const position = $derived(
+    store.queueMode && store.current?.at != null ? `${store.current.at + 1} of ${store.queue.files.length}` : null,
+  );
 </script>
 
 {#snippet arrow()}
@@ -29,7 +83,29 @@
   </svg>
 {/snippet}
 
-<header class="topbar" class:queued={store.queueMode} data-tauri-drag-region>
+{#snippet forward()}
+  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+    <path d="M1.5 6h9M7 2.5 10.5 6 7 9.5" />
+  </svg>
+{/snippet}
+
+{#snippet meter(r: Result, label: string)}
+  <div
+    class="progress"
+    role="progressbar"
+    aria-label={label}
+    aria-valuemin={0}
+    aria-valuemax={100}
+    aria-valuenow={r.state === 'queued' ? undefined : Math.round(r.fraction * 100)}
+    aria-valuetext={pct(r)}
+  >
+    <span class="cap plabel">{label}</span>
+    <span class="bar" aria-hidden="true"><i style:width="{Math.round(r.fraction * 100)}%"></i></span>
+    <span class="cap pct">{pct(r)}</span>
+  </div>
+{/snippet}
+
+<header class="topbar" data-tauri-drag-region>
   <div class="brand"><b>HASAMI</b><em>quick trim</em></div>
   <div class="vsep brand-sep"></div>
   <div class="file">
@@ -51,58 +127,86 @@
   </div>
   <div class="spacer" data-tauri-drag-region></div>
 
-  <!-- The queue's place and controls, with the running exports under them: stacked, so the
-       file name keeps its room at the minimum window width. -->
-  {#if (store.queueMode && path) || running > 0}
+  <!-- The queue's place, Discard, and the export strip under them: stacked, so the file name
+       keeps its room at the minimum window width. -->
+  {#if path || results.length > 0}
     <div class="side">
-      {#if store.queueMode && path}
+      {#if path}
         <div class="queue">
-          <span class="pos cap">{store.queue.index + 1} of {store.queue.files.length}</span>
-          <button type="button" class="link cap" disabled={store.busy} onclick={() => store.skip()}>Skip</button>
-          <!-- Not while the clip is still opening: the file is being read. -->
+          {#if position}<span class="pos cap">{position}</span>{/if}
+          <!-- Not while the clip is still opening (the file is being read), nor once a video
+               export is dealing with the original. -->
           <button
             type="button"
             class="link cap"
-            disabled={store.busy || (!media && !store.error)}
+            disabled={store.busy || store.locked || (!media && !store.error)}
             onclick={() => store.discard()}>Discard</button
           >
         </div>
       {/if}
-      {#if running > 0}
-        <div class="exporting cap" role="status">
-          <span>Exporting {running}</span>
-          <span class="rail" aria-hidden="true"><i style:width="{Math.round(fraction * 100)}%"></i></span>
-        </div>
+      {#if results.length > 0}
+        <button type="button" class="strip cap" popovertarget={RESULTS_ID} aria-label="{strip}: show the results">
+          <span>{strip}</span>
+          {#if running > 0}<span class="rail" aria-hidden="true"><i style:width="{Math.round(fraction * 100)}%"></i></span>{/if}
+        </button>
       {/if}
     </div>
     <div class="vsep"></div>
   {/if}
 
+  <span class="sr-only" role="status">{announce}</span>
+
+  {#if showVideo && video}
+    {#if video.state === 'done'}
+      <div class="saved">
+        <span class="cap plabel">Saved</span><span class="out" title={video.output}>{fileName(video.output ?? '')}</span>
+      </div>
+    {:else}
+      {@render meter(video, VIDEO_LABEL[video.action])}
+    {/if}
+  {:else}
+    <button
+      type="button"
+      class="toggle cap"
+      role="switch"
+      aria-checked={store.fit20}
+      disabled={!media}
+      onclick={() => (store.fit20 = !store.fit20)}
+    >
+      <span class="switch" class:on={store.fit20} aria-hidden="true"></span>Fit to 20 MB
+    </button>
+    {#if audio && audioBusy}
+      <!-- Export audio's own progress, in its place; the clip stays editable meanwhile. -->
+      <div class="audio-meter">{@render meter(audio, 'Audio')}</div>
+    {:else}
+    <!-- aria-disabled rather than disabled, so the hint still shows on hover and focus. -->
+    <button
+      type="button"
+      class="link cap"
+      aria-disabled={!audioOk}
+      title={media && !store.canExportAudio ? NO_AUDIO : undefined}
+      aria-describedby={media && !store.canExportAudio ? 'no-audio-hint' : undefined}
+      onclick={() => audioOk && store.exportClip('audio')}>Export audio</button
+    >
+    {/if}
+    {#if media && !store.canExportAudio}<span id="no-audio-hint" class="sr-only">{NO_AUDIO}</span>{/if}
+    <button type="button" class="btn cap" disabled={!idle} onclick={() => store.exportClip('save_raw')}
+      >Export + save raw {@render arrow()}</button
+    >
+    <button type="button" class="btn primary cap" disabled={!idle} onclick={() => store.exportClip('quick')}
+      >Quick export {@render arrow()}</button
+    >
+  {/if}
+
+  <div class="vsep"></div>
+  <!-- aria-disabled, so "No older video in this folder" still shows on hover and focus. -->
   <button
     type="button"
-    class="toggle cap"
-    role="switch"
-    aria-checked={store.fit20}
-    disabled={!media}
-    onclick={() => (store.fit20 = !store.fit20)}
-  >
-    <span class="switch" class:on={store.fit20} aria-hidden="true"></span>Fit to 20 MB
-  </button>
-  <!-- aria-disabled rather than disabled, so the hint still shows on hover and focus. -->
-  <button
-    type="button"
-    class="link cap"
-    aria-disabled={!audioOk}
-    title={media && !store.canExportAudio ? NO_AUDIO : undefined}
-    aria-describedby={media && !store.canExportAudio ? 'no-audio-hint' : undefined}
-    onclick={() => audioOk && store.exportClip('audio')}>Export audio</button
-  >
-  {#if media && !store.canExportAudio}<span id="no-audio-hint" class="sr-only">{NO_AUDIO}</span>{/if}
-  <button type="button" class="btn cap" disabled={!idle} onclick={() => store.exportClip('save_raw')}
-    >Export + save raw {@render arrow()}</button
-  >
-  <button type="button" class="btn primary cap" disabled={!idle} onclick={() => store.exportClip('quick')}
-    >Quick export {@render arrow()}</button
+    class="btn next cap"
+    aria-disabled={!nextOk}
+    aria-label="Next video"
+    title={nextTitle}
+    onclick={() => nextOk && store.nextVideo()}><span>Next<span class="word">&nbsp;video</span></span> {@render forward()}</button
   >
 
   <div class="winctl">
@@ -121,6 +225,21 @@
     </button>
   </div>
 </header>
+
+{#if showOutcome && outcome}
+  <div class="outcome" class:failed={outcome.state === 'failed'}>
+    {#if outcome.state === 'failed'}
+      <span class="cap plabel">{outcome.action === 'audio' ? 'Export audio failed' : `${VIDEO_LABEL[outcome.action]} failed`}</span>
+      <span class="msg">{outcome.message}</span>
+      {#if outcome.originalIntact}<span class="kept">{KEPT}</span>{/if}
+    {:else}
+      <span class="cap plabel">Saved</span><span class="out" title={outcome.output}>{fileName(outcome.output ?? '')}</span>
+    {/if}
+    <button type="button" class="ctl dismiss" aria-label="Dismiss" onclick={() => (dismissed = outcomeKey)}>
+      <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg>
+    </button>
+  </div>
+{/if}
 
 <style>
   .topbar {
@@ -247,14 +366,25 @@
     justify-content: center;
     gap: 2px;
   }
-  .exporting {
+  /* The export strip: a quiet button that opens the results list. */
+  .strip {
     display: flex;
     align-items: center;
     gap: 10px;
+    padding: 2px 0;
     color: var(--ash);
     font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    pointer-events: none;
+  }
+  .strip > span:first-child {
+    text-decoration: underline;
+    text-decoration-color: var(--iron);
+    text-underline-offset: 4px;
+  }
+  .strip:hover {
+    color: var(--bone);
+  }
+  .strip:hover > span:first-child {
+    text-decoration-color: var(--bone);
   }
   .rail {
     flex: 1;
@@ -267,6 +397,80 @@
     height: 100%;
     background: var(--bone);
     transition: width 0.2s ease-out;
+  }
+
+  /* An export's progress: a thin bone fill on a neutral track, with its percentage. */
+  .progress {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    white-space: nowrap;
+  }
+  .plabel {
+    color: var(--pebble);
+    flex: none;
+  }
+  .bar {
+    width: 160px;
+    height: 2px;
+    background: var(--iron);
+  }
+  .bar i {
+    display: block;
+    height: 100%;
+    background: var(--bone);
+    transition: width 0.2s ease-out;
+  }
+  .pct {
+    min-width: 6ch;
+    font-variant-numeric: tabular-nums;
+    color: var(--bone);
+  }
+  .saved {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 380px;
+  }
+  .out,
+  .msg {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .audio-meter .progress {
+    gap: 8px;
+  }
+  .audio-meter .bar {
+    width: 56px;
+  }
+
+  /* The outcome row under the bar: one line of plain words, quiet but full width. */
+  .outcome {
+    flex: none;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 10px 0 18px;
+    border-bottom: 1px solid var(--line);
+    background: var(--void);
+    white-space: nowrap;
+  }
+  .outcome .msg {
+    flex: 0 1 auto;
+  }
+  .outcome .kept {
+    flex: none;
+    color: var(--pebble);
+  }
+  .outcome .dismiss {
+    margin-left: auto;
+    height: 24px;
   }
 
   .queue {
@@ -337,17 +541,17 @@
     border-radius: 8px;
     border: 1px solid var(--ash);
   }
-  .btn:hover:not(:disabled) {
+  .btn:hover:not(:disabled, [aria-disabled='true']) {
     border-color: var(--bone);
     background: var(--charcoal);
   }
-  .btn:active:not(:disabled) {
+  .btn:active:not(:disabled, [aria-disabled='true']) {
     background: var(--smoke);
   }
   .btn.primary {
     border-color: var(--red);
   }
-  .btn.primary:hover:not(:disabled) {
+  .btn.primary:hover:not(:disabled, [aria-disabled='true']) {
     border-color: var(--red);
   }
 
@@ -370,8 +574,9 @@
     color: var(--bone);
   }
 
-  /* Near the 960px minimum window width, tighten the bar so the file name keeps some room. */
-  @media (max-width: 1180px) {
+  /* Discard, the export strip and Next video share the bar with the export buttons: below a wide
+     window, tighten it so the file name keeps some room. */
+  @media (max-width: 1440px) {
     .topbar {
       gap: 10px;
       padding-left: 14px;
@@ -389,48 +594,49 @@
     .winctl {
       margin-left: 0;
     }
+  }
+
+  /* Then the file name outranks the wordmark's serif half. */
+  @media (max-width: 1360px) {
+    .brand em {
+      display: none;
+    }
+  }
+
+  @media (max-width: 1180px) {
     .ctl {
       width: 30px;
     }
+    .bar {
+      width: 120px;
+    }
   }
 
-  /* The queue's controls take room from the file name; tighten sooner so the name stays readable. */
-  @media (max-width: 1440px) {
-    .topbar.queued {
-      gap: 10px;
-      padding-left: 14px;
+  /* Near the 960px minimum it needs the wordmark's room too (the title bar and taskbar still say
+     Hasami). */
+  @media (max-width: 1100px) {
+    .brand,
+    .vsep {
+      display: none;
     }
-    .queued .btn {
-      padding: 10px 12px;
+    .topbar {
       gap: 8px;
     }
-    .queued .link {
-      padding: 6px 2px;
+    .btn {
+      padding: 10px 10px;
     }
-    .queued .winctl {
-      margin-left: 0;
-    }
-  }
-
-  /* Near the minimum width a queue needs the wordmark's room for the file name (the title bar
-     and taskbar still say Hasami). */
-  @media (max-width: 1100px) {
-    .queued .brand,
-    .queued .brand-sep {
+    .next .word {
       display: none;
     }
-  }
-
-  /* At the narrowest widths the file name outranks the wordmark's serif half. */
-  @media (max-width: 1050px) {
-    .brand em {
-      display: none;
+    .ctl {
+      width: 28px;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
     button,
     .rail i,
+    .bar i,
     .switch,
     .switch::after {
       transition: none;

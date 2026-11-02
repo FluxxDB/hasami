@@ -17,6 +17,8 @@ export interface EditorMedia {
   size_bytes: number;
   duration_s: number;
   bit_rate: number | null;
+  /** The file's modified time (ms since the Unix epoch), read on open; Next video finds the next one from it. */
+  modified_ms: number;
   video: { width: number; height: number; fps: number; codec: string } | null;
   tracks: { index: number; empty: boolean; file: string | null }[];
 }
@@ -58,6 +60,11 @@ export interface EditorApi {
    * export in `after` is done (even if this window has closed) and reports with `Discard*`.
    */
   discard(path: string, after: number[]): Promise<void>;
+  /**
+   * The next older video in `path`'s folder, in Explorer's date-descending order (null: none).
+   * `path` may be gone already (recycled or moved): `modifiedMs` is its remembered modified time.
+   */
+  nextFile(path: string, modifiedMs: number): Promise<string | null>;
   close(session: number): Promise<void>;
   ready(): Promise<void>;
   onEvent(cb: (e: EditorEvent) => void): Promise<() => void>;
@@ -73,6 +80,8 @@ const tauriApi: EditorApi = {
   proxy: (session) => invoke('editor_proxy', { session }),
   exportClip: (request) => invoke('editor_export', { request }),
   discard: (path, after) => invoke('editor_discard', { path, after }),
+  // Tauri maps camelCase arguments to the command's snake_case parameters (`modified_ms`).
+  nextFile: (path, modifiedMs) => invoke('editor_next_file', { path, modifiedMs }),
   close: (session) => invoke('editor_close', { session }),
   ready: () => invoke('editor_ready'),
   onEvent: (cb) => listen<EditorEvent>(EDITOR_EVENT, (e) => cb(e.payload)),
@@ -94,6 +103,7 @@ export const api: EditorApi = {
   proxy: (session) => backend.then((b) => b.proxy(session)),
   exportClip: (request) => backend.then((b) => b.exportClip(request)),
   discard: (path, after) => backend.then((b) => b.discard(path, after)),
+  nextFile: (path, modifiedMs) => backend.then((b) => b.nextFile(path, modifiedMs)),
   close: (session) => backend.then((b) => b.close(session)),
   ready: () => backend.then((b) => b.ready()),
   onEvent: (cb) => backend.then((b) => b.onEvent(cb)),

@@ -14,6 +14,7 @@ vi.mock('./api', () => ({
     proxy: vi.fn(),
     exportClip: vi.fn(),
     discard: vi.fn(),
+    nextFile: vi.fn(),
     close: vi.fn(),
     ready: vi.fn(),
     onEvent: vi.fn(),
@@ -28,6 +29,7 @@ const media = (over: Partial<EditorMedia> = {}): EditorMedia => ({
   size_bytes: 412e6,
   duration_s: 90,
   bit_rate: null,
+  modified_ms: 1_000,
   video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
   tracks: [
     { index: 0, empty: false, file: 'a0.m4a' },
@@ -505,17 +507,24 @@ describe('EditorStore seek requests', () => {
 
 describe('EditorStore queue and exports', () => {
   const FILES = ['C:\\clips\\a.mp4', 'C:\\clips\\b.mp4', 'C:\\clips\\c.mp4'];
-  const sessionOf = (path: string) => FILES.indexOf(path) + 1;
+  /** The folder's older videos, after the queued ones. */
+  const D = 'C:\\clips\\d.mp4';
+  const E = 'C:\\clips\\e.mp4';
+  const ALL = [...FILES, D, E];
+  const sessionOf = (path: string) => ALL.indexOf(path) + 1;
+  // Newest first, as Explorer sorts Dang's folders.
+  const modifiedOf = (path: string) => 10_000 - ALL.indexOf(path);
   let nextJob = 100;
 
   beforeEach(() => {
     vi.clearAllMocks();
     nextJob = 100;
     vi.mocked(api.open).mockImplementation(async (path) =>
-      media({ session: sessionOf(path), path, file_name: path.split('\\').pop()! }),
+      media({ session: sessionOf(path), path, file_name: path.split('\\').pop()!, modified_ms: modifiedOf(path) }),
     );
     vi.mocked(api.exportClip).mockImplementation(async () => nextJob++);
     vi.mocked(api.discard).mockResolvedValue(undefined);
+    vi.mocked(api.nextFile).mockResolvedValue(null);
     vi.mocked(api.close).mockResolvedValue(undefined);
     vi.mocked(api.peaks).mockResolvedValue({ rate: 10, values: [] });
     vi.mocked(api.thumbs).mockResolvedValue([]);
@@ -524,74 +533,148 @@ describe('EditorStore queue and exports', () => {
   /** A store with `files` queued and the first one open. */
   const queued = async (files = FILES) => {
     const s = new EditorStore();
-    s.addFiles(files);
-    await s.openFile(files[0]);
+    await s.addFiles(files);
     return s;
   };
 
-  it('quick export sends the edit with Fit to 20 MB, then loads the next file', async () => {
+  /** A folder of a…e in that order (newest first): `nextFile` answers like the Rust side. */
+  const folder = (...gone: string[]) =>
+    vi.mocked(api.nextFile).mockImplementation(async (path, ms) => {
+      expect(ms).toBe(modifiedOf(path));
+      return ALL.slice(ALL.indexOf(path) + 1).find((p) => !gone.includes(p)) ?? null;
+    });
+
+  const cut = (s: EditorStore, t = 12) => {
+    s.seek(t);
+    s.command('cut');
+  };
+
+  // --- exports ---------------------------------------------------------------------------
+
+  it('quick export sends the edit with Fit to 20 MB, and the clip stays open and locked', async () => {
     const s = await queued();
     s.fit20 = true;
-    s.seek(12);
-    s.command('cut');
+    cut(s);
     await s.exportClip('quick');
     expect(api.exportClip).toHaveBeenCalledTimes(1);
     const request = vi.mocked(api.exportClip).mock.calls[0][0];
     expect(request).toMatchObject({ session: 1, input: FILES[0], mode: 'quick', fit_20mb: true });
     expect(request.video).toHaveLength(2);
-    expect(api.close).toHaveBeenCalledWith(1);
-    expect(api.open).toHaveBeenLastCalledWith(FILES[1]);
-    expect(s.queue.index).toBe(1);
-    expect(s.media?.path).toBe(FILES[1]);
-    expect(s.edited).toBe(false);
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.current).toEqual({ path: FILES[0], at: 0 });
+    expect(api.close).not.toHaveBeenCalled();
     expect(s.exports.running).toEqual([100]);
+    expect(s.locked).toBe(true);
+    expect(s.edited).toBe(true);
   });
 
-  it('export + save raw sends fit_20mb as the toggle is', async () => {
+  it('export + save raw sends fit_20mb as the toggle is, and locks too', async () => {
     const s = await queued();
     await s.exportClip('save_raw');
     expect(vi.mocked(api.exportClip).mock.calls[0][0]).toMatchObject({ mode: 'save_raw', fit_20mb: false });
+    expect(s.locked).toBe(true);
   });
 
-  it('export audio stays on the clip', async () => {
+  it('a locked clip refuses edits, Delete, Ctrl+B, undo and edge drags, and still plays', async () => {
+    const s = await queued();
+    cut(s, 12);
+    s.selectAt(s.timeline.video[1].id);
+    await s.exportClip('quick');
+    const before = s.history;
+    s.seek(30);
+    s.command('cut');
+    s.command('delete');
+    s.command('undo');
+    s.toggleMute(0);
+    s.setGain(0, -6, false);
+    s.setGain(0, -6, true);
+    s.beginEdgeDrag(s.timeline.video[0].id, 'end');
+    s.dragEdgeTo(5);
+    s.endEdgeDrag();
+    expect(s.history).toBe(before);
+    expect(s.preview).toBeNull();
+    expect(s.timeline.video).toHaveLength(2);
+    // The transport still works.
+    s.command('playPause');
+    expect(s.shuttle.dir).toBe(1);
+    s.command('home');
+    expect(s.playhead).toBe(0);
+    // And no second export of a clip that's on its way out.
+    await s.exportClip('quick');
+    await s.exportClip('audio');
+    expect(api.exportClip).toHaveBeenCalledTimes(1);
+  });
+
+  it('the clip is locked while the export is being handed over', async () => {
+    const s = await queued();
+    let reply!: (id: number) => void;
+    vi.mocked(api.exportClip).mockImplementationOnce(() => new Promise((r) => (reply = r)));
+    cut(s);
+    const exporting = s.exportClip('quick');
+    expect(s.locked).toBe(true);
+    expect(s.videoExport).toMatchObject({ action: 'quick', state: 'queued' });
+    s.command('undo');
+    expect(s.timeline.video).toHaveLength(2);
+    reply(100);
+    await exporting;
+    expect(s.locked).toBe(true);
+  });
+
+  it("a video export reads queued until it starts, then follows its progress, and done shows what was saved", async () => {
+    const s = await queued();
+    await s.exportClip('quick');
+    expect(s.videoExport).toMatchObject({ action: 'quick', state: 'queued', fraction: 0 });
+    s.applyEvent({ type: 'ExportStarted', id: 100, input: FILES[0] });
+    expect(s.videoExport).toMatchObject({ state: 'running', fraction: 0 });
+    s.applyEvent({ type: 'ExportProgress', id: 100, fraction: 0.4 });
+    expect(s.videoExport).toMatchObject({ state: 'running', fraction: 0.4 });
+    const output = 'C:\\clips\\[CLIPPED] a.mp4';
+    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output, bytes: 5e6 });
+    expect(s.videoExport).toMatchObject({ state: 'done', output, bytes: 5e6 });
+    expect(s.exports.running).toEqual([]);
+    // The original has gone to the Recycle Bin: the clip stays locked, and stays open.
+    expect(s.locked).toBe(true);
+    expect(s.media?.path).toBe(FILES[0]);
+  });
+
+  it('a failed video export says why, and unlocks the clip to try again', async () => {
+    const s = await queued();
+    cut(s);
+    await s.exportClip('quick');
+    s.applyEvent({ type: 'ExportStarted', id: 100, input: FILES[0] });
+    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'Out of disk space.', original_intact: true });
+    expect(s.videoExport).toMatchObject({ state: 'failed', message: 'Out of disk space.', originalIntact: true });
+    expect(s.exports.failed).toEqual([{ id: 100, input: FILES[0], message: 'Out of disk space.', originalIntact: true }]);
+    expect(s.locked).toBe(false);
+    cut(s, 30);
+    expect(s.timeline.video).toHaveLength(3);
+    await s.exportClip('quick');
+    expect(api.exportClip).toHaveBeenCalledTimes(2);
+    expect(s.locked).toBe(true);
+    expect(s.videoExport).toMatchObject({ state: 'queued' });
+  });
+
+  it("export audio shows its progress and leaves the clip editable", async () => {
     const s = await queued();
     s.fit20 = true;
-    s.seek(12);
-    s.command('cut');
+    cut(s);
     await s.exportClip('audio');
-    expect(vi.mocked(api.exportClip).mock.calls[0][0]).toMatchObject({ mode: 'audio', video: [] });
-    expect(s.queue.index).toBe(0);
-    expect(s.media?.path).toBe(FILES[0]);
-    expect(s.edited).toBe(true);
-    expect(api.close).not.toHaveBeenCalled();
-  });
-
-  it('shows the summary when no file is left', async () => {
-    const s = await queued();
+    expect(vi.mocked(api.exportClip).mock.calls[0][0]).toMatchObject({ mode: 'audio', video: [], fit_20mb: false });
+    expect(s.locked).toBe(false);
+    expect(s.videoExport).toBeNull();
+    expect(s.audioExport).toMatchObject({ action: 'audio', state: 'queued' });
+    s.applyEvent({ type: 'ExportStarted', id: 100, input: FILES[0] });
+    s.applyEvent({ type: 'ExportProgress', id: 100, fraction: 0.5 });
+    expect(s.audioExport).toMatchObject({ state: 'running', fraction: 0.5 });
+    cut(s, 30);
+    expect(s.timeline.video).toHaveLength(3);
+    // A second Export audio waits for the first; a video export doesn't.
+    await s.exportClip('audio');
+    expect(api.exportClip).toHaveBeenCalledTimes(1);
+    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'C:\\clips\\[CLIPPED] a.mp3', bytes: 1 });
+    expect(s.audioExport).toMatchObject({ state: 'done', output: 'C:\\clips\\[CLIPPED] a.mp3' });
     await s.exportClip('quick');
-    await s.exportClip('quick');
-    expect(s.showSummary).toBe(false);
-    await s.exportClip('quick');
-    expect(s.showSummary).toBe(true);
-    expect(s.media).toBeNull();
-    expect(api.close).toHaveBeenLastCalledWith(3);
-    expect(s.exports.running).toEqual([100, 101, 102]);
-  });
-
-  it('ExportDone moves the export from running to done', async () => {
-    const s = await queued();
-    await s.exportClip('quick');
-    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'C:\\clips\\[CLIPPED] a.mp4', bytes: 5e6 });
-    expect(s.exports.running).toEqual([]);
-    expect(s.exports.done).toEqual([{ id: 100, input: FILES[0], output: 'C:\\clips\\[CLIPPED] a.mp4', bytes: 5e6 }]);
-  });
-
-  it('ExportFailed adds to failed', async () => {
-    const s = await queued();
-    await s.exportClip('quick');
-    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'Out of disk space.', original_intact: true });
-    expect(s.exports.running).toEqual([]);
-    expect(s.exports.failed).toEqual([{ id: 100, input: FILES[0], message: 'Out of disk space.', originalIntact: true }]);
+    expect(api.exportClip).toHaveBeenCalledTimes(2);
   });
 
   it('an export that finishes before its id comes back is not left running', async () => {
@@ -604,47 +687,20 @@ describe('EditorStore queue and exports', () => {
     await s.exportClip('audio');
     expect(s.exports.running).toEqual([]);
     expect(s.exports.done.map((d) => d.id)).toEqual([100]);
+    expect(s.audioExport).toMatchObject({ state: 'done' });
   });
 
-  it('ExportProgress records the fraction', async () => {
+  it("an export that can't be queued says so and leaves the clip as it was", async () => {
     const s = await queued();
+    vi.mocked(api.exportClip).mockRejectedValueOnce("Couldn't start the export.");
+    cut(s);
     await s.exportClip('quick');
-    s.applyEvent({ type: 'ExportProgress', id: 100, fraction: 0.4 });
-    expect(s.exports.progress[100]).toBe(0.4);
-  });
-
-  it('shouldClose: not while running, yes when all done, never with a failure', async () => {
-    const s = await queued(FILES.slice(0, 2));
-    await s.exportClip('quick');
-    await s.exportClip('quick');
-    expect(s.showSummary).toBe(true);
-    expect(s.shouldClose).toBe(false);
-    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'x', bytes: 1 });
-    expect(s.shouldClose).toBe(false);
-    s.applyEvent({ type: 'ExportDone', id: 101, input: FILES[1], output: 'y', bytes: 1 });
-    expect(s.shouldClose).toBe(true);
-
-    const f = await queued(FILES.slice(0, 2));
-    await f.exportClip('quick');
-    await f.skip();
-    f.applyEvent({ type: 'ExportFailed', id: 102, input: FILES[0], message: 'No.', original_intact: true });
-    expect(f.showSummary).toBe(true);
-    expect(f.exports.running).toEqual([]);
-    expect(f.shouldClose).toBe(false);
-  });
-
-  it('a single clip closes as soon as its video export is handed over', async () => {
-    const s = await queued(FILES.slice(0, 1));
-    await s.exportClip('quick');
-    expect(s.showSummary).toBe(true);
-    expect(s.exports.running).toEqual([100]);
-    expect(s.shouldClose).toBe(true);
-  });
-
-  it('nothing closes before the first file is opened', () => {
-    const s = new EditorStore();
-    expect(s.showSummary).toBe(false);
-    expect(s.shouldClose).toBe(false);
+    expect(s.notice).toBe("Couldn't start the export.");
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.edited).toBe(true);
+    expect(s.locked).toBe(false);
+    expect(s.videoExport).toBeNull();
+    expect(s.exports.running).toEqual([]);
   });
 
   it('canExportAudio is false when every track is muted', async () => {
@@ -659,90 +715,177 @@ describe('EditorStore queue and exports', () => {
   });
 
   it('canExportAudio is false for a clip with no audio tracks', async () => {
-    const s = new EditorStore();
     vi.mocked(api.open).mockResolvedValueOnce(media({ tracks: [{ index: 0, empty: true, file: null }] }));
-    s.addFiles([FILES[0]]);
-    await s.openFile(FILES[0]);
+    const s = await queued([FILES[0]]);
     expect(s.canExportAudio).toBe(false);
   });
 
-  it('Files events append to the queue, once per path', async () => {
-    const s = await queued(FILES.slice(0, 1));
-    s.applyEvent({ type: 'Files', paths: [FILES[1], FILES[0], FILES[2]] });
-    expect(s.queue.files).toEqual(FILES);
-  });
+  // --- the window stays open ---------------------------------------------------------------
 
-  it('a file already handled can be trimmed again: a retry after a failure is appended and opens', async () => {
-    const s = await queued(FILES.slice(0, 2));
+  it('never closes by itself: a single clip stays open after its export is done', async () => {
+    const s = await queued([FILES[0]]);
     await s.exportClip('quick');
-    await s.skip();
+    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'x', bytes: 1 });
+    expect('shouldClose' in s).toBe(false);
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.ended).toBe(false);
+  });
+
+  it('closing asks only about edits that were not exported', async () => {
+    const s = await queued();
+    expect(s.unsaved).toBe(false);
+    cut(s);
+    expect(s.unsaved).toBe(true);
+    await s.exportClip('quick');
+    expect(s.unsaved).toBe(false);
     s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'No.', original_intact: true });
-    expect(s.showSummary).toBe(true);
-    s.applyEvent({ type: 'Files', paths: [FILES[0]] });
-    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0]]);
-    await vi.waitFor(() => expect(s.media?.path).toBe(FILES[0]));
-    expect(s.queue.index).toBe(2);
-    // Still once per path among the files not dealt with yet.
-    s.applyEvent({ type: 'Files', paths: [FILES[0], FILES[2], FILES[2]] });
-    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0], FILES[2]]);
+    expect(s.unsaved).toBe(true);
   });
 
-  it("a file whose Quick / Save raw export is still queued isn't trimmed again; one exporting audio is", async () => {
-    const s = await queued(FILES);
-    await s.exportClip('audio'); // job 100 only reads a.mp4, and stays on it
-    await s.skip();
-    await s.exportClip('quick'); // job 101 will recycle b.mp4
-    await s.exportClip('save_raw'); // job 102 will move c.mp4 to Raw
-    expect(s.showSummary).toBe(true);
-    s.applyEvent({ type: 'Files', paths: [FILES[1], FILES[2], FILES[0]] });
-    expect(s.queue.files).toEqual([...FILES, FILES[0]]);
-    // Once the export has ended (here it failed and left the original), a retry is allowed.
-    s.applyEvent({ type: 'ExportFailed', id: 101, input: FILES[1], message: 'No.', original_intact: true });
-    s.applyEvent({ type: 'Files', paths: [FILES[1], FILES[2]] });
-    expect(s.queue.files).toEqual([...FILES, FILES[0], FILES[1]]);
-  });
+  // --- Next video --------------------------------------------------------------------------
 
-  it('files arriving at the summary open the next one', async () => {
+  it('Next walks the queue first, then the folder after the last queued file', async () => {
+    folder();
     const s = await queued(FILES.slice(0, 2));
-    await s.skip();
-    await s.skip();
-    expect(s.showSummary).toBe(true);
-    s.applyEvent({ type: 'Files', paths: [FILES[2]] });
-    expect(s.showSummary).toBe(false);
-    await vi.waitFor(() => expect(s.media?.path).toBe(FILES[2]));
-    expect(s.queue.index).toBe(2);
-  });
-
-  it('skip on an unedited clip moves on without asking', async () => {
-    const s = await queued();
-    await s.skip();
-    expect(s.confirm).toBeNull();
+    expect(s.canNext).toBe(true);
+    expect(api.nextFile).not.toHaveBeenCalled(); // the queue has a next: no need to look
+    await s.nextVideo();
     expect(api.close).toHaveBeenCalledWith(1);
+    expect(s.current).toEqual({ path: FILES[1], at: 1 });
     expect(s.media?.path).toBe(FILES[1]);
-    expect(api.exportClip).not.toHaveBeenCalled();
-    expect(api.discard).not.toHaveBeenCalled();
+    // On the last queued file, Next checks the folder ahead of time.
+    expect(api.nextFile).toHaveBeenLastCalledWith(FILES[1], modifiedOf(FILES[1]));
+    expect(s.canNext).toBe(true);
+    await s.nextVideo();
+    expect(s.current).toEqual({ path: FILES[2], at: null });
+    expect(s.media?.path).toBe(FILES[2]);
+    await s.nextVideo();
+    expect(s.media?.path).toBe(D);
+    await s.nextVideo();
+    expect(s.media?.path).toBe(E);
+    expect(s.canNext).toBe(false);
   });
 
-  it('skip on an edited clip asks first, and Keep editing stays', async () => {
-    const s = await queued();
-    s.seek(12);
-    s.command('cut');
-    const skipping = s.skip();
-    expect(s.confirm).toBe('skip');
+  it('Next is disabled when there is no older video, and does nothing', async () => {
+    const s = await queued([FILES[0]]);
+    expect(api.nextFile).toHaveBeenCalledWith(FILES[0], modifiedOf(FILES[0]));
+    expect(s.canNext).toBe(false);
+    await s.nextVideo();
+    expect(api.open).toHaveBeenCalledTimes(1);
+    expect(api.close).not.toHaveBeenCalled();
+    expect(s.media?.path).toBe(FILES[0]);
+  });
+
+  it('Next looks again when pressed, and stays put if the folder has nothing after all', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    expect(s.canNext).toBe(true);
+    vi.mocked(api.nextFile).mockResolvedValueOnce(null); // b was deleted in Explorer meanwhile
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(api.close).not.toHaveBeenCalled();
+    expect(s.canNext).toBe(false);
+  });
+
+  it("Next says so when the folder can't be read, and stays", async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    vi.mocked(api.nextFile).mockRejectedValueOnce("Couldn't look for the next video.");
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.notice).toBe("Couldn't look for the next video.");
+  });
+
+  it("a look-ahead that fails keeps Next enabled; pressing it looks again and says why if it still can't", async () => {
+    vi.mocked(api.nextFile).mockRejectedValueOnce("Couldn't read this folder.");
+    const s = await queued([FILES[0]]);
+    await s.exportClip('quick'); // locked: Discard is off, so Next is the only way on
+    expect(s.canNext).toBe(true);
+    vi.mocked(api.nextFile).mockRejectedValueOnce("Couldn't read this folder.");
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.notice).toBe("Couldn't read this folder.");
+    expect(s.canNext).toBe(true);
+    // Once the folder answers, Next goes on.
+    folder();
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[1]);
+  });
+
+  it('Next on an edited clip that was not exported asks first; Keep editing stays', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    cut(s);
+    const going = s.nextVideo();
+    expect(s.confirm).toBe('next');
     s.answer(false);
-    await skipping;
-    expect(s.confirm).toBeNull();
+    await going;
     expect(s.media?.path).toBe(FILES[0]);
     expect(s.edited).toBe(true);
 
-    const again = s.skip();
+    const again = s.nextVideo();
+    expect(s.confirm).toBe('next');
     s.answer(true);
     await again;
     expect(s.media?.path).toBe(FILES[1]);
   });
 
-  it('discard closes the clip, recycles it and moves on', async () => {
+  it('Next after an export does not ask, and leaves the running export alone', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    cut(s);
+    await s.exportClip('quick');
+    await s.nextVideo();
+    expect(s.confirm).toBeNull();
+    expect(s.media?.path).toBe(FILES[1]);
+    expect(s.exports.running).toEqual([100]);
+    expect(s.locked).toBe(false);
+    // Its progress still lands, for the results list.
+    s.applyEvent({ type: 'ExportProgress', id: 100, fraction: 0.3 });
+    expect(s.results[0]).toMatchObject({ input: FILES[0], action: 'quick', state: 'running', fraction: 0.3 });
+  });
+
+  it('an Export audio of exactly these edits counts as exported; a later edit does not', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    cut(s);
+    await s.exportClip('audio');
+    expect(s.unsaved).toBe(false);
+    cut(s, 30);
+    expect(s.unsaved).toBe(true);
+    const going = s.nextVideo();
+    expect(s.confirm).toBe('next');
+    s.answer(true);
+    await going;
+    expect(s.media?.path).toBe(FILES[1]);
+  });
+
+  it('the folder walk passes over a clip whose Quick export is still to finish', async () => {
+    folder();
+    const s = await queued([FILES[1], FILES[0]]);
+    await s.exportClip('quick'); // b.mp4 goes to the Recycle Bin once it's done
+    await s.nextVideo(); // a.mp4, the last queued file
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.canNext).toBe(true);
+    await s.nextVideo(); // the folder after a is b, still there but on its way out: c
+    expect(s.media?.path).toBe(FILES[2]);
+  });
+
+  it('a clip that cannot be opened can still be moved on from in a queue', async () => {
+    vi.mocked(api.open).mockRejectedValueOnce("Couldn't open this clip in the editor.");
     const s = await queued();
+    expect(s.error).toBe("Couldn't open this clip in the editor.");
+    expect(s.media).toBeNull();
+    expect(s.canNext).toBe(true);
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[1]);
+  });
+
+  // --- Discard -----------------------------------------------------------------------------
+
+  it('discard closes the clip, recycles it and moves on through Next', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
     await s.discard();
     expect(s.confirm).toBeNull();
     expect(api.close).toHaveBeenCalledWith(1);
@@ -751,7 +894,26 @@ describe('EditorStore queue and exports', () => {
     expect(vi.mocked(api.close).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(api.discard).mock.invocationCallOrder[0],
     );
+    // The recycled clip's remembered modified time still finds the next one (call 1 was the
+    // look-ahead on open, call 3 the next clip's).
+    expect(api.nextFile).toHaveBeenNthCalledWith(2, FILES[0], modifiedOf(FILES[0]));
     expect(s.media?.path).toBe(FILES[1]);
+  });
+
+  it('discard in a queue goes to the next queued file', async () => {
+    const s = await queued();
+    await s.discard();
+    expect(s.current).toEqual({ path: FILES[1], at: 1 });
+  });
+
+  it('discard of the last video leaves the window open with nothing to trim', async () => {
+    const s = await queued([FILES[0]]);
+    await s.discard();
+    expect(s.media).toBeNull();
+    expect(s.current).toBeNull();
+    expect(s.ended).toBe(true);
+    expect(s.canNext).toBe(false);
+    expect(s.results).toMatchObject([{ input: FILES[0], action: 'discard', state: 'none' }]);
   });
 
   it('discard waits for the session to close before recycling the file', async () => {
@@ -769,12 +931,19 @@ describe('EditorStore queue and exports', () => {
 
   it('discard of an edited clip asks first', async () => {
     const s = await queued();
-    s.seek(12);
-    s.command('cut');
+    cut(s);
     const discarding = s.discard();
     expect(s.confirm).toBe('discard');
     s.answer(false);
     await discarding;
+    expect(api.discard).not.toHaveBeenCalled();
+    expect(s.media?.path).toBe(FILES[0]);
+  });
+
+  it('a locked clip cannot be discarded: its export is already dealing with the original', async () => {
+    const s = await queued();
+    await s.exportClip('quick');
+    await s.discard();
     expect(api.discard).not.toHaveBeenCalled();
     expect(s.media?.path).toBe(FILES[0]);
   });
@@ -793,20 +962,16 @@ describe('EditorStore queue and exports', () => {
     expect(api.discard).toHaveBeenCalledTimes(1);
   });
 
-  it('a discard kept because its export failed shows as kept, and the summary stays', async () => {
+  it('a discard kept because its export failed shows as kept', async () => {
     const s = await queued(FILES.slice(0, 2));
     await s.exportClip('audio');
     await s.discard();
-    await s.skip();
-    expect(s.showSummary).toBe(true);
-    expect(s.shouldClose).toBe(false);
     s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'No.', original_intact: true });
     expect(s.results[1].state).toBe('running');
     const message = 'Kept "a.mp4": its export didn\'t finish, so it wasn\'t sent to the Recycle Bin.';
     s.applyEvent({ type: 'DiscardKept', path: FILES[0], message });
     expect(s.results[1]).toMatchObject({ action: 'discard', state: 'failed', message });
     expect(api.discard).toHaveBeenCalledTimes(1);
-    expect(s.shouldClose).toBe(false);
   });
 
   it('a discard outcome that arrives before editor_discard answers still lands', async () => {
@@ -818,15 +983,6 @@ describe('EditorStore queue and exports', () => {
     });
     await s.discard();
     expect(s.results[1]).toMatchObject({ action: 'discard', state: 'failed', message: 'Kept.' });
-
-    const t = await queued(FILES.slice(0, 2));
-    await t.exportClip('audio');
-    vi.mocked(api.discard).mockImplementationOnce(async (path) => t.applyEvent({ type: 'DiscardDone', path }));
-    await t.discard();
-    await t.skip();
-    t.applyEvent({ type: 'ExportDone', id: 101, input: FILES[0], output: 'a.mp3', bytes: 1 });
-    expect(t.results[1].state).toBe('none');
-    expect(t.shouldClose).toBe(true);
   });
 
   it('a deferred discard that Rust refuses leaves no waiting row and reopens the clip', async () => {
@@ -836,30 +992,10 @@ describe('EditorStore queue and exports', () => {
     await s.discard();
     expect(s.log.some((l) => l.action === 'discard')).toBe(false);
     expect(s.media?.path).toBe(FILES[0]);
+    expect(s.current).toEqual({ path: FILES[0], at: 0 });
     expect(s.notice).toBe("Couldn't set this clip aside for the Recycle Bin.");
-  });
-
-  it('a clip waiting to be recycled is not re-queued by a new trim of it', async () => {
-    const s = await queued(FILES.slice(0, 2));
-    await s.exportClip('audio');
-    await s.discard();
-    s.applyEvent({ type: 'Files', paths: [FILES[0]] });
-    expect(s.queue.files).toEqual(FILES.slice(0, 2));
-    s.applyEvent({ type: 'DiscardKept', path: FILES[0], message: 'Kept.' });
-    // Once it's been kept, it can be trimmed again.
-    s.applyEvent({ type: 'Files', paths: [FILES[0]] });
-    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0]]);
-  });
-
-  it('the summary waits for a deferred discard to be done before closing', async () => {
-    const s = await queued(FILES.slice(0, 2));
-    await s.exportClip('audio');
-    await s.discard();
-    await s.skip();
-    s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'a.mp3', bytes: 1 });
-    expect(s.shouldClose).toBe(false);
-    s.applyEvent({ type: 'DiscardDone', path: FILES[0] });
-    expect(s.shouldClose).toBe(true);
+    // Still the same visit: its Export audio still shows.
+    expect(s.audioExport).toMatchObject({ action: 'audio' });
   });
 
   it('a failed discard says so and reopens the clip', async () => {
@@ -867,44 +1003,98 @@ describe('EditorStore queue and exports', () => {
     vi.mocked(api.discard).mockRejectedValueOnce("Couldn't send this clip to the Recycle Bin.");
     await s.discard();
     expect(s.notice).toBe("Couldn't send this clip to the Recycle Bin.");
-    expect(s.queue.index).toBe(0);
+    expect(s.current).toEqual({ path: FILES[0], at: 0 });
     expect(s.media?.path).toBe(FILES[0]);
   });
 
-  it('an export that can\'t be queued says so and stays on the clip', async () => {
-    const s = await queued();
-    vi.mocked(api.exportClip).mockRejectedValueOnce("Couldn't start the export.");
-    s.seek(12);
-    s.command('cut');
+  // --- more files, and the results list ----------------------------------------------------
+
+  it('Files events append to the queue, once per path', async () => {
+    const s = await queued(FILES.slice(0, 1));
+    s.applyEvent({ type: 'Files', paths: [FILES[1], FILES[0], FILES[2]] });
+    expect(s.queue.files).toEqual(FILES);
+    expect(s.canNext).toBe(true);
+  });
+
+  it('files arriving while the folder is being walked come next', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    await s.nextVideo();
+    expect(s.current).toEqual({ path: FILES[1], at: null });
+    await s.addFiles([E]);
+    expect(s.media?.path).toBe(FILES[1]); // the open clip stays
+    await s.nextVideo();
+    expect(s.current).toEqual({ path: E, at: 1 });
+  });
+
+  it('files arriving with nothing left open open the first of them', async () => {
+    const s = await queued([FILES[0]]);
+    await s.discard();
+    expect(s.ended).toBe(true);
+    await s.addFiles([FILES[2]]);
+    expect(s.ended).toBe(false);
+    expect(s.current).toEqual({ path: FILES[2], at: 1 });
+    expect(s.media?.path).toBe(FILES[2]);
+  });
+
+  it('a file already handled can be trimmed again: a retry after a failure is appended', async () => {
+    folder();
+    const s = await queued(FILES.slice(0, 1));
     await s.exportClip('quick');
-    expect(s.notice).toBe("Couldn't start the export.");
-    expect(s.media?.path).toBe(FILES[0]);
-    expect(s.edited).toBe(true);
-    expect(s.exports.running).toEqual([]);
+    await s.nextVideo();
+    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'No.', original_intact: true });
+    await s.addFiles([FILES[0]]);
+    expect(s.queue.files).toEqual([FILES[0], FILES[0]]);
+    // Still once per path among the files not dealt with yet.
+    await s.addFiles([FILES[0], FILES[2], FILES[2]]);
+    expect(s.queue.files).toEqual([FILES[0], FILES[0], FILES[2]]);
   });
 
-  it('the summary lists each file in order with its result', async () => {
+  it("a file whose Quick / Save raw export is still to finish isn't trimmed again; one exporting audio is", async () => {
+    folder();
+    const s = await queued(FILES);
+    await s.exportClip('audio'); // job 100 only reads a.mp4
+    await s.nextVideo();
+    await s.exportClip('quick'); // job 101 will recycle b.mp4
+    await s.nextVideo();
+    await s.exportClip('save_raw'); // job 102 will move c.mp4 to Raw
+    await s.addFiles([FILES[1], FILES[2], FILES[0]]);
+    expect(s.queue.files).toEqual([...FILES, FILES[0]]);
+    // Once the export has ended (here it failed and left the original), a retry is allowed.
+    s.applyEvent({ type: 'ExportFailed', id: 101, input: FILES[1], message: 'No.', original_intact: true });
+    await s.addFiles([FILES[1], FILES[2]]);
+    expect(s.queue.files).toEqual([...FILES, FILES[0], FILES[1]]);
+  });
+
+  it('a clip waiting to be recycled is not re-queued by a new trim of it', async () => {
+    const s = await queued(FILES.slice(0, 2));
+    await s.exportClip('audio');
+    await s.discard();
+    await s.addFiles([FILES[0]]);
+    expect(s.queue.files).toEqual(FILES.slice(0, 2));
+    s.applyEvent({ type: 'DiscardKept', path: FILES[0], message: 'Kept.' });
+    // Once it's been kept, it can be trimmed again.
+    await s.addFiles([FILES[0]]);
+    expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0]]);
+  });
+
+  it('the results list has each export and discard in order, with how it stands', async () => {
+    folder();
     const s = await queued();
     await s.exportClip('audio');
     await s.exportClip('quick');
-    await s.skip();
+    await s.nextVideo();
+    await s.nextVideo();
     await s.discard();
+    s.applyEvent({ type: 'ExportStarted', id: 100, input: FILES[0] });
     s.applyEvent({ type: 'ExportDone', id: 100, input: FILES[0], output: 'a.mp3', bytes: 2e6 });
-    s.applyEvent({ type: 'ExportFailed', id: 101, input: FILES[0], message: 'No.', original_intact: true });
     expect(s.results.map((r) => [r.input, r.action, r.state])).toEqual([
       [FILES[0], 'audio', 'done'],
-      [FILES[0], 'quick', 'failed'],
-      [FILES[1], 'skip', 'none'],
+      [FILES[0], 'quick', 'queued'],
       [FILES[2], 'discard', 'none'],
     ]);
-  });
-
-  it('a clip that can\'t be opened can still be skipped', async () => {
-    vi.mocked(api.open).mockRejectedValueOnce("Couldn't open this clip in the editor.");
-    const s = await queued();
-    expect(s.error).toBe("Couldn't open this clip in the editor.");
-    expect(s.media).toBeNull();
-    await s.skip();
-    expect(s.media?.path).toBe(FILES[1]);
+    s.applyEvent({ type: 'ExportStarted', id: 101, input: FILES[0] });
+    s.applyEvent({ type: 'ExportFailed', id: 101, input: FILES[0], message: 'No.', original_intact: true });
+    expect(s.results[1]).toMatchObject({ state: 'failed', message: 'No.', originalIntact: true });
   });
 });

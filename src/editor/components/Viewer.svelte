@@ -78,6 +78,9 @@
     {/if}
     {#if store.error}
       <p class="message" role="alert">{store.error}</p>
+    {:else if store.ended}
+      <!-- The last video was discarded: the window stays (spec 5.7), with the results list. -->
+      <p class="message" role="status">No more videos to trim here.</p>
     {/if}
   </div>
 

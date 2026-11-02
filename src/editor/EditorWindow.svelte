@@ -30,14 +30,7 @@
   const FIT_MARGIN_PX = 24; // room after the last frame, so the end edge stays grabbable
   const PREVIEW_FAILED = "Couldn't show a preview of this video. Cuts and exports still work.";
 
-  // The summary closes the window once every export has finished and none failed (once: later
-  // events would otherwise ask again while it's closing).
-  let closing = false;
-  $effect(() => {
-    if (!store.shouldClose || closing) return;
-    closing = true;
-    untrack(onClose);
-  });
+  // The window never closes by itself (spec 5.7): only its close button or Alt+F4 close it.
 
   // A newly loaded clip fits the lanes as soon as their width is known.
   $effect(() => {
@@ -192,6 +185,8 @@
     // While the dialog asks, its own buttons have the keyboard.
     if (!store.media || store.confirm) return;
     const target = e.target instanceof HTMLElement ? e.target : null;
+    // So does the open results list (Space presses its buttons, Esc closes it).
+    if (target?.closest('[popover]')) return;
     if (target?.isContentEditable || target instanceof HTMLTextAreaElement) return;
     if (target instanceof HTMLInputElement && TEXT_TYPES.has(target.type)) return;
     const c = keyToCommand(e);
@@ -207,18 +202,16 @@
 <svelte:window onkeydown={onKeydown} />
 
 <main class="win">
-  {#if store.showSummary}
-    <Summary {store} {onMinimize} {onClose} />
-  {:else}
-    <TopBar {store} {onMinimize} {onToggleMaximize} {onClose} />
-    <Viewer {store} bind:video {onVideoError} />
-    <Toolbar {store} />
-    <div class="timeline">
-      <TrackHeaders {store} />
-      <Lanes {store} bind:width={store.viewWidth} />
-    </div>
-    <StatusBar {store} />
-  {/if}
+  <TopBar {store} {onMinimize} {onToggleMaximize} {onClose} />
+  <Viewer {store} bind:video {onVideoError} />
+  <Toolbar {store} />
+  <div class="timeline">
+    <TrackHeaders {store} />
+    <Lanes {store} bind:width={store.viewWidth} />
+  </div>
+  <StatusBar {store} />
+  <!-- The results list opens over the editor from the top bar's export strip (spec 5.8). -->
+  <Summary {store} />
   <ConfirmDialog {store} />
 </main>
 

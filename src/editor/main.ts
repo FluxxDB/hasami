@@ -30,25 +30,26 @@ mount(EditorWindow, {
 
 /** In a browser there's no close request to catch: ask the same question directly. */
 async function mockClose() {
-  if (store.edited && !(await store.ask('close'))) return;
+  if (store.unsaved && !(await store.ask('close'))) return;
   console.info('[mock] window.close()');
 }
 
-// A close request (the close button, Alt+F4, or the summary closing itself) with unsaved edits
-// asks first, in the window. Exports already handed over keep running after it closes.
+// A close request (the close button or Alt+F4) with edits no export was made from asks first, in
+// the window. The window never closes by itself; exports already handed over keep running after
+// it closes, so they're no reason to ask.
 win?.onCloseRequested(async (event) => {
-  if (!store.edited) return;
+  if (!store.unsaved) return;
   event.preventDefault();
   if (await store.ask('close')) await win.destroy();
 });
 
 async function boot() {
   await api.onEvent((e) => store.applyEvent(e));
-  store.addFiles(await api.files());
+  // The first file opens; later batches (`Files`) queue up behind it.
+  const opening = store.addFiles(await api.files());
   // Rust holds editor events until the listener is attached.
   api.ready().catch((err) => console.error('editor_ready failed', err));
-  const first = store.currentPath;
-  if (first) await store.openFile(first);
+  await opening;
 }
 
 boot().catch((err) => console.error('The editor could not start', err));

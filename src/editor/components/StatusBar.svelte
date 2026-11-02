@@ -20,7 +20,7 @@
 
 <footer class="statusbar cap">
   {#if store.notice}
-    <!-- An export that couldn't start, or a discard that failed: the clip is still open. -->
+    <!-- An export that couldn't start, a discard that failed, or Next couldn't look in the folder. -->
     <span class="notice" role="alert">{store.notice}</span>
   {/if}
   {#if store.media}

@@ -31,7 +31,9 @@
   let hoverLane = $state<string | null>(null);
   let dragging = $state(false);
 
+  /** The segment edge under the pointer; none while the clip is locked (it takes no more edits). */
   function edgeUnder(segs: Seg[], e: MouseEvent) {
+    if (store.locked) return null;
     const boxes = segs.map((s) => ({ id: s.id, at: s.at, len: segLen(s) }));
     return edgeAt(boxes, localX(e), store.pxPerSecond, store.scrollX);
   }

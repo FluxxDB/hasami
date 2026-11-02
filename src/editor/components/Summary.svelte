@@ -1,24 +1,23 @@
+<script lang="ts" module>
+  /** The panel's id: the top bar's export strip opens it with `popovertarget`. */
+  export const RESULTS_ID = 'results';
+</script>
+
 <script lang="ts">
   import { formatBytes, formatPercent } from '../../progress/format';
   import { fileName } from '../display';
   import type { EditorStore, Result } from '../store.svelte';
 
-  // Shown after the last file of a queue while exports are still running or one has failed
-  // (spec 5.8). The window closes itself once everything has finished and succeeded.
+  // The results list (spec 5.8): each export and discard and how it went, opened from the top
+  // bar's export strip. A popover over the editor: it never replaces the editor and never closes
+  // the window. Esc, a click outside, or its close button put it away.
 
-  interface Props {
-    store: EditorStore;
-    onMinimize: () => void;
-    onClose: () => void;
-  }
-
-  let { store, onMinimize, onClose }: Props = $props();
+  let { store }: { store: EditorStore } = $props();
 
   const ACTION: Record<Result['action'], string> = {
     quick: 'Quick export',
     save_raw: 'Export + save raw',
     audio: 'Export audio',
-    skip: 'Skipped',
     discard: 'Discarded',
   };
 
@@ -33,19 +32,13 @@
       ? `Finishing ${plural(running, 'export', 'exports')}`
       : failed > 0
         ? `${plural(failed, 'clip', 'clips')} didn't go through`
-        : 'All clips done',
-  );
-  const note = $derived(
-    running > 0 && failed === 0
-      ? 'This window closes when they finish. Closing it now is fine: they keep running.'
-      : running > 0
-        ? 'Closing this window is fine: the rest keep running.'
-        : null,
+        : results.length > 0
+          ? 'All done'
+          : 'Nothing exported yet',
   );
 
   function detail(r: Result): string {
     if (r.state === 'done' && r.output) return `${fileName(r.output)} · ${formatBytes(r.bytes ?? 0)}`;
-    if (r.action === 'skip') return 'Left as it was';
     if (r.action === 'discard') return r.state === 'running' ? 'Goes to the Recycle Bin once its export finishes' : 'Sent to the Recycle Bin';
     return '';
   }
@@ -53,152 +46,120 @@
   function status(r: Result): string {
     if (r.action === 'discard' && r.state === 'running') return 'Waiting';
     if (r.action === 'discard' && r.state === 'failed') return 'Kept';
-    // The job queue runs one export at a time; the rest haven't reported progress yet.
-    if (r.state === 'running') return r.fraction > 0 ? formatPercent(r.fraction) : 'Queued';
+    if (r.state === 'queued') return 'Queued';
+    if (r.state === 'running') return formatPercent(r.fraction);
     if (r.state === 'done') return 'Done';
     if (r.state === 'failed') return 'Failed';
     return '';
   }
 </script>
 
-<div class="summary">
-  <header class="bar" data-tauri-drag-region>
-    <div class="brand"><b>HASAMI</b><em>quick trim</em></div>
-    <div class="spacer" data-tauri-drag-region></div>
-    <div class="winctl">
-      <button type="button" class="ctl" aria-label="Minimize" onclick={onMinimize}>
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" fill="none" /></svg>
-      </button>
-      <button type="button" class="ctl" aria-label="Close" onclick={onClose}>
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
-          ><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg
-        >
-      </button>
-    </div>
+<div id={RESULTS_ID} class="panel" popover="auto" role="dialog" aria-labelledby="results-heading">
+  <header>
+    <!-- Polite: "Finishing 2 exports" turning into "All done" is the news here. -->
+    <h2 id="results-heading" aria-live="polite">{heading}</h2>
+    <button type="button" class="ctl" aria-label="Close the results" popovertarget={RESULTS_ID} popovertargetaction="hide">
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg>
+    </button>
   </header>
+  {#if running > 0}<p class="note">Closing the window is fine: exports keep running.</p>{/if}
 
-  <section class="body" aria-labelledby="summary-heading">
-    <div class="column">
-      <!-- Polite: "Finishing 2 exports" turning into "All clips done" is the news here. -->
-      <h1 id="summary-heading" aria-live="polite">{heading}</h1>
-      {#if note}<p class="note">{note}</p>{/if}
+  {#if results.length > 0}
+    <ol class="results">
+      {#each results as r, i (i)}
+        <li class:failed={r.state === 'failed'}>
+          <div class="what">
+            <span class="name" title={r.input}>{fileName(r.input)}</span>
+            <span class="action cap">{ACTION[r.action]}</span>
+          </div>
+          <span class="status cap" class:strong={r.state === 'failed'}>{status(r)}</span>
 
-      <ol class="results">
-        {#each results as r, i (i)}
-          <li class:failed={r.state === 'failed'}>
-            <div class="what">
-              <span class="name" title={r.input}>{fileName(r.input)}</span>
-              <span class="action cap">{ACTION[r.action]}</span>
-            </div>
-            <span class="status cap" class:strong={r.state === 'failed'}>{status(r)}</span>
-
-            {#if r.state === 'running' && r.fraction > 0}
-              <span class="rail" aria-hidden="true"><i style:width="{Math.round(r.fraction * 100)}%"></i></span>
-            {:else if r.state === 'failed'}
-              <p class="message">
-                {r.message}
-                {#if r.originalIntact}<span class="kept">The original was not changed.</span>{/if}
-              </p>
-            {:else if detail(r)}
-              <span class="detail">{detail(r)}</span>
-            {/if}
-          </li>
-        {/each}
-      </ol>
-
-      <div class="actions">
-        <button type="button" class="btn cap" onclick={onClose}>Close</button>
-      </div>
-    </div>
-  </section>
+          {#if r.state === 'running' && r.action !== 'discard'}
+            <span class="rail" aria-hidden="true"><i style:width="{Math.round(r.fraction * 100)}%"></i></span>
+          {:else if r.state === 'failed'}
+            <p class="message">
+              {r.message}
+              {#if r.originalIntact}<span class="kept">The original was not changed.</span>{/if}
+            </p>
+          {:else if detail(r)}
+            <span class="detail">{detail(r)}</span>
+          {/if}
+        </li>
+      {/each}
+    </ol>
+  {/if}
 </div>
 
 <style>
-  .summary {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
+  .panel {
+    /* Hangs from the top bar, at its right, over the viewer. */
+    position: fixed;
+    inset: 60px 10px auto auto;
+    margin: 0;
+    width: min(520px, calc(100vw - 20px));
+    max-height: calc(100vh - 76px);
+    overflow-y: auto;
+    padding: 18px 20px 8px;
+    background: var(--charcoal);
+    color: var(--bone);
+    border: 1px solid var(--smoke);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.5);
+    font-size: 13px;
+    letter-spacing: -0.017em;
+    user-select: none;
+  }
+  .panel:popover-open {
+    animation: drop 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes drop {
+    from {
+      transform: translateY(-4px);
+    }
   }
 
-  .bar {
-    flex: none;
-    height: 54px;
+  header {
     display: flex;
     align-items: center;
-    padding: 0 10px 0 18px;
-    border-bottom: 1px solid var(--line);
+    justify-content: space-between;
+    gap: 16px;
   }
-  .brand {
-    display: flex;
-    align-items: baseline;
-    gap: 7px;
-    white-space: nowrap;
-    pointer-events: none;
-  }
-  .brand b {
-    font-weight: 700;
-    font-size: 15px;
-    letter-spacing: -0.03em;
-  }
-  .brand em {
-    font-family: var(--serif);
-    font-size: 17px;
-    color: var(--pebble);
-    letter-spacing: -0.01em;
-  }
-  .spacer {
-    flex: 1;
-    align-self: stretch;
-  }
-  .winctl {
-    display: flex;
-    gap: 2px;
+  h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 1.3;
+    letter-spacing: -0.02em;
   }
   .ctl {
-    width: 34px;
+    flex: none;
+    width: 30px;
     height: 28px;
+    margin-right: -8px;
     display: grid;
     place-items: center;
     color: var(--pebble);
     background: transparent;
     border: 0;
     border-radius: 3px;
+    transition:
+      background-color 0.12s ease-out,
+      color 0.12s ease-out;
   }
   .ctl:hover {
-    background: var(--charcoal);
+    background: var(--smoke);
     color: var(--bone);
   }
-
-  .body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 56px 24px 40px;
-  }
-  .column {
-    width: min(640px, 100%);
-    margin: 0 auto;
-  }
-  h1 {
-    margin: 0;
-    font-size: 24px;
-    font-weight: 500;
-    line-height: 1.2;
-    letter-spacing: -0.025em;
-  }
   .note {
-    margin: 10px 0 0;
+    margin: 4px 0 0;
     color: var(--pebble);
-    font-size: 13px;
     line-height: 1.5;
   }
 
   .results {
     list-style: none;
-    margin: 32px 0 0;
+    margin: 14px 0 0;
     padding: 0;
-    border-top: 1px solid var(--smoke);
   }
   li {
     display: grid;
@@ -206,8 +167,8 @@
     column-gap: 24px;
     row-gap: 6px;
     align-items: baseline;
-    padding: 14px 0;
-    border-bottom: 1px solid var(--smoke);
+    padding: 12px 0;
+    border-top: 1px solid var(--smoke);
   }
   .what {
     display: flex;
@@ -251,7 +212,6 @@
   }
   .message {
     margin: 0;
-    font-size: 13px;
     line-height: 1.5;
     max-width: 65ch;
     user-select: text;
@@ -262,8 +222,8 @@
   }
   .rail {
     display: block;
-    height: 1px;
-    margin-top: 4px;
+    height: 2px;
+    margin-top: 2px;
     background: var(--iron);
   }
   .rail i {
@@ -273,32 +233,12 @@
     transition: width 0.2s ease-out;
   }
 
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    margin-top: 32px;
-  }
-  .btn {
-    padding: 10px 20px;
-    border-radius: 8px;
-    border: 1px solid var(--ash);
-    background: transparent;
-    color: var(--bone);
-    transition:
-      border-color 0.12s ease-out,
-      background-color 0.12s ease-out;
-  }
-  .btn:hover {
-    border-color: var(--bone);
-    background: var(--charcoal);
-  }
-  .btn:active {
-    background: var(--smoke);
-  }
-
   @media (prefers-reduced-motion: reduce) {
+    .panel:popover-open {
+      animation: none;
+    }
     .rail i,
-    .btn {
+    .ctl {
       transition: none;
     }
   }

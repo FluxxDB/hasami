@@ -9,7 +9,10 @@
 //
 // `?mock=queue` opens a trim queue of three clips (as opened, no demo edits) whose exports run one
 // at a time for a few seconds each, like the job queue; `?mock=queue-fail` makes the second
-// clip's exports fail, so the summary stays up (and a Discard waiting on one keeps the clip).
+// clip's exports fail (and a Discard waiting on one keeps the clip).
+//
+// The clips sit in a fake folder of five, newest first, so Next video walks it: the queue's three
+// (the 1st, 3rd and 4th), then on into the 5th; from the single clip (the 1st), all five.
 //
 // There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
 import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
@@ -17,11 +20,19 @@ import { fileName } from './display';
 import type { EditorStore } from './store.svelte';
 import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
-const PATH = 'C:\\Users\\ledan\\Videos\\Replay 2026-10-09 23-40-17.mp4';
+const DIR = 'C:\\Users\\ledan\\Videos\\';
+/** The fake folder, newest first, as Explorer sorts it by date, descending. */
+const FOLDER = ['23-40-17', '23-21-50', '23-05-33', '22-48-09', '22-31-44'].map((t) => `${DIR}Replay 2026-10-09 ${t}.mp4`);
+/** Each clip's modified time, from the time in its name. */
+const MODIFIED = new Map(
+  FOLDER.map((p) => {
+    const [h, m, sec] = p.slice(-12, -4).split('-').map(Number);
+    return [p, Date.UTC(2026, 9, 9, h, m, sec)];
+  }),
+);
+const PATH = FOLDER[0];
 const PARAM = new URLSearchParams(location.search).get('mock') ?? '';
-const QUEUE = PARAM.startsWith('queue')
-  ? [PATH, 'C:\\Users\\ledan\\Videos\\Replay 2026-10-09 23-52-04.mp4', 'C:\\Users\\ledan\\Videos\\Replay 2026-10-10 00-07-31.mp4']
-  : [PATH];
+const QUEUE = PARAM.startsWith('queue') ? [FOLDER[0], FOLDER[2], FOLDER[3]] : [PATH];
 const FAILING = PARAM === 'queue-fail' ? QUEUE[1] : null;
 const EXPORT_MS = 4000;
 const DURATION = 90;
@@ -31,10 +42,11 @@ const THUMB_EVERY = 2;
 const media: EditorMedia = {
   session: 1,
   path: PATH,
-  file_name: 'Replay 2026-10-09 23-40-17.mp4',
+  file_name: fileName(PATH),
   size_bytes: 412_000_000,
   duration_s: DURATION,
   bit_rate: 36_600_000,
+  modified_ms: MODIFIED.get(PATH)!,
   video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
   tracks: [
     { index: 0, empty: false, file: 'C:\\Temp\\hasami-editor-1\\a0.m4a' },
@@ -152,7 +164,8 @@ function runExport(id: number, input: string, mode: string): Promise<boolean> {
 
 export const mockApi: EditorApi = {
   files: () => later(QUEUE),
-  open: (path) => later({ ...media, session: ++sessions, path, file_name: fileName(path) }),
+  open: (path) =>
+    later({ ...media, session: ++sessions, path, file_name: fileName(path), modified_ms: MODIFIED.get(path) ?? 0 }),
   peaks: (_session, index) => later(peaksFor(index), 120),
   thumbs: () => later(thumbs(), 80),
   proxy,
@@ -181,6 +194,17 @@ export const mockApi: EditorApi = {
       );
     }
     return later(undefined);
+  },
+  // Like the Rust side: the next entry after `path`'s place (its remembered time, then its name),
+  // whether or not `path` itself is still there.
+  nextFile: (path, modifiedMs) => {
+    const name = fileName(path).toLowerCase();
+    const next = FOLDER.find((p) => {
+      const ms = MODIFIED.get(p)!;
+      return ms < modifiedMs || (ms === modifiedMs && fileName(p).toLowerCase() > name);
+    });
+    console.info('[mock] editor_next_file', { path, modifiedMs }, '→', next ?? null);
+    return later(next ?? null);
   },
   close: (session) => {
     console.info('[mock] editor_close', { session });
