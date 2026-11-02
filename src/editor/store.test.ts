@@ -131,6 +131,29 @@ describe('EditorStore commands', () => {
       expect(s.selection).toHaveLength(3);
     });
 
+    it('after a video-only cut, re-linking selects no audio and Delete ripples video only', () => {
+      const s = loaded();
+      s.command('toggleLinked'); // off
+      s.selectAt(s.timeline.video[0].id);
+      s.seek(12);
+      s.command('cut');
+      expect(tracks(s).map((t) => t.length)).toEqual([2, 1, 1]);
+      s.command('toggleLinked'); // on
+      for (const v of s.timeline.video) {
+        s.selectAt(v.id);
+        expect(s.selection).toEqual([v.id]);
+      }
+      s.selectAt(s.timeline.video[0].id);
+      s.command('delete');
+      expect(videoEnd(s.timeline)).toBeCloseTo(78, 9);
+      // The audio is no longer linked, so it is not deleted wholesale: the linked-delete ripple
+      // takes out just the same 12 s range from it.
+      for (const a of s.timeline.audio) {
+        expect(a.segs.map((x) => x.src)).toEqual([[12, 90]]);
+        expect(a.segs.map((x) => x.at)).toEqual([0]);
+      }
+    });
+
     it('with nothing selected, every track is cut', () => {
       const s = loaded();
       s.seek(12);

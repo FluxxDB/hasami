@@ -101,6 +101,20 @@ describe('cutAt', () => {
     expect(cut.audio[1].segs).toHaveLength(1);
   });
 
+  it('cutAt with only: segs of a split link group that stay whole get links of their own', () => {
+    const cut = cutAt(tl0, 12, [tl0.video[0].id]);
+    const links = [...cut.video, ...cut.audio.flatMap((a) => a.segs)].map((x) => x.link);
+    expect(new Set(links).size).toBe(4); // V left, V right, A0, A1: all different
+    expect(cut.video[0].link).toBe(tl0.video[0].link); // the cut member's left piece keeps the link
+    expect(linkedIds(cut, cut.video[0].id)).toEqual([cut.video[0].id]);
+    expect(linkedIds(cut, cut.video[1].id)).toEqual([cut.video[1].id]);
+  });
+
+  it('cutAt with only keeps the link when every member of the group is cut', () => {
+    const ids = [tl0.video[0].id, tl0.audio[0].segs[0].id, tl0.audio[1].segs[0].id];
+    expect(cutAt(tl0, 12, ids)).toEqual(cutAt(tl0, 12));
+  });
+
   it('cutAt_quantizes', () => {
     expect(cutAt(tl0, 12.004).video[0].src[1]).toBe(12);
   });
