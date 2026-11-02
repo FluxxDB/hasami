@@ -683,9 +683,17 @@ export class EditorStore {
       case 'end':
         this.seek(end);
         return;
-      case 'cut':
-        this.edit(cutAt(tl, this.playhead));
+      case 'cut': {
+        // With a selected clip under the playhead, only the selection is cut; otherwise every
+        // track. The left pieces keep their ids, so the selection stays on them.
+        const t = this.playhead;
+        const sel = new Set(this.selection);
+        const underPlayhead = [...tl.video, ...tl.audio.flatMap((a) => a.segs)].some(
+          (s) => sel.has(s.id) && s.at < t && t < s.at + segLen(s),
+        );
+        this.edit(underPlayhead ? cutAt(tl, t, this.selection) : cutAt(tl, t));
         return;
+      }
       case 'delete':
         // The deleted ids drop out of the selection in afterChange.
         if (this.selection.length > 0) this.edit(deleteSegs(tl, this.selection, this.linked));
