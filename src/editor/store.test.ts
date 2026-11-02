@@ -729,6 +729,22 @@ describe('EditorStore queue and exports', () => {
     expect(s.notice).toBe("Couldn't look for the next video.");
   });
 
+  it("a look-ahead that fails keeps Next enabled; pressing it looks again and says why if it still can't", async () => {
+    vi.mocked(api.nextFile).mockRejectedValueOnce("Couldn't read this folder.");
+    const s = await queued([FILES[0]]);
+    await s.exportClip('quick'); // locked: Discard is off, so Next is the only way on
+    expect(s.canNext).toBe(true);
+    vi.mocked(api.nextFile).mockRejectedValueOnce("Couldn't read this folder.");
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[0]);
+    expect(s.notice).toBe("Couldn't read this folder.");
+    expect(s.canNext).toBe(true);
+    // Once the folder answers, Next goes on.
+    folder();
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[1]);
+  });
+
   it('Next on an edited clip that was not exported asks first; Keep editing stays', async () => {
     folder();
     const s = await queued([FILES[0]]);

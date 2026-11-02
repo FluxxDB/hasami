@@ -135,9 +135,15 @@ export class EditorStore {
   visit = $state(0);
   /**
    * The folder's next older video after the open clip, checked ahead of time so Next video's
-   * disabled state is honest: undefined while checking (or when the queue has a next anyway).
+   * disabled state is honest: undefined while checking (or when the queue has a next anyway, or
+   * when the check failed: see `nextUnknown`).
    */
   folderNext = $state<string | null | undefined>(undefined);
+  /**
+   * The look-ahead couldn't read the folder. Next stays enabled: pressing it looks again, and says
+   * why if it still can't (a failed check must not pass for "no older video").
+   */
+  nextUnknown = $state(false);
   exports = $state<{
     /** Job ids handed to the queue and not yet finished. */
     running: number[];
@@ -202,7 +208,7 @@ export class EditorStore {
 
   /** Next video has somewhere to go: a queued file, or an older video in the folder. */
   get canNext(): boolean {
-    return this.queue.next < this.queue.files.length || typeof this.folderNext === 'string';
+    return this.queue.next < this.queue.files.length || typeof this.folderNext === 'string' || this.nextUnknown;
   }
 
   get canExportAudio(): boolean {
@@ -341,6 +347,7 @@ export class EditorStore {
       // The folder changed since it was checked: there's nothing after all.
       if (!next) {
         this.folderNext = null;
+        this.nextUnknown = false;
         return;
       }
       void this.leave();
@@ -387,6 +394,7 @@ export class EditorStore {
         this.current = null;
         this.visit += 1;
         this.folderNext = undefined;
+        this.nextUnknown = false;
       }
     } finally {
       this.busy = false;
@@ -456,6 +464,7 @@ export class EditorStore {
     const seq = ++this.openSeq;
     this.error = null;
     this.folderNext = undefined;
+    this.nextUnknown = false;
     let media: EditorMedia;
     try {
       media = await api.open(path);
@@ -493,13 +502,13 @@ export class EditorStore {
   private async checkNext(seq: number): Promise<void> {
     const path = this.currentPath;
     if (!path || this.queue.next < this.queue.files.length) return;
-    let next: string | null = null;
     try {
-      next = (await this.after(path))?.path ?? null;
+      const next = (await this.after(path))?.path ?? null;
+      if (seq === this.openSeq) this.folderNext = next;
     } catch (err) {
       console.error('editor_next_file failed', err);
+      if (seq === this.openSeq) this.nextUnknown = true;
     }
-    if (seq === this.openSeq) this.folderNext = next;
   }
 
   /**
