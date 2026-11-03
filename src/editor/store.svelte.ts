@@ -200,8 +200,14 @@ export class EditorStore {
 
   /** A plain-language message when the clip couldn't be opened. */
   error = $state<string | null>(null);
-  /** A plain-language message when an export couldn't start, a discard failed, or Next couldn't look (status bar). */
+  /** A plain-language message when an export couldn't start, or Next couldn't look (status bar). */
   notice = $state<string | null>(null);
+  /**
+   * Why the open clip couldn't be discarded: said under the top bar, where it can't be missed,
+   * until the next clip. `seq` tells one failure from the next with the same words.
+   */
+  discardFailure = $state<{ message: string; seq: number } | null>(null);
+  private discardFailures = 0;
   /** The unsaved-edits question being asked, if any; `answer` replies. */
   confirm = $state<ConfirmKind | null>(null);
   /** An export hand-over, Next or Discard is under way; the buttons wait for it. */
@@ -496,7 +502,7 @@ export class EditorStore {
       } catch (err) {
         this.log.splice(at, 1);
         await this.open(path);
-        this.notice = plain(err, DISCARD_FAILED);
+        this.discardFailure = { message: plain(err, DISCARD_FAILED), seq: ++this.discardFailures };
         return;
       }
       if (after.length === 0) this.markGone(path);
@@ -831,6 +837,7 @@ export class EditorStore {
     this.proxyFraction = null;
     this.error = null;
     this.notice = null;
+    this.discardFailure = null;
     return closed;
   }
 

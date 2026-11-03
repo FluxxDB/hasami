@@ -1282,18 +1282,32 @@ describe('EditorStore queue and exports', () => {
     expect(s.log.some((l) => l.action === 'discard')).toBe(false);
     expect(s.media?.path).toBe(FILES[0]);
     expect(s.current).toEqual({ path: FILES[0], at: 0 });
-    expect(s.notice).toBe("Couldn't set this clip aside for the Recycle Bin.");
+    expect(s.discardFailure).toMatchObject({ message: "Couldn't set this clip aside for the Recycle Bin." });
     // Still the same visit: its Export audio still shows.
     expect(s.audioExport).toMatchObject({ action: 'audio' });
   });
 
-  it('a failed discard says so and reopens the clip', async () => {
+  it('a failed discard reopens the clip and says why under the top bar, not in the status bar', async () => {
     const s = await queued();
-    vi.mocked(api.discard).mockRejectedValueOnce("Couldn't send this clip to the Recycle Bin.");
+    const why = "Couldn't move this clip to the Recycle Bin because another program is using it.";
+    vi.mocked(api.discard).mockRejectedValueOnce(why);
     await s.discard();
-    expect(s.notice).toBe("Couldn't send this clip to the Recycle Bin.");
+    expect(s.discardFailure).toMatchObject({ message: why });
+    expect(s.notice).toBeNull();
     expect(s.current).toEqual({ path: FILES[0], at: 0 });
     expect(s.media?.path).toBe(FILES[0]);
+  });
+
+  it('a failed discard is said again each time, and goes with the clip', async () => {
+    const s = await queued();
+    vi.mocked(api.discard).mockRejectedValueOnce('No.').mockRejectedValueOnce('No.');
+    await s.discard();
+    const first = s.discardFailure;
+    await s.discard();
+    expect(s.discardFailure).toMatchObject({ message: 'No.' });
+    expect(s.discardFailure?.seq).not.toBe(first?.seq);
+    await s.nextVideo();
+    expect(s.discardFailure).toBeNull();
   });
 
   // --- more files, and the results list ----------------------------------------------------

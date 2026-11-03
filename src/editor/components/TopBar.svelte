@@ -26,21 +26,35 @@
   // A Quick / Save raw export takes the export buttons' place while it runs, and once it's done.
   const video = $derived(store.videoExport);
   const showVideo = $derived(!!media && store.locked && !!video);
-  const VIDEO_LABEL: Record<string, string> = { quick: 'Quick export', save_raw: 'Export + save raw' };
+  /** What each export (and a discard) is called in the bar and the row under it. */
+  const LABEL: Record<Result['action'], string> = {
+    quick: 'Quick export',
+    save_raw: 'Export + save raw',
+    audio: 'Export audio',
+    discard: 'Discard',
+  };
 
-  // The row under the bar: an outcome that needs words (why an export failed, and that the
-  // original is untouched; a saved export's note, e.g. that its 20 MB copy couldn't be made; or
-  // Export audio's saved file). It stays until dismissed, the next export of the clip, or the
-  // next clip.
+  // The row under the bar: an outcome that needs words (why an export or a discard failed, and
+  // that the original is untouched; a saved export's note, e.g. that its 20 MB copy couldn't be
+  // made; or Export audio's saved file). It stays until dismissed, the next export of the clip,
+  // or the next clip.
   const KEPT = 'The original was not changed.';
+  const discardFailed = $derived.by((): Result | null => {
+    const f = store.discardFailure;
+    if (!f || !path) return null;
+    return { input: path, action: 'discard', state: 'failed', fraction: 0, message: f.message, originalIntact: true };
+  });
   const outcome = $derived.by((): Result | null => {
     if (!media) return null;
+    if (discardFailed) return discardFailed;
     if (video?.state === 'failed' || (video?.state === 'done' && video.note)) return video;
     if (audio?.state === 'failed' || audio?.state === 'done') return audio;
     return null;
   });
   const outcomeKey = $derived(
-    outcome ? `${store.visit}:${outcome.action}:${outcome.state}:${outcome.output ?? outcome.message}:${outcome.note ?? ''}` : '',
+    outcome
+      ? `${store.visit}:${outcome.action}:${outcome.state}:${outcome.output ?? outcome.message}:${outcome.note ?? ''}:${outcome === discardFailed ? store.discardFailure?.seq : ''}`
+      : '',
   );
   let dismissed = $state('');
   const showOutcome = $derived(!!outcome && outcomeKey !== dismissed);
@@ -48,7 +62,7 @@
   const announce = $derived.by(() => {
     const r = showVideo ? video : (outcome ?? (audioBusy ? audio : null));
     if (!r) return '';
-    const what = r.action === 'audio' ? 'Export audio' : VIDEO_LABEL[r.action];
+    const what = LABEL[r.action];
     if (r.state === 'done') return r.note ?? `Saved ${fileName(r.output ?? '')}`;
     if (r.state === 'failed') return `${r.message ?? ''} ${r.originalIntact ? KEPT : ''}`;
     return `${what} ${r.state === 'queued' ? 'queued' : 'running'}`;
@@ -193,7 +207,7 @@
         <span class="cap plabel">Saved</span><span class="out" title={video.output}>{fileName(video.output ?? '')}</span>
       </div>
     {:else}
-      {@render meter(video, VIDEO_LABEL[video.action])}
+      {@render meter(video, LABEL[video.action])}
     {/if}
   {:else}
     <div class="opts" class:two={!!border}>
@@ -285,12 +299,12 @@
 {#if showOutcome && outcome}
   <div class="outcome" class:failed={outcome.state === 'failed'}>
     {#if outcome.state === 'failed'}
-      <span class="cap plabel">{outcome.action === 'audio' ? 'Export audio failed' : `${VIDEO_LABEL[outcome.action]} failed`}</span>
+      <span class="cap plabel">{LABEL[outcome.action]} failed</span>
       <span class="msg">{outcome.message}</span>
       {#if outcome.originalIntact}<span class="kept">{KEPT}</span>{/if}
     {:else if outcome.note}
       <!-- The note names the saved file itself ("Saved …, but couldn't make the 20 MB copy: …"). -->
-      <span class="cap plabel">{outcome.action === 'audio' ? 'Export audio' : VIDEO_LABEL[outcome.action]}</span>
+      <span class="cap plabel">{LABEL[outcome.action]}</span>
       <span class="msg" title={outcome.note}>{outcome.note}</span>
     {:else}
       <span class="cap plabel">Saved</span><span class="out" title={outcome.output}>{fileName(outcome.output ?? '')}</span>
