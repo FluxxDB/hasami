@@ -16,11 +16,12 @@ import { initHistory, isEdited, push, redo, undo, type History } from './history
 import type { Command } from './keys';
 import { STOPPED, nextCut, prevCut, shuttle, stepFrames, type Shuttle } from './playbackModel';
 import {
-  MASTER_STEP_DB,
   createTimeline,
   cutAt,
+  deleteJoin,
   deleteSegs,
   linkedIds,
+  MASTER_STEP_DB,
   moveEdge,
   quantize,
   segLen,
@@ -847,7 +848,12 @@ export class EditorStore {
       }
       case 'delete':
         // The deleted ids drop out of the selection in afterChange.
-        if (this.selection.length > 0) this.edit(deleteSegs(tl, this.selection, this.linked));
+        if (this.selection.length > 0) {
+          // The playhead lands at the join; an audio-only delete (no join) leaves it be.
+          const join = deleteJoin(tl, this.selection, this.linked);
+          this.edit(deleteSegs(tl, this.selection, this.linked));
+          if (join !== null && this.timeline !== tl) this.seek(join);
+        }
         return;
       case 'undo':
       case 'redo':
@@ -974,8 +980,6 @@ export class EditorStore {
     }
   }
 
-  // TASK 16 STAND-IN (Task 18 branch): Task 16 owns `setMaster` and `nudgeMaster`; its versions
-  // win at merge.
   /** Sets the master volume. While the slider moves (`commit` false) it's live only; release records it. */
   setMaster(db: number, commit: boolean): void {
     if (commit) {
@@ -986,11 +990,9 @@ export class EditorStore {
     }
   }
 
-  /** Moves the master volume one step (3 dB) down or up, clamped; each press is one undo step. */
+  /** The master − / + buttons: one 3 dB step, one undo entry (none once clamped). */
   nudgeMaster(dir: 1 | -1): void {
-    this.commitLive();
-    const tl = this.history.present;
-    this.edit(setMaster(tl, tl.masterDb + dir * MASTER_STEP_DB));
+    this.edit(setMaster(this.history.present, this.history.present.masterDb + dir * MASTER_STEP_DB));
   }
 
   toggleMute(index: number): void {

@@ -1008,3 +1008,50 @@ Shared contracts, fixed here so parallel tasks agree:
 - [ ] **Step 2:** Implement and wire the commands.
 - [ ] **Step 3:** Run the full `cargo.exe test` and confirm it passes.
 - [ ] **Step 4: Commit.** `git commit -m "feat: newer/older adjacent video and date ordering for the trim queue"`
+
+### Task 20: Discord-safe H.264 exports and black-border crop (Rust). Runs after Task 17 merges.
+
+**Files:** `src-tauri/src/editor/request.rs`, `src-tauri/src/editor/media.rs` (border detection in `prepare`), `src-tauri/src/jobs/export.rs`, `src-tauri/src/app.rs` (DTO), tests.
+
+**Contracts (Task 21 relies on them):**
+- `#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)] pub struct Crop { pub x: u32, pub y: u32, pub w: u32, pub h: u32 }`
+- `PreparedMedia` and `EditorMediaDto` gain `border: Option<Crop>`, the detected picture area.
+- `ExportRequest` gains `#[serde(default)] pub crop: Option<Crop>`.
+- `detect_border(paths, input, duration_s, cancel) -> Result<Option<Crop>, MediaError>`:
+  - run `cropdetect=limit=24:round=2:reset=0` on about 10 short windows spread across the clip;
+  - return Some only when every window agrees, the crop is smaller than the frame, and it covers at least 25% of the area.
+
+**Rules:**
+- Video exports (non-fit and the main file of fit):
+  - always use `h264_amf` when available, otherwise `libx264`, with the existing bitrate args;
+  - the bitrate is the source's, ×1.3 for hevc, av1 and vp9 sources;
+  - output is `.mp4` with AAC;
+  - `clipped_path(input, "mp4")`.
+- With `crop`, the video chain becomes `trim…,setpts…` then concat, then `crop=w:h:x:y,scale=SW:SH:flags=lanczos,setsar=1`, where SW and SH are the source's width and height.
+- `same_codec_encoder` is no longer used for exports. Remove it, or keep it for tests only if something still needs it, and say which.
+- [ ] **Tests:**
+  - an export of an HEVC fixture gives codec `h264` and `.mp4`;
+  - a `.mkv` source gives `.mp4`;
+  - a fixture with a black-padded picture is built in the test (`pad=1920:1080:0:0` around 1440×810) → `detect_border` gives `{0,0,1440,810}`;
+  - an export with that crop yields 1920×1080, and a sampled pixel at (1800,1000) is not black;
+  - a clip without a border gives None.
+- [ ] Run the full `cargo.exe test` and confirm it passes, then commit: `feat: Discord-safe H.264 exports and automatic black-border crop`
+
+### Task 21: Border toggle and crop preview (UI). Runs after Task 18 merges.
+
+**Files:** `src/editor/{api.ts, mock.ts, store.svelte.ts (+ tests), components/TopBar.svelte, components/Viewer.svelte}`, plus the export request.
+
+**Rules:**
+- `EditorMedia.border: {x,y,w,h} | null`.
+- `store.keepBorder: boolean` resets to false per clip and isn't in history.
+- When `border && !keepBorder`, the export request carries `crop: border`; otherwise `crop: null`. `ExportRequest` in TS gains `crop`.
+- Top bar: "BORDER REMOVED" appears with a "KEEP BORDER" toggle only when `border` is set.
+- Viewer: while cropping is on, the video shows only the border's area, scaled to fit, using CSS `object-view-box: inset(...)` if WebView2 supports it, or a wrapper with overflow hidden and a transform otherwise.
+- The status bar's quick-export estimate is unchanged.
+- [ ] **Store tests:**
+  - the request has `crop` when there's a border and keep is off;
+  - it's null with keep on;
+  - it's null with no border;
+  - keep resets on the next clip.
+- [ ] Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass. Check the mock with a bordered clip and save screenshots.
+- [ ] **Commit.** `git commit -m "feat: black-border toggle and cropped preview in the editor"`

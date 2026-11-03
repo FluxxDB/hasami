@@ -24,16 +24,13 @@ export interface Timeline {
   video: Seg[];
   audio: AudioTrack[];
   nextId: number;
-  // TASK 16 STAND-IN (Task 18 branch): Task 16 owns `masterDb`; its version wins at merge.
-  /** Gain on the final mix, dB; −60 or lower is −∞. */
-  masterDb: number;
+  masterDb: number; // one gain on the final mix, exported in every mode
 }
 
 export const MIN_GAIN_DB = -60; // shown as −∞
 export const MAX_GAIN_DB = 6;
-// TASK 16 STAND-IN (Task 18 branch): Task 16 owns these; its versions win at merge.
-export const MASTER_MAX_DB = 12;
-export const MASTER_STEP_DB = 3;
+export const MASTER_MAX_DB = 12; // no limiter: what is set is what is exported
+export const MASTER_STEP_DB = 3; // the master − / + buttons
 
 /**
  * A track nobody hears: muted, or its fader at the bottom (−∞). The preview plays it at gain 0,
@@ -42,6 +39,9 @@ export const MASTER_STEP_DB = 3;
 export function isSilent(gainDb: number, muted: boolean): boolean {
   return muted || gainDb <= MIN_GAIN_DB;
 }
+
+/** The master fader at the bottom (−∞): the whole mix is silent. */
+const masterOff = (tl: Timeline): boolean => tl.masterDb <= MIN_GAIN_DB;
 
 // Comparison slack for times that went through float arithmetic.
 const EPS = 1e-9;
@@ -222,6 +222,20 @@ export function deleteSegs(tl: Timeline, ids: string[], linked: boolean): Timeli
   return { ...tl, video, audio, nextId };
 }
 
+/**
+ * Where the playhead goes after `deleteSegs(tl, ids, linked)`: the timeline time of the leftmost
+ * removed video range's start, which after the ripple is where its neighbours meet (the end of
+ * what is left when the tail went, 0 when the head did). Null when no video is removed, so an
+ * audio-only delete, or one `deleteSegs` refuses, leaves the playhead alone. Video ripples the
+ * same way whether or not Linked is on; `linked` is in the signature to mirror `deleteSegs`.
+ */
+export function deleteJoin(tl: Timeline, ids: string[], _linked: boolean): number | null {
+  const wanted = new Set(ids);
+  const removed = tl.video.filter((s) => wanted.has(s.id));
+  if (removed.length === 0 || removed.length === tl.video.length) return null;
+  return Math.min(...removed.map((s) => s.at));
+}
+
 // --- edge drag -----------------------------------------------------------------------------
 
 const clamp = (x: number, lo: number, hi: number): number => Math.min(Math.max(x, lo), hi);
@@ -358,16 +372,18 @@ export function setGain(tl: Timeline, index: number, gainDb: number): Timeline {
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, gainDb: g } : a)) };
 }
 
-// TASK 16 STAND-IN (Task 18 branch): Task 16 owns `setMaster`; its version wins at merge.
-export function setMaster(tl: Timeline, db: number): Timeline {
-  const g = clamp(db, MIN_GAIN_DB, MASTER_MAX_DB);
-  return tl.masterDb === g ? tl : { ...tl, masterDb: g };
-}
-
 export function setMuted(tl: Timeline, index: number, muted: boolean): Timeline {
   const track = tl.audio.find((a) => a.index === index);
   if (!track || track.muted === muted) return tl;
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, muted } : a)) };
+}
+
+// --- master volume -------------------------------------------------------------------------
+
+/** The gain on the final mix, clamped to [−∞ (MIN_GAIN_DB), +12 dB]. */
+export function setMaster(tl: Timeline, db: number): Timeline {
+  const g = clamp(db, MIN_GAIN_DB, MASTER_MAX_DB);
+  return tl.masterDb === g ? tl : { ...tl, masterDb: g };
 }
 
 // --- snapping ------------------------------------------------------------------------------
@@ -428,6 +444,7 @@ export interface ExportRequest {
   duration_s: number;
   video: { src_start: number; src_end: number }[];
   audio: { index: number; gain_db: number; pieces: { at: number; src_start: number; src_end: number }[] }[];
+  master_db: number; // never -60 or lower: at −∞ `audio` is empty and this is 0
 }
 
 export function toExportRequest(
@@ -439,7 +456,8 @@ export function toExportRequest(
 ): ExportRequest {
   const end = videoEnd(tl);
   const audio: ExportRequest['audio'] = [];
-  for (const tr of tl.audio) {
+  // A master at −∞ is silence on the whole mix, so no track is sent (as for a muted one).
+  for (const tr of masterOff(tl) ? [] : tl.audio) {
     if (isSilent(tr.gainDb, tr.muted)) continue;
     const pieces = sortByAt(tr.segs).flatMap((s) => {
       const len = Math.min(segLen(s), end - s.at); // clip to the end of the video
@@ -455,11 +473,14 @@ export function toExportRequest(
     duration_s: end,
     video: mode === 'audio' ? [] : tl.video.map((s) => ({ src_start: s.src[0], src_end: s.src[1] })),
     audio,
+    // At −∞ no audio is sent, so the gain is moot; 0 keeps -60 or lower from reaching Rust.
+    master_db: masterOff(tl) ? 0 : tl.masterDb,
   };
 }
 
-/** True when some track that isn't silent (muted or at −∞) has material before the end of the video. */
+/** True when some track that isn't silent (muted or at −∞, or the master at −∞) has material before the end of the video. */
 export function hasAudibleAudio(tl: Timeline): boolean {
+  if (masterOff(tl)) return false;
   const end = videoEnd(tl);
   const live = (s: Seg) => s.at < end - EPS && segLen(s) > EPS;
   return tl.audio.some((a) => !isSilent(a.gainDb, a.muted) && a.segs.some(live));
