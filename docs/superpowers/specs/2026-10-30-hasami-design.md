@@ -178,6 +178,19 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 | **Export + save raw** | `[CLIPPED] <name>.<ext>` beside the original | Moved into a `Raw\` folder next to the original (created if missing) |
 | **Export audio** | `[CLIPPED] <name>.mp3` beside the original (*my call on the name*) | Untouched. The editor stays open |
 
+- **Discord-safe H.264 (Dang's choice, 2026-11-03; supersedes "same video codec" below):** both video exports always encode **H.264** (AMF when available, otherwise libx264) with AAC audio in **`.mp4`**. Resolution and frame rate still match the source.
+  - HEVC, AV1 or VP9 sources didn't play on Discord.
+  - *My calls:*
+    - The bitrate is the source's average video bitrate. It's ×1.3 when the source is HEVC, AV1 or VP9, so quality holds.
+    - `.mov`/`.mkv`/`.webm` sources export as `.mp4`.
+- **Black-border auto-crop (Dang's choice, 2026-11-03):** some OBS recordings hold the game picture in only part of the frame, with black around it.
+  - On open, Hasami detects a fixed black border (ffmpeg `cropdetect` sampled across the clip; only a border that is the same throughout counts).
+  - When one is found, the top bar shows **"BORDER REMOVED"** with a toggle to keep the border instead.
+  - Video exports crop it off and scale the picture back up to the source's resolution, so it fills the frame. The 20 MB copy inherits this, since it's made from the `[CLIPPED]` file.
+  - *My calls:*
+    - It's on by default whenever a border is found.
+    - Right-click Compress doesn't crop.
+    - The editor preview shows the cropped picture while cropping is on.
 - **"Identical to source" (Dang's choice) applies to both video exports:**
   - re-encode with the **same video codec, resolution, and frame rate** at about the **source's average video bitrate**, for frame-accurate cuts with no visible loss;
   - use the hardware encoder when available (AMF on this machine; NVENC or QSV elsewhere), with software fallback;
