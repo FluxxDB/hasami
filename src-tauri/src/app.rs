@@ -56,6 +56,7 @@ const THUMBS_FAILED: &str = "Couldn't make the timeline pictures for this clip."
 const PROXY_FAILED: &str = "Couldn't prepare a preview of this clip.";
 const EXPORT_WONT_START: &str = "Couldn't start the export.";
 const NEXT_FAILED: &str = "Couldn't look for the next video in this folder.";
+const PREV_FAILED: &str = "Couldn't look for the previous video in this folder.";
 const DISCARD_FAILED: &str = "Couldn't move this clip to the Recycle Bin.";
 const DISCARD_WONT_WAIT: &str = "Couldn't set this clip aside for the Recycle Bin.";
 const COMMAND_FAILED: &str = "Something went wrong.";
@@ -440,7 +441,7 @@ async fn editor_adjacent_file(
         adjacent_video(Path::new(&path), modified_ms, newer).map(|found| found.map(|p| p.display().to_string())).map_err(
             |e| {
                 eprintln!("hasami: could not look for the neighbouring video of {path}: {e}");
-                NEXT_FAILED.to_owned()
+                if newer { NEXT_FAILED } else { PREV_FAILED }.to_owned()
             },
         )
     })

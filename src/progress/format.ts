@@ -1,3 +1,5 @@
+import type { Kind } from './state';
+
 /** Decimal (1000-based) size, e.g. "412 MB", "19.4 MB". */
 export function formatBytes(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -47,4 +49,9 @@ export function progressLine(p: ProgressInfo): string {
   parts.push(formatPercent(p.fraction));
   if (p.etaS !== null) parts.push(`about ${formatEta(p.etaS)} left`);
   return parts.join(' · ');
+}
+
+/** The status line once a job is done: a compressed copy lands in Videos, not beside the original. */
+export function doneLine(kind: Kind): string {
+  return kind === 'compress' ? 'Saved to Videos' : 'Done';
 }

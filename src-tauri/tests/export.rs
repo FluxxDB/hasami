@@ -572,6 +572,83 @@ fn crop_of_another_aspect_is_cut_out_unstretched() {
 }
 
 #[test]
+fn crop_gain_and_20mb_copy_together_apply_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let videos = tempfile::tempdir().unwrap();
+    let input = common::fixture_big_h264(dir.path(), 5);
+    let paths = FfmpegPaths::resolve().unwrap();
+    // Measured now: Save raw moves the original into Raw\.
+    let source_db = common::mean_volume_db(&input, 0);
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw,
+        fit_20mb: true,
+        duration_s: 5.0,
+        video: vec![VideoPiece { src_start: 0.0, src_end: 5.0 }],
+        audio: vec![AudioTrackRequest {
+            index: 0,
+            gain_db: 0.0,
+            pieces: vec![AudioPiece { at: 0.0, src_start: 0.0, src_end: 5.0 }],
+        }],
+        master_db: -6.0,
+        // A 4:3 area of the 16:9 frame: kept at its own size.
+        crop: Some(Crop { x: 240, y: 0, w: 1440, h: 1080 }),
+    };
+
+    let (result, passes) = run_export_into(&req, videos.path());
+    let output = done(result);
+
+    let clipped = probe(&paths, &output).unwrap();
+    let v = clipped.video.as_ref().unwrap();
+    assert_eq!((v.width, v.height), (1440, 1080), "the [CLIPPED] file is the crop's size");
+    assert!(fs::metadata(&output).unwrap().len() > 20_000_000, "the copy should have to be encoded");
+    let clipped_db = common::mean_volume_db(&output, 0);
+    assert!((source_db - 6.0 - clipped_db).abs() <= 1.0, "source {source_db} dB, [CLIPPED] {clipped_db} dB");
+
+    // The copy is made from the [CLIPPED] file: its aspect, and its level, with nothing applied twice.
+    let copy = videos.path().join("[20MB] big_h264.mp4");
+    assert_20mb_copy(&paths, &copy, 5.0, 1);
+    let small = probe(&paths, &copy).unwrap();
+    let sv = small.video.as_ref().unwrap();
+    let aspect = f64::from(sv.width) / f64::from(sv.height);
+    assert!((aspect / (4.0 / 3.0) - 1.0).abs() <= 0.01, "copy is {}x{}", sv.width, sv.height);
+    let copy_db = common::mean_volume_db(&copy, 0);
+    assert!((copy_db - clipped_db).abs() <= 1.0, "[CLIPPED] {clipped_db} dB, copy {copy_db} dB");
+    assert_three_passes(&passes);
+}
+
+#[test]
+fn superwide_source_exports_at_its_own_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_superwide(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw,
+        fit_20mb: false,
+        duration_s: 1.5,
+        video: vec![VideoPiece { src_start: 0.5, src_end: 2.0 }],
+        audio: vec![AudioTrackRequest {
+            index: 0,
+            gain_db: 0.0,
+            pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 2.0 }],
+        }],
+        master_db: 0.0,
+        crop: None,
+    };
+
+    let output = done(run_export(&req));
+
+    let info = probe(&paths, &output).unwrap();
+    let video = info.video.as_ref().unwrap();
+    assert_eq!(video.codec, "h264");
+    assert_eq!((video.width, video.height), (5120, 1440));
+    assert!((info.duration_s - 1.5).abs() < 0.1, "duration was {}", info.duration_s);
+}
+
+#[test]
 fn missing_source_is_plain() {
     let dir = tempfile::tempdir().unwrap();
     let input = clip_in(dir.path());

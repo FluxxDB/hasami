@@ -11,6 +11,9 @@
 //!   A failed copy never fails the export: the outcome is still `Done`, with a note saying why.
 //! - **Export audio** mixes the kept audio into one `.mp3`; the original is untouched.
 //!
+//! A video export uses AMD's hardware H.264 encoder when it works here and the picture isn't too
+//! big for it; if a hardware render fails anyway, it is done once more with libx264.
+//!
 //! As with every job, each result is written to a hidden temp file, verified, and only then given
 //! its name; the original is touched last. On any error or cancel the temp file is deleted.
 
@@ -23,7 +26,8 @@ use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, SIZE_LIMIT_BYTES};
 use crate::editor::media::Crop;
 use crate::editor::request::{
-    build_graph, encoder_available, export_bitrate, h264_encoder, ExportMode, ExportRequest, Graph, VideoEncoder,
+    build_graph, encoder_available, export_bitrate, h264_encoder, output_size, software_h264, ExportMode,
+    ExportRequest, Graph, VideoEncoder,
 };
 use crate::fsops::{
     clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir,
@@ -72,11 +76,29 @@ pub fn export_in(
     export_work(paths, req, &videos, cancel, on_progress, &std::env::temp_dir())
 }
 
+/// Picks the video encoder for an export at a bitrate (bits/s) and output size (width, height).
+type EncoderFn<'a> = &'a dyn Fn(u64, (u32, u32)) -> VideoEncoder;
+
 /// [`export`] with the Videos folder lookup and the parent of the copy's pass-log folder given,
 /// so tests can check that it is cleaned up.
 fn export_work(
     paths: &FfmpegPaths,
     req: &ExportRequest,
+    videos_dir: VideosDirFn,
+    cancel: &CancelToken,
+    on_progress: &mut dyn FnMut(JobProgress),
+    work_root: &Path,
+) -> Result<JobOutcome, JobError> {
+    // H.264 on AMD hardware when it works here and the picture isn't too big for it.
+    let pick = |bitrate, size| h264_encoder(bitrate, size, &|name| encoder_available(paths, name));
+    export_with(paths, req, &pick, videos_dir, cancel, on_progress, work_root)
+}
+
+/// [`export_work`] with the encoder choice given, so tests can make the first render fail.
+fn export_with(
+    paths: &FfmpegPaths,
+    req: &ExportRequest,
+    pick_encoder: EncoderFn,
     videos_dir: VideosDirFn,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
@@ -108,7 +130,7 @@ fn export_work(
     // Deleted however this ends (a committed temp is already gone), unless a failed commit
     // left the only copy of the result there.
     let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
-    let job = Job { paths, req, info: &info, graph: &graph, render, temp: temp.path(), passes };
+    let job = Job { paths, req, info: &info, graph: &graph, render, temp: temp.path(), passes, pick_encoder };
     let result = job.run(&final_path, cancel, on_progress);
     if result.as_ref().is_err_and(JobError::keeps_new_file) {
         temp.keep();
@@ -206,6 +228,7 @@ struct Job<'a> {
     temp: &'a Path,
     /// Passes in the whole job; the render is always pass 1.
     passes: u8,
+    pick_encoder: EncoderFn<'a>,
 }
 
 impl Job<'_> {
@@ -218,16 +241,25 @@ impl Job<'_> {
         on_progress: &mut dyn FnMut(JobProgress),
     ) -> Result<u64, JobError> {
         let input = self.req.input.as_path();
-        let args = match self.render {
-            Render::H264 => h264_args(input, self.graph, &self.encoder(), self.temp),
-            Render::Mp3 => mp3_args(input, self.graph, self.temp),
+        let size = match self.render {
+            Render::Mp3 => self.attempt(&mp3_args(input, self.graph, self.temp), cancel, on_progress)?,
+            Render::H264 => {
+                let bitrate = export_bitrate(self.info);
+                let source_size = self.info.video.as_ref().map_or((0, 0), |v| (v.width, v.height));
+                let first = (self.pick_encoder)(bitrate, output_size(self.req.crop, source_size));
+                let software = software_h264(bitrate);
+                match self.attempt(&h264_args(input, self.graph, &first, self.temp), cancel, on_progress) {
+                    // Nothing is committed yet: a failed hardware render is done once more in
+                    // software, from a clean temp file.
+                    Err(e) if first.codec != software.codec && !matches!(e, JobError::Cancelled) => {
+                        eprintln!("hasami: {} export failed, retrying with {}: {e}", first.codec, software.codec);
+                        let _ = fs::remove_file(self.temp);
+                        self.attempt(&h264_args(input, self.graph, &software, self.temp), cancel, on_progress)?
+                    }
+                    other => other?,
+                }
+            }
         };
-        run_ffmpeg(self.paths, &args, self.req.duration_s, cancel, &mut |fraction| {
-            on_progress(JobProgress { pass: 1, passes: self.passes, fraction })
-        })?;
-
-        let verified =
-            verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
 
         // Last chance to back out; once the commit starts it runs to completion or rolls back.
         if cancel.is_cancelled() {
@@ -243,12 +275,22 @@ impl Job<'_> {
             }
             ExportMode::Audio => commit_new(self.temp, final_path)?,
         }
-        Ok(verified.size_bytes)
+        Ok(size)
     }
 
-    /// H.264 at [`export_bitrate`], on AMD hardware when it works here.
-    fn encoder(&self) -> VideoEncoder {
-        h264_encoder(export_bitrate(self.info), &|name| encoder_available(self.paths, name))
+    /// Run ffmpeg with `args` into the temp file (as pass 1) and verify the result. Returns its size.
+    fn attempt(
+        &self,
+        args: &[OsString],
+        cancel: &CancelToken,
+        on_progress: &mut dyn FnMut(JobProgress),
+    ) -> Result<u64, JobError> {
+        run_ffmpeg(self.paths, args, self.req.duration_s, cancel, &mut |fraction| {
+            on_progress(JobProgress { pass: 1, passes: self.passes, fraction })
+        })?;
+        let verified =
+            verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
+        Ok(verified.size_bytes)
     }
 }
 
@@ -563,6 +605,49 @@ mod tests {
         assert_eq!(output, dir.path().join("[CLIPPED] clip.mp3"));
         assert!(passes.iter().all(|&of| of == 1), "{passes:?}");
         assert_eq!(names(dir.path()), ["[CLIPPED] clip.mp3", "clip.mkv"]);
+    }
+
+    /// Whether `file` was encoded by libx264, which signs its stream.
+    fn made_by_x264(file: &Path) -> bool {
+        fs::read(file).unwrap().windows(11).any(|w| w == b"x264 - core")
+    }
+
+    #[test]
+    fn a_failed_hardware_render_is_done_again_in_software() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        let req = ExportRequest { fit_20mb: false, ..fit_request(&input) };
+        let lookup = || -> Result<PathBuf, FsError> { panic!("no 20 MB copy was asked for") };
+        // A hardware encoder this ffmpeg doesn't have fails the first render outright.
+        let broken = |_: u64, _: (u32, u32)| VideoEncoder { codec: "hasami_no_such_encoder", args: Vec::new() };
+
+        let outcome = export_with(&paths, &req, &broken, &lookup, &CancelToken::new(), &mut |_| {}, dir.path());
+        let Ok(JobOutcome::Done { output, note: None, .. }) = outcome else { panic!("{outcome:?}") };
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
+        assert!(made_by_x264(&output), "the retry should be libx264");
+        let info = probe(&paths, &output).unwrap();
+        assert_eq!(info.video.as_ref().unwrap().codec, "h264");
+        assert!((info.duration_s - 1.5).abs() < 0.1, "duration was {}", info.duration_s);
+        assert_eq!(names(dir.path()), ["Raw", "[CLIPPED] clip.mp4"], "no temp file left behind");
+    }
+
+    #[test]
+    fn a_failed_software_render_is_not_retried() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        let req = ExportRequest { fit_20mb: false, ..fit_request(&input) };
+        let lookup = || -> Result<PathBuf, FsError> { panic!("no 20 MB copy was asked for") };
+        // libx264 with a bad preset fails; a retry, with the usual libx264 settings, would succeed.
+        let broken = |_: u64, _: (u32, u32)| VideoEncoder {
+            codec: "libx264",
+            args: vec!["-preset".to_owned(), "no_such_preset".to_owned()],
+        };
+
+        let outcome = export_with(&paths, &req, &broken, &lookup, &CancelToken::new(), &mut |_| {}, dir.path());
+        assert!(matches!(outcome, Err(JobError::Encode { .. })), "{outcome:?}");
+        assert_eq!(names(dir.path()), ["clip.mkv"], "only the untouched input may remain");
     }
 
     #[test]

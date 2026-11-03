@@ -93,6 +93,17 @@ const LOOK_FAILED: Record<Direction, string> = {
 /** The Rust commands answer failures with a plain-language string. */
 const plain = (err: unknown, fallback: string): string => (typeof err === 'string' && err ? err : fallback);
 
+// How a video export's bitrate is chosen, mirrored from `export_bitrate` and
+// `source_video_bitrate` in src-tauri/src/editor/request.rs (keep them in step) for the estimate.
+/** Source codecs that get more bitrate when re-encoded as H.264 (request.rs `DENSER_CODECS`). */
+const DENSER_CODECS = ['hevc', 'av1', 'vp9'];
+/** How much more (request.rs `DENSER_CODEC_FACTOR`). */
+const DENSER_CODEC_FACTOR = 1.3;
+/** Assumed per source audio track (request.rs `AUDIO_TRACK_BPS`); also the export's one AAC track. */
+const AUDIO_TRACK_BPS = 192_000;
+/** The lowest video bitrate an export uses (request.rs `source_video_bitrate`). */
+const MIN_VIDEO_BPS = 1_000_000;
+
 /** Keyboard commands that change the timeline, refused while the clip is locked. */
 const EDITS = new Set<Command>(['cut', 'delete', 'undo', 'redo']);
 /** How many clips on their way out the folder walk passes over before it gives up. */
@@ -310,11 +321,20 @@ export class EditorStore {
     return border && !this.keepBorder ? border : null;
   }
 
-  /** Quick export at source quality: the source's average rate × the kept video length. */
+  /**
+   * Quick export at source quality, × the kept video length: the source's video rate (its average
+   * rate less 192 kbit/s per audio track), ×1.3 for HEVC, AV1 and VP9 as the export encodes it,
+   * plus one 192 kbit/s AAC track when any audio is heard. A crop doesn't change it: the rate is
+   * the source's whatever the picture size.
+   */
   get estimateBytes(): number {
     const m = this.media;
     if (!m || !(m.duration_s > 0)) return 0;
-    return (m.size_bytes / m.duration_s) * videoEnd(this.timeline);
+    const sourceBps = (m.size_bytes * 8) / m.duration_s;
+    const videoBps = Math.max(MIN_VIDEO_BPS, sourceBps - AUDIO_TRACK_BPS * m.tracks.length);
+    const factor = DENSER_CODECS.includes(m.video?.codec ?? '') ? DENSER_CODEC_FACTOR : 1;
+    const audioBps = hasAudibleAudio(this.timeline) ? AUDIO_TRACK_BPS : 0;
+    return ((videoBps * factor + audioBps) / 8) * videoEnd(this.timeline);
   }
 
   /** Starts a fresh edit of `media`: one segment per track, nothing selected, no undo. */
@@ -547,7 +567,9 @@ export class EditorStore {
       case 'ExportFailed':
         this.finish(e.id);
         x.failed.push({ id: e.id, input: e.input, message: e.message, originalIntact: e.original_intact });
-        // Its original stayed: Prev / Next may reach it again.
+        // Its original usually stayed, and Prev / Next may reach it again; but not when it was
+        // recycled and the new file then couldn't take its name (spec 8.3).
+        if (!e.original_intact) this.markGone(e.input);
         this.refreshAhead();
         return;
       case 'ProxyProgress':

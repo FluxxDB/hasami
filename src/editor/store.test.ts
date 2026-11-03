@@ -76,16 +76,50 @@ describe('EditorStore', () => {
     expect(s.thumbs).toEqual([]);
   });
 
-  it('estimates the quick export size from the source rate and the kept video', () => {
-    const s = new EditorStore();
-    s.load(media());
-    // Keep 0..44 s: cut at 44 and delete the tail.
+  /** Keep 0..44 s of the loaded clip: cut at 44 and delete the tail. */
+  const keep44 = (s: EditorStore) => {
     const cut = cutAt(s.timeline, 44);
     s.edit(deleteSegs(cut, [cut.video[1].id], true));
     expect(videoEnd(s.timeline)).toBeCloseTo(44, 9);
-    // 412e6 / 90 × 44 = 201.42e6 ("≈ 201.4 MB").
-    expect(Math.abs(s.estimateBytes - (412e6 / 90) * 44)).toBeLessThan(1e3);
-    expect(s.estimateBytes).toBeCloseTo(201.4e6, -5);
+  };
+
+  it('estimates the quick export size as the export encodes it: HEVC gets 1.3x', () => {
+    const s = new EditorStore();
+    s.load(media());
+    keep44(s);
+    // 412e6 B over 90 s is 36.62 Mbit/s; less 3 audio tracks at 192k is 36.05 Mbit/s of video,
+    // ×1.3 is 46.86, plus the export's one 192k AAC track is 47.05 Mbit/s: × 44 s ≈ 258.8 MB.
+    const bps = ((412e6 * 8) / 90 - 3 * 192e3) * 1.3 + 192e3;
+    expect(Math.abs(s.estimateBytes - (bps / 8) * 44)).toBeLessThan(1e3);
+    expect(s.estimateBytes).toBeCloseTo(258.8e6, -5);
+  });
+
+  it('estimates H.264 at the source rate, with no audio when none is heard', () => {
+    const s = new EditorStore();
+    s.load(media({ video: { width: 1920, height: 1080, fps: 60, codec: 'h264' } }));
+    keep44(s);
+    const video = (412e6 * 8) / 90 - 3 * 192e3;
+    expect(Math.abs(s.estimateBytes - ((video + 192e3) / 8) * 44)).toBeLessThan(1e3);
+    for (const a of s.timeline.audio) s.edit(setMuted(s.timeline, a.index, true));
+    expect(Math.abs(s.estimateBytes - (video / 8) * 44)).toBeLessThan(1e3);
+  });
+
+  it('estimates the same size whatever the crop', () => {
+    const s = new EditorStore();
+    s.load(media({ border: { x: 0, y: 0, w: 1440, h: 810 } }));
+    keep44(s);
+    expect(s.crop).not.toBeNull();
+    const cropped = s.estimateBytes;
+    s.keepBorder = true;
+    expect(s.crop).toBeNull();
+    expect(s.estimateBytes).toBe(cropped);
+  });
+
+  it('estimates at least 1 Mbit/s of video, as the export encodes', () => {
+    const s = new EditorStore();
+    // 2 MB over 90 s is 0.18 Mbit/s, under the 3 audio tracks' share.
+    s.load(media({ size_bytes: 2e6, video: { width: 1920, height: 1080, fps: 60, codec: 'h264' } }));
+    expect(Math.abs(s.estimateBytes - ((1e6 + 192e3) / 8) * 90)).toBeLessThan(1e3);
   });
 
   it('estimates nothing before a clip is loaded', () => {
@@ -1080,6 +1114,20 @@ describe('EditorStore queue and exports', () => {
     await settle();
     expect(s.canNext).toBe(true);
     expect(s.nextTarget?.path).toBe(D);
+  });
+
+  it('a clip whose Quick export failed after recycling it stays passed over', async () => {
+    folder();
+    const s = await queued(FILES);
+    await s.exportClip('quick'); // a: on its way to the Recycle Bin
+    await s.nextVideo();
+    expect(s.canPrev).toBe(false);
+    // Recycled, but the new file then couldn't take its name: the original is no longer there.
+    folder(FILES[0]);
+    const message = 'Saved the new file as "a.mp4.hasami-tmp", but couldn\'t rename it.';
+    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message, original_intact: false });
+    await settle();
+    expect(s.canPrev).toBe(false);
   });
 
   it("a neighbour kept by a deferred discard is back: the open clip's look-ahead runs again", async () => {
