@@ -7,11 +7,11 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{hidden_command, FfmpegPaths};
 
@@ -21,8 +21,32 @@ const STDERR_TAIL_LINES: usize = 20;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Shared flag the UI sets to stop a running encode. Cloning shares the same flag.
+///
+/// It also counts the ffmpeg runs started under it ([`start_run`](Self::start_run)), so whoever
+/// cancels can wait until every one of them has let go of its files
+/// ([`wait_for_runs`](Self::wait_for_runs)).
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<TokenState>);
+
+#[derive(Debug, Default)]
+struct TokenState {
+    cancelled: AtomicBool,
+    runs: AtomicUsize,
+}
+
+/// One ffmpeg run under a [`CancelToken`], from [`CancelToken::start_run`]. Hold it until the
+/// child process has exited and been reaped; dropping it ends the run.
+#[derive(Debug)]
+pub struct RunGuard(Arc<TokenState>);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.0.runs.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How often [`CancelToken::wait_for_runs`] looks again.
+const RUNS_POLL: Duration = Duration::from_millis(5);
 
 impl CancelToken {
     pub fn new() -> Self {
@@ -31,11 +55,36 @@ impl CancelToken {
 
     /// Request cancellation. Safe to call from any thread, any number of times.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.cancelled.store(true, Ordering::SeqCst);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Call before spawning ffmpeg: `None` once cancelled (don't spawn it), otherwise the run's
+    /// guard. The run is counted before the cancel is checked, so one starting just as the token
+    /// is cancelled either stops here or is seen by [`wait_for_runs`](Self::wait_for_runs).
+    pub fn start_run(&self) -> Option<RunGuard> {
+        self.0.runs.fetch_add(1, Ordering::SeqCst);
+        let guard = RunGuard(Arc::clone(&self.0));
+        // Dropping the guard uncounts the run.
+        (!self.is_cancelled()).then_some(guard)
+    }
+
+    /// Wait until no run started under this token is still going, or until `deadline`. True when
+    /// none is. Cancel first, or a long run keeps it waiting to the deadline.
+    pub fn wait_for_runs(&self, deadline: Instant) -> bool {
+        loop {
+            if self.0.runs.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            thread::sleep(RUNS_POLL.min(deadline - now));
+        }
     }
 }
 
@@ -88,6 +137,8 @@ pub fn run_ffmpeg(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(f64),
 ) -> Result<(), RunError> {
+    // Declared first, so it ends after the child is reaped (locals drop in reverse order).
+    let _run = cancel.start_run().ok_or(RunError::Cancelled)?;
     let mut child = hidden_command(&paths.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"])
         .args(args)

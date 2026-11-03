@@ -119,9 +119,8 @@ fn wait_or_cancel(child: &mut Child, cancel: &CancelToken) -> Result<ExitStatus,
 /// Run ffmpeg with `args` to completion and return its stderr; a failure status becomes an error.
 /// Stops (killing ffmpeg) when `cancel` is set.
 fn run_checked(paths: &FfmpegPaths, what: &str, args: &[OsString], cancel: &CancelToken) -> Result<Vec<u8>, JobError> {
-    if cancel.is_cancelled() {
-        return Err(JobError::Cancelled);
-    }
+    // Held until ffmpeg is reaped, so closing the session waits for it to let go of its files.
+    let _run = cancel.start_run().ok_or(JobError::Cancelled)?;
     let mut child = hidden_command(&paths.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-nostats", "-y"])
         .args(args)
@@ -443,9 +442,8 @@ fn peaks_from_reader(mut reader: impl Read, rate: f64) -> io::Result<Vec<f32>> {
 /// Waveform of `track_file` (an extracted track), decoded to mono 8 kHz through a pipe and
 /// windowed as it streams in. Stops (killing ffmpeg) when `cancel` is set.
 pub fn peaks(paths: &FfmpegPaths, track_file: &Path, duration_s: f64, cancel: &CancelToken) -> Result<Peaks, JobError> {
-    if cancel.is_cancelled() {
-        return Err(JobError::Cancelled);
-    }
+    // Held until ffmpeg is reaped (see `run_checked`).
+    let _run = cancel.start_run().ok_or(JobError::Cancelled)?;
     let rate = peaks_rate(duration_s);
     let mut child = hidden_command(&paths.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
