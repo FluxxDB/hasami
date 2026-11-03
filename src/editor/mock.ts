@@ -12,6 +12,10 @@
 // clip's exports fail (and a Discard waiting on one keeps the clip). `?mock=note` is the single
 // clip whose video exports with 20 MB copy on finish with a note: the copy couldn't be made.
 //
+// The single clip was recorded with a black border, like an OBS canvas bigger than the game: its
+// picture is 1440×810 in the middle of the 1920×1080 frame (its thumbnails show the border), so
+// the editor opens it with "Border removed". Every other clip fills its frame.
+//
 // The clips sit in a fake folder of five. The queue's three (the 1st, 3rd and 4th newest) open
 // oldest first, so Next walks them forward in time and Prev carries on into the oldest. The single
 // clip is the 2nd newest: Next goes to the newest, Prev to the three older ones.
@@ -41,6 +45,9 @@ const EXPORT_MS = 4000;
 const DURATION = 90;
 const PEAK_RATE = 50;
 const THUMB_EVERY = 2;
+/** The bordered clip's picture, in the middle of its 1920×1080 frame. */
+const BORDER = { x: 240, y: 135, w: 1440, h: 810 };
+const BORDERED = new Set([PATH]);
 
 const media: EditorMedia = {
   session: 1,
@@ -51,6 +58,7 @@ const media: EditorMedia = {
   bit_rate: 36_600_000,
   modified_ms: MODIFIED.get(PATH)!,
   video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
+  border: null,
   tracks: [
     { index: 0, empty: false, file: 'C:\\Temp\\hasami-editor-1\\a0.m4a' },
     { index: 1, empty: true, file: null },
@@ -93,23 +101,28 @@ const SCENES = [
   ['#1f3a4a', '#253045', '#191622'],
 ];
 
-function thumbUri(i: number, rnd: () => number): string {
+/** A 160×90 frame; with `border`, the scene is drawn inside it, scaled down, with black around. */
+function thumbUri(i: number, rnd: () => number, border: boolean): string {
   const [sky, band, ground] = SCENES[Math.floor(rnd() * SCENES.length)];
   const h = 44 + Math.round(rnd() * 12);
+  const k = 160 / 1920;
+  const inner = border ? `translate(${BORDER.x * k} ${BORDER.y * k}) scale(${BORDER.w / 1920})` : '';
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90">` +
+    `<rect width="160" height="90" fill="#000"/>` +
+    `<g transform="${inner}">` +
     `<rect width="160" height="90" fill="${sky}"/>` +
     `<rect y="${h - 10}" width="160" height="12" fill="${band}"/>` +
     `<path d="M0 ${h}L${40 + (i % 5) * 12} ${h - 6}L160 ${h + 4}V90H0Z" fill="${ground}"/>` +
     `<circle cx="${100 + (i % 3) * 14}" cy="24" r="9" fill="#d9a46a" fill-opacity=".45"/>` +
-    `</svg>`;
+    `</g></svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
-function thumbs(): Thumb[] {
+function thumbs(border: boolean): Thumb[] {
   const rnd = rng(11);
   const out: Thumb[] = [];
-  for (let t = 0, i = 0; t < DURATION; t += THUMB_EVERY, i++) out.push({ t, file: thumbUri(i, rnd) });
+  for (let t = 0, i = 0; t < DURATION; t += THUMB_EVERY, i++) out.push({ t, file: thumbUri(i, rnd, border) });
   return out;
 }
 
@@ -133,6 +146,8 @@ function proxy(session: number): Promise<string> {
 }
 
 let sessions = 0;
+/** The sessions opened on the bordered clip. */
+const borderedSessions = new Set<number>();
 let jobs = 0;
 /** The job queue runs one export at a time. */
 let lastExport: Promise<void> = Promise.resolve();
@@ -171,10 +186,14 @@ function runExport(id: number, input: string, mode: string, fit20: boolean): Pro
 
 export const mockApi: EditorApi = {
   files: () => later(QUEUE),
-  open: (path) =>
-    later({ ...media, session: ++sessions, path, file_name: fileName(path), modified_ms: MODIFIED.get(path) ?? 0 }),
+  open: (path) => {
+    const session = ++sessions;
+    const border = BORDERED.has(path) ? BORDER : null;
+    if (border) borderedSessions.add(session);
+    return later({ ...media, session, path, file_name: fileName(path), modified_ms: MODIFIED.get(path) ?? 0, border });
+  },
   peaks: (_session, index) => later(peaksFor(index), 120),
-  thumbs: () => later(thumbs(), 80),
+  thumbs: (session) => later(thumbs(borderedSessions.has(session)), 80),
   proxy,
   exportClip: (request) => {
     console.info('[mock] editor_export', request);

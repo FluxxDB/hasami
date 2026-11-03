@@ -699,6 +699,15 @@ describe('master volume', () => {
     expect(toExportRequest(tl2, 1, 'x.mp4', 'quick', false).master_db).toBe(0);
   });
 
+  it('toExportRequest carries the crop for video exports only', () => {
+    const crop = { x: 240, y: 135, w: 1440, h: 810 };
+    expect(toExportRequest(tl2, 1, 'x.mp4', 'quick', false, crop).crop).toEqual(crop);
+    expect(toExportRequest(tl2, 1, 'x.mp4', 'save_raw', true, crop).crop).toEqual(crop);
+    // Audio has no picture to crop.
+    expect(toExportRequest(tl2, 1, 'x.mp4', 'audio', false, crop).crop).toBeNull();
+    expect(toExportRequest(tl2, 1, 'x.mp4', 'quick', false).crop).toBeNull();
+  });
+
   it('master at -inf exports no audio in any mode and counts as silent', () => {
     const off = setMaster(tl2, MIN_GAIN_DB);
     expect(toExportRequest(off, 1, 'x.mp4', 'quick', false).audio).toEqual([]);

@@ -33,6 +33,7 @@ import {
   hasAudibleAudio,
   toExportRequest,
   videoEnd,
+  type Crop,
   type ExportRequest,
   type Timeline,
 } from './timeline';
@@ -138,6 +139,11 @@ export class EditorStore {
    * it stays on across clips until turned off (spec 5.4).
    */
   dim = $state(false);
+  /**
+   * Keep border: exports (and the preview) keep the black border found on open instead of cropping
+   * it off (spec 5.7). Off for each clip as it opens; not an undo step.
+   */
+  keepBorder = $state(false);
 
   peaks = $state.raw<Record<number, Peaks>>({});
   thumbs = $state.raw<Thumb[]>([]);
@@ -298,6 +304,12 @@ export class EditorStore {
     return this.log.map((entry) => this.resultOf(entry));
   }
 
+  /** The picture video exports keep, and the viewer shows: the border's inside, unless Keep border is on. */
+  get crop(): Crop | null {
+    const border = this.media?.border ?? null;
+    return border && !this.keepBorder ? border : null;
+  }
+
   /** Quick export at source quality: the source's average rate × the kept video length. */
   get estimateBytes(): number {
     const m = this.media;
@@ -309,6 +321,7 @@ export class EditorStore {
   load(media: EditorMedia): void {
     const audio = media.tracks.filter((t) => !t.empty).map((t) => t.index);
     this.media = media;
+    this.keepBorder = false;
     this.history = initHistory(createTimeline(media.duration_s, media.video?.fps ?? DEFAULT_FPS, audio));
     this.endLive();
     this.selection = [];
@@ -376,7 +389,7 @@ export class EditorStore {
     this.commitLive();
     const fit20 = mode !== 'audio' && this.fit20;
     const timeline = this.history.present;
-    const request = toExportRequest(timeline, m.session, m.path, mode, fit20);
+    const request = toExportRequest(timeline, m.session, m.path, mode, fit20, this.crop);
     const visit = this.visit;
     this.busy = true;
     this.handing = mode;

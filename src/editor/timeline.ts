@@ -436,6 +436,14 @@ export function snap(t: number, candidates: number[], thresholdS: number): numbe
 
 // --- export --------------------------------------------------------------------------------
 
+/** A rectangle of the source picture, in its pixels: the black border found on open is what lies outside it. */
+export interface Crop {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ExportRequest {
   session: number;
   input: string;
@@ -445,6 +453,7 @@ export interface ExportRequest {
   video: { src_start: number; src_end: number }[];
   audio: { index: number; gain_db: number; pieces: { at: number; src_start: number; src_end: number }[] }[];
   master_db: number; // never -60 or lower: at −∞ `audio` is empty and this is 0
+  crop: Crop | null; // the picture to keep (video exports scale it back up to the source size); null keeps it all
 }
 
 export function toExportRequest(
@@ -453,6 +462,7 @@ export function toExportRequest(
   input: string,
   mode: ExportRequest['mode'],
   fit20: boolean,
+  crop: Crop | null = null,
 ): ExportRequest {
   const end = videoEnd(tl);
   const audio: ExportRequest['audio'] = [];
@@ -475,6 +485,8 @@ export function toExportRequest(
     audio,
     // At −∞ no audio is sent, so the gain is moot; 0 keeps -60 or lower from reaching Rust.
     master_db: masterOff(tl) ? 0 : tl.masterDb,
+    // Export audio has no picture to crop.
+    crop: mode === 'audio' ? null : crop,
   };
 }
 

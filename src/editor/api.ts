@@ -6,7 +6,7 @@
 // mock.ts instead, so the window can be built and looked at in a plain browser.
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { ExportRequest } from './timeline';
+import type { Crop, ExportRequest } from './timeline';
 
 export const EDITOR_EVENT = 'hasami://editor';
 
@@ -20,6 +20,8 @@ export interface EditorMedia {
   /** The file's modified time (ms since the Unix epoch), read on open; Prev / Next find their neighbours from it. */
   modified_ms: number;
   video: { width: number; height: number; fps: number; codec: string } | null;
+  /** The game picture inside a fixed black border, found on open (spec 5.7); null when there's no border. */
+  border: Crop | null;
   tracks: { index: number; empty: boolean; file: string | null }[];
 }
 

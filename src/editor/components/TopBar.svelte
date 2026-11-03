@@ -54,6 +54,18 @@
     return `${what} ${r.state === 'queued' ? 'queued' : 'running'}`;
   });
 
+  // A black border found on open (spec 5.7): the meta line says it's cropped off (or kept), and Keep
+  // border sits under the 20 MB copy toggle, with the other export settings.
+  const border = $derived(media?.video ? media.border : null);
+  const borderTitle = $derived(
+    border && media?.video
+      ? `A black border was found around the picture: the game fills ${border.w}×${border.h} of the ${media.video.width}×${media.video.height} frame. ` +
+          (store.keepBorder
+            ? 'Video exports keep it.'
+            : `Video exports crop it off and scale the picture back up to ${media.video.width}×${media.video.height}.`)
+      : undefined,
+  );
+
   const pct = (r: Result) => (r.state === 'queued' ? 'Queued' : formatPercent(r.fraction));
 
   // Prev / Next video: always here; where each goes is said in its tooltip. Next is newer, Prev older.
@@ -130,7 +142,12 @@
         <h1 class="fname" title={media.file_name} data-tauri-drag-region>{media.file_name}</h1>
         {#if store.edited}<span class="dot" aria-hidden="true"></span><span class="cap edited">Edited</span>{/if}
       </div>
-      <div class="meta cap" title={metaLine(media)} data-tauri-drag-region>{metaLine(media)}</div>
+      <div class="metarow">
+        {#if border}<span class="note cap" title={borderTitle} data-tauri-drag-region
+            >{store.keepBorder ? 'Border kept' : 'Border removed'}</span
+          >{/if}
+        <div class="meta cap" title={metaLine(media)} data-tauri-drag-region>{metaLine(media)}</div>
+      </div>
     {:else if path}
       <!-- Opening the next clip, or it couldn't be opened (the viewer says why). -->
       <div class="name"><h1 class="fname" title={fileName(path)} data-tauri-drag-region>{fileName(path)}</h1></div>
@@ -179,17 +196,31 @@
       {@render meter(video, VIDEO_LABEL[video.action])}
     {/if}
   {:else}
-    <button
-      type="button"
-      class="toggle cap"
-      role="switch"
-      aria-checked={store.fit20}
-      disabled={!media}
-      title="Video exports also save a copy of 20 MB or less to your Videos folder"
-      onclick={() => (store.fit20 = !store.fit20)}
-    >
-      <span class="switch" class:on={store.fit20} aria-hidden="true"></span>20 MB copy
-    </button>
+    <div class="opts" class:two={!!border}>
+      <button
+        type="button"
+        class="toggle cap"
+        role="switch"
+        aria-checked={store.fit20}
+        disabled={!media}
+        title="Video exports also save a copy of 20 MB or less to your Videos folder"
+        onclick={() => (store.fit20 = !store.fit20)}
+      >
+        <span class="switch" class:on={store.fit20} aria-hidden="true"></span>20 MB copy
+      </button>
+      {#if border}
+        <button
+          type="button"
+          class="toggle cap"
+          role="switch"
+          aria-checked={store.keepBorder}
+          title={borderTitle}
+          onclick={() => (store.keepBorder = !store.keepBorder)}
+        >
+          <span class="switch" class:on={store.keepBorder} aria-hidden="true"></span>Keep border
+        </button>
+      {/if}
+    </div>
     {#if audio && audioBusy}
       <!-- Export audio's own progress, in its place; the clip stays editable meanwhile. -->
       <div class="audio-meter">{@render meter(audio, 'Audio')}</div>
@@ -345,6 +376,24 @@
   .edited {
     color: var(--pebble);
     flex: none;
+  }
+  .metarow {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    line-height: 1.25;
+  }
+  /* The border note leads the meta line, a step brighter: it says the picture is cropped. */
+  .note {
+    flex: none;
+    color: var(--ash);
+    white-space: nowrap;
+    pointer-events: auto;
+  }
+  /* The separator goes with the meta line, so it's cut off with it in a narrow window. */
+  .note + .meta::before {
+    content: '·';
+    margin: 0 0.5em;
   }
   .meta {
     color: var(--pebble);
@@ -518,6 +567,17 @@
     white-space: nowrap;
   }
 
+  /* The export settings: 20 MB copy, and Keep border under it when the clip has a border. */
+  .opts {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+  }
+  .opts.two .toggle {
+    padding: 2px;
+  }
   .toggle {
     display: flex;
     align-items: center;
@@ -660,6 +720,10 @@
     }
     .btn {
       padding: 10px 10px;
+    }
+    /* The border note takes what's left of the meta line (its tooltip still has it all). */
+    .note + .meta {
+      display: none;
     }
     /* Prev and Next become a pair of arrows; their names stay in aria-label and the tooltip. */
     .steps .word {

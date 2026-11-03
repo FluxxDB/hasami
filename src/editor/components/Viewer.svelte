@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../api';
+  import { cropPlacement } from '../display';
   import { formatTimecode, videoSourceAt } from '../playbackModel';
   import type { EditorStore } from '../store.svelte';
   import { videoEnd } from '../timeline';
@@ -27,7 +28,15 @@
   const media = $derived(store.media);
   const tl = $derived(store.timeline);
   const fps = $derived(tl.fps);
-  const aspect = $derived(media?.video ? media.video.width / media.video.height : 16 / 9);
+  // While a black border is cropped off (spec 5.7), the frame takes the shape of the picture inside
+  // it, and the whole picture is placed so only that part shows: the <video> itself is untouched,
+  // so the engine's seeking and the proxy work as ever. (`object-view-box` would be simpler, but
+  // Chromium doesn't apply it to the poster, which stands in until the first frame.)
+  const crop = $derived(media?.video ? store.crop : null);
+  const place = $derived(crop && media?.video ? cropPlacement(crop, media.video) : null);
+  const aspect = $derived(
+    crop ? crop.w / crop.h : media?.video ? media.video.width / media.video.height : 16 / 9,
+  );
 
   // The frame is the largest box of the video's shape that fits; the transport matches its width.
   const frame = $derived.by(() => {
@@ -63,6 +72,10 @@
     <video
       bind:this={video}
       class:none={!media?.video}
+      style:left={place ? `${place.left}%` : undefined}
+      style:top={place ? `${place.top}%` : undefined}
+      style:width={place ? `${place.width}%` : undefined}
+      style:height={place ? `${place.height}%` : undefined}
       poster={poster || undefined}
       muted
       playsinline
@@ -131,11 +144,13 @@
     position: relative;
     flex: none;
     background: var(--black);
+    overflow: hidden; /* the cropped-off border */
   }
   video {
     display: block;
     position: absolute;
-    inset: 0;
+    left: 0;
+    top: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;

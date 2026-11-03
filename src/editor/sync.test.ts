@@ -14,6 +14,7 @@ const media: EditorMedia = {
   bit_rate: null,
   modified_ms: 0,
   video: { width: 1920, height: 1080, fps: 60, codec: 'h264' },
+  border: null,
   tracks: [{ index: 0, empty: false, file: 'a0.m4a' }],
 };
 
