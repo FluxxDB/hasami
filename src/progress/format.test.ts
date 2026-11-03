@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatEta, formatFps, formatPercent, progressLine } from './format';
+import { doneLine, formatBytes, formatEta, formatFps, formatPercent, progressLine } from './format';
 
 describe('formatBytes', () => {
   it('uses decimal units and drops decimals at three digits', () => {
@@ -58,5 +58,13 @@ describe('formatFps', () => {
     expect(formatFps(60)).toBe('60');
     expect(formatFps(23.976)).toBe('23.98');
     expect(formatFps(12.5)).toBe('12.5');
+  });
+});
+
+describe('doneLine', () => {
+  it('says where a compressed copy went', () => {
+    expect(doneLine('compress')).toBe('Saved to Videos');
+    expect(doneLine('convert')).toBe('Done');
+    expect(doneLine('export')).toBe('Done');
   });
 });

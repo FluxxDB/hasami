@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { JobEvent } from '../lib/jobs';
-  import { formatBytes, formatFps, progressLine } from './format';
+  import { doneLine, formatBytes, formatFps, progressLine } from './format';
   import { initialState, reduce, type Kind } from './state';
 
   interface Props {
@@ -136,7 +136,7 @@
       </div>
       <div class="foot cap">
         <span class="status">
-          {#if view.phase === 'done'}Done{:else if view.phase === 'cancelled'}Cancelled{:else if view.phase === 'waiting'}Starting…{:else}{progressLine(
+          {#if view.phase === 'done'}{doneLine(view.kind)}{:else if view.phase === 'cancelled'}Cancelled{:else if view.phase === 'waiting'}Starting…{:else}{progressLine(
               { pass: view.pass, passes: view.passes, fraction: view.fraction, etaS: view.etaS },
             )}{/if}
         </span>
