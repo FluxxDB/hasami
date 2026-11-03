@@ -32,6 +32,7 @@ const media = (over: Partial<EditorMedia> = {}): EditorMedia => ({
   bit_rate: null,
   modified_ms: 1_000,
   video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
+  border: null,
   tracks: [
     { index: 0, empty: false, file: 'a0.m4a' },
     { index: 1, empty: true, file: null },
@@ -1364,6 +1365,67 @@ describe('EditorStore queue and exports', () => {
     // Once it's been kept, it can be trimmed again.
     await s.addFiles([FILES[0]]);
     expect(s.queue.files).toEqual([FILES[0], FILES[1], FILES[0]]);
+  });
+
+  // --- black border ------------------------------------------------------------------------
+
+  const BORDER = { x: 240, y: 135, w: 1440, h: 810 };
+  /** Opens `bordered` with BORDER found around its picture; every other file has none. */
+  const withBorder = (...bordered: string[]) =>
+    vi.mocked(api.open).mockImplementation(async (path) =>
+      media({
+        session: sessionOf(path),
+        path,
+        file_name: path.split('\\').pop()!,
+        modified_ms: modifiedOf(path),
+        border: bordered.includes(path) ? BORDER : null,
+      }),
+    );
+
+  it('a video export crops off the border found on open', async () => {
+    withBorder(FILES[0]);
+    const s = await queued([FILES[0]]);
+    expect(s.keepBorder).toBe(false);
+    expect(s.crop).toEqual(BORDER);
+    await s.exportClip('quick');
+    expect(vi.mocked(api.exportClip).mock.calls[0][0].crop).toEqual(BORDER);
+  });
+
+  it('Keep border sends no crop, and is not an undo step', async () => {
+    withBorder(FILES[0]);
+    const s = await queued([FILES[0]]);
+    const before = s.history;
+    s.keepBorder = true;
+    expect(s.history).toBe(before);
+    expect(s.edited).toBe(false);
+    expect(s.crop).toBeNull();
+    await s.exportClip('save_raw');
+    expect(vi.mocked(api.exportClip).mock.calls[0][0].crop).toBeNull();
+  });
+
+  it('a clip with no border sends no crop', async () => {
+    const s = await queued([FILES[0]]);
+    expect(s.media?.border).toBeNull();
+    expect(s.crop).toBeNull();
+    await s.exportClip('quick');
+    expect(vi.mocked(api.exportClip).mock.calls[0][0].crop).toBeNull();
+  });
+
+  it('Export audio sends no crop, border or not', async () => {
+    withBorder(FILES[0]);
+    const s = await queued([FILES[0]]);
+    await s.exportClip('audio');
+    expect(vi.mocked(api.exportClip).mock.calls[0][0].crop).toBeNull();
+  });
+
+  it('Keep border goes back off on the next clip', async () => {
+    withBorder(FILES[0], FILES[1]);
+    const s = await queued();
+    s.keepBorder = true;
+    await s.nextVideo();
+    expect(s.media?.path).toBe(FILES[1]);
+    expect(s.keepBorder).toBe(false);
+    expect(s.crop).toEqual(BORDER);
   });
 
   // --- Dim, and an export's note -----------------------------------------------------------

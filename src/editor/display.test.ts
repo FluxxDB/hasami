@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRACK_COLORS, fileName, formatClock, formatDb, metaLine, mixHex, trackColor } from './display';
+import { TRACK_COLORS, cropPlacement, fileName, formatClock, formatDb, metaLine, mixHex, trackColor } from './display';
 import type { EditorMedia } from './api';
 
 describe('formatClock', () => {
@@ -47,6 +47,7 @@ describe('metaLine', () => {
     bit_rate: null,
     modified_ms: 0,
     video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
+    border: null,
     tracks: [
       { index: 0, empty: false, file: null },
       { index: 1, empty: false, file: null },
@@ -70,5 +71,24 @@ describe('fileName', () => {
     expect(fileName('C:\\Users\\ledan\\Videos\\Replay 1.mp4')).toBe('Replay 1.mp4');
     expect(fileName('/tmp/a.mkv')).toBe('a.mkv');
     expect(fileName('a.mp4')).toBe('a.mp4');
+  });
+});
+
+describe('cropPlacement', () => {
+  it('places the whole picture so only the crop shows, filling the frame', () => {
+    // A 1440×810 picture in the middle of a 1920×1080 frame.
+    expect(cropPlacement({ x: 240, y: 135, w: 1440, h: 810 }, { width: 1920, height: 1080 })).toEqual({
+      left: -(240 / 1440) * 100,
+      top: -(135 / 810) * 100,
+      width: (1920 / 1440) * 100,
+      height: (1080 / 810) * 100,
+    });
+  });
+  it('leaves an axis with no border alone (bars at the sides only)', () => {
+    const a = cropPlacement({ x: 100, y: 0, w: 1720, h: 1080 }, { width: 1920, height: 1080 });
+    expect(a.left).toBeCloseTo(-(100 / 1720) * 100, 9);
+    expect(a.top).toBeCloseTo(0, 9);
+    expect(a.width).toBeCloseTo((1920 / 1720) * 100, 9);
+    expect(a.height).toBe(100);
   });
 });

@@ -2,7 +2,7 @@
 
 import { formatBytes, formatFps } from '../progress/format';
 import type { EditorMedia } from './api';
-import { MIN_GAIN_DB } from './timeline';
+import { MIN_GAIN_DB, type Crop } from './timeline';
 
 /** Audio track colors, A1 first (spec 9). Track n uses TRACK_COLORS[n % 6]. */
 export const TRACK_COLORS = ['#7fa58c', '#c9a063', '#7f9cc4', '#b08bb3', '#4fa8a2', '#d89a3e'];
@@ -60,4 +60,20 @@ export function metaLine(m: EditorMedia): string {
 /** The last part of a Windows or POSIX path: "C:\\clips\\a.mp4" → "a.mp4". */
 export function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+/**
+ * Where the whole picture goes, in % of the viewer's frame (which has the crop's shape), so that
+ * only `crop` shows and fills it. In fractions of the picture, so it holds for the 720p proxy too.
+ */
+export function cropPlacement(
+  crop: Crop,
+  video: { width: number; height: number },
+): { left: number; top: number; width: number; height: number } {
+  return {
+    left: -(crop.x / crop.w) * 100,
+    top: -(crop.y / crop.h) * 100,
+    width: (video.width / crop.w) * 100,
+    height: (video.height / crop.h) * 100,
+  };
 }
