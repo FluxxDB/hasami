@@ -17,12 +17,15 @@ import { STOPPED, nextCut, prevCut, shuttle, stepFrames, type Shuttle } from './
 import {
   createTimeline,
   cutAt,
+  deleteJoin,
   deleteSegs,
   linkedIds,
+  MASTER_STEP_DB,
   moveEdge,
   quantize,
   segLen,
   setGain,
+  setMaster,
   setMuted,
   snap,
   snapCandidates,
@@ -696,7 +699,12 @@ export class EditorStore {
       }
       case 'delete':
         // The deleted ids drop out of the selection in afterChange.
-        if (this.selection.length > 0) this.edit(deleteSegs(tl, this.selection, this.linked));
+        if (this.selection.length > 0) {
+          // The playhead lands at the join; an audio-only delete (no join) leaves it be.
+          const join = deleteJoin(tl, this.selection, this.linked);
+          this.edit(deleteSegs(tl, this.selection, this.linked));
+          if (join !== null && this.timeline !== tl) this.seek(join);
+        }
         return;
       case 'undo':
       case 'redo':
@@ -821,6 +829,21 @@ export class EditorStore {
       this.drag = null;
       this.preview = setGain(this.preview ?? this.history.present, index, db);
     }
+  }
+
+  /** Sets the master volume. While the slider moves (`commit` false) it's live only; release records it. */
+  setMaster(db: number, commit: boolean): void {
+    if (commit) {
+      this.edit(setMaster(this.history.present, db));
+    } else if (!this.locked) {
+      this.drag = null;
+      this.preview = setMaster(this.preview ?? this.history.present, db);
+    }
+  }
+
+  /** The master − / + buttons: one 3 dB step, one undo entry (none once clamped). */
+  nudgeMaster(dir: 1 | -1): void {
+    this.edit(setMaster(this.history.present, this.history.present.masterDb + dir * MASTER_STEP_DB));
   }
 
   toggleMute(index: number): void {
