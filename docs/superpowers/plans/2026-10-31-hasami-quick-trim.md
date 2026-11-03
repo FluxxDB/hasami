@@ -878,3 +878,133 @@ Spec §5.1, §5.3, §5.5, §5.7, §5.8 and §12 items 7 and 15 were amended on 2
 - [ ] **Step 3:** Implement. Run the impeccable craft floor and detector on the changed UI.
 - [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass. Check the browser mock with gstack browse and save screenshots.
 - [ ] **Step 5: Commit.** `git commit -m "feat: editor stays open with export progress, Next video and a results list"`
+
+---
+
+## Patch wave 2 (2026-11-03)
+
+Spec §4, §5.3, §5.4, §5.7, §5.8 and §12 item 1 were amended on 2026-11-03. Read them first; they are the authority. Tasks 16–19 run in parallel.
+
+Shared contracts, fixed here so parallel tasks agree:
+- `ExportRequest` (TS and Rust) gains `master_db: number` / `#[serde(default)] pub master_db: f64`. The value `-60` or lower never reaches Rust: at −∞ the TS side sends no audio tracks, as it does for muted tracks.
+- New commands (Task 19) replace `editor_next_file`:
+  - `editor_adjacent_file(path: String, modified_ms: u64, newer: bool) -> Result<Option<String>, String>`. JS invokes it with `{ path, modifiedMs, newer }`.
+  - `editor_order_files(paths: Vec<String>) -> Vec<String>`, oldest first, by modified time then name. Unreadable paths go last in their given order.
+- `fsops::COMPRESSED_PREFIX = "[20MB] "` and `fsops::compressed_path(input: &Path, videos_dir: &Path) -> PathBuf`:
+  - the name is `[20MB] <stem>.mp4`, with any leading `[CLIPPED] ` or `[20MB] ` removed from the stem;
+  - it is made unique with `unique_path`.
+  - Task 17 owns it.
+
+### Task 16: Master volume in the timeline model, playhead at the join (TS)
+
+**Files:** `src/editor/timeline.ts` (+ tests), `src/editor/store.svelte.ts` (+ tests), only for the master setters and the delete playhead.
+
+**Interfaces:**
+- **timeline.ts:**
+  - `Timeline.masterDb: number` (`createTimeline` sets 0);
+  - `MASTER_MAX_DB = 12`, `MASTER_STEP_DB = 3`;
+  - `setMaster(tl, db): Timeline`, clamped to [−60, 12]; returns the same object when unchanged;
+  - `toExportRequest` sets `master_db: tl.masterDb`; when `masterDb ≤ −60` it emits `audio: []`;
+  - `hasAudibleAudio` is false when `masterDb ≤ −60`;
+  - `deleteJoin(tl: Timeline, ids: string[], linked: boolean): number | null` is pure. It returns the timeline time of the leftmost removed video range's start after ripple: `a` of the leftmost removed range. It returns null when no video is removed.
+- **store:**
+  - `setMaster(db: number, commit: boolean)`: the live slider value, with one history entry on commit, like `setGain`;
+  - `nudgeMaster(dir: 1 | -1)`: ±`MASTER_STEP_DB`, one history entry;
+  - `command('delete')` puts the playhead at `deleteJoin(...)` (via the existing seek path) when it isn't null, and leaves the playhead alone otherwise.
+  - Undoing a delete doesn't need to restore the playhead.
+
+- [ ] **Step 1: Write failing tests:**
+  - Delete the right half after a cut at 12 → playhead 12.
+  - Delete the left half → 0.
+  - Delete a middle piece of [0,12],[12,31],[31,90] → 12.
+  - An audio-only delete leaves the playhead unchanged.
+  - Master clamps at 12 and −60.
+  - `nudgeMaster` steps by 3 and makes one undo entry each.
+  - `toExportRequest` carries `master_db`.
+  - Master at −∞ gives `audio: []` and `hasAudibleAudio` false.
+  - The randomized invariant test still passes.
+- [ ] **Step 2:** Implement.
+- [ ] **Step 3:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass.
+- [ ] **Step 4: Commit.** `git commit -m "feat: exported master volume in the timeline; playhead lands at the join after a delete"`
+
+### Task 17: Master in the export graph; Compress and the 20 MB copy write [20MB] files to Videos (Rust)
+
+**Files:**
+- `src-tauri/src/editor/request.rs`
+- `src-tauri/src/fsops.rs` (`COMPRESSED_PREFIX`, `compressed_path`, a `videos_dir()` helper using `SHGetKnownFolderPath(FOLDERID_Videos)`)
+- `src-tauri/src/jobs/compress.rs`
+- `src-tauri/src/jobs/export.rs`
+- tests: `tests/compress.rs`, `tests/export.rs`
+
+**Rules:**
+- **`build_graph`:** when `master_db != 0`, apply `volume=<M>dB` (2 decimals) to the final mix, after the all-tracks amix and before `apad`.
+- **Compress:**
+  - writes to `compressed_path(input, videos_dir)` through `temp_path_for` plus verify plus `commit_new`;
+  - never recycles or touches the original;
+  - "Already under 20 MB" behaves as before, with no file written;
+  - `compress_in` takes the output dir as a parameter, so tests write to a temp dir and never to the real Videos folder.
+  - Update Plan 1's compress tests: the original stays, and the output lands in the out dir with the `[20MB] ` name.
+- **Export with `fit_20mb`:**
+  - The main export is now always the same-codec `[CLIPPED] <name>.<ext>`, exactly the non-fit path, and the original is committed and recycled or moved as today.
+  - Then the 20 MB copy is made from the committed `[CLIPPED]` file into `compressed_path(clipped, videos_dir)`: the planner plus `encode_to_limit`, or a plain copy when it's already small and Discord-ready.
+  - Progress continues as one job: video passes, then the copy's passes, normalised to 0..1 over all of them.
+  - If the copy fails, the result is `Done` for the `[CLIPPED]` file plus a plain note. Add an optional `note: Option<String>` to `JobOutcome::Done`, and carry it through the job event as `note`, defaulting to none, e.g. "Saved \"[CLIPPED] x.mp4\", but couldn't make the 20 MB copy: <reason>". Task 18 shows `ExportDone.note` when present.
+  - Rust tests inject the Videos dir, like Compress.
+- [ ] **Step 1: Write failing tests:**
+  - the graph with master +6 contains `volume=6.00dB` before `apad`, and master 0 adds nothing;
+  - `compressed_path` strips the prefixes and counts collisions;
+  - compress writes `[20MB] big_h264.mp4` to the out dir with the original intact;
+  - a fit export produces the `[CLIPPED]` file (same codec) and `[20MB] clip.mp4` ≤ 20,000,000 bytes in the injected Videos dir;
+  - a fit export whose copy fails is still `Done`, with a note.
+- [ ] **Step 2:** Implement.
+- [ ] **Step 3:** Run the full `cargo.exe test` and confirm it passes.
+- [ ] **Step 4: Commit.** `git commit -m "feat: master gain in exports; Compress and the 20 MB copy write [20MB] files to Videos"`
+
+### Task 18: Master section, Dim, Prev/Next in the editor UI
+
+**Files:** `src/editor/{api.ts, mock.ts, engine.ts, store.svelte.ts (+ tests), EditorWindow.svelte, components/Toolbar.svelte, components/TopBar.svelte}`, and the `ExportDone` note display.
+
+**Rules:**
+- **Toolbar, right of Undo/Redo:** `MASTER [slider] <dB readout> [−] [+] DIM`.
+  - The slider and buttons call Task 16's `store.setMaster` / `store.nudgeMaster`. Code against those names; if Task 16 isn't on your branch, add minimal stand-ins with exactly those signatures and note it.
+  - `store.dim: boolean` is not in history, and survives moving to another clip.
+- **Engine:** add one master `GainNode` before the destination. Its gain is `10^((masterDb − (dim ? 11 : 0))/20)`, and 0 when `masterDb ≤ −60`. In the element-volume fallback, multiply the per-element volumes, capped at 1.
+- **Prev / Next:**
+  - ‹ PREV sits immediately left of NEXT VIDEO in the top bar.
+  - Next = newer and Prev = older, via `api.adjacentFile(path, modifiedMs, newer)`.
+  - **Queue mode:**
+    - the selection is ordered with `api.orderFiles` (oldest first), and the queue opens the oldest;
+    - Next and Prev step through the selection, then into the folder past either end;
+    - a `Files` event merges new paths and re-sorts the part not yet handled.
+  - Each button has a look-ahead for its disabled state, and the existing failure handling applies to both: a failed look-ahead keeps the button enabled.
+  - Each asks first only for unexported edits.
+  - Remove `nextFile`.
+- **Fit toggle label:** "20 MB COPY". Its estimate text in the status bar reads "20 MB COPY: ≤ 20 MB".
+- **Exports:** show `ExportDone.note` in the outcome row when present.
+- **Visual rules are unchanged.** DIM uses the bone-white "on" outline like Snap and Linked; there's no red.
+- [ ] **Step 1: Write failing store tests:**
+  - dim doesn't touch the timeline or export;
+  - Prev and Next directions;
+  - the queue opens the oldest and walks it then the folder, both ways;
+  - re-sorting on `Files`;
+  - disabled at the ends;
+  - a note shows.
+- [ ] **Step 2:** Implement, using the impeccable craft floor and detector.
+- [ ] **Step 3:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass. Check in the browser mock and save screenshots.
+- [ ] **Step 4: Commit.** `git commit -m "feat: master volume, Dim, and Prev/Next video in the editor"`
+
+### Task 19: Adjacent and ordered files (Rust)
+
+**Files:** `src-tauri/src/editor/folder.rs` (+ tests), `src-tauri/src/app.rs` (commands)
+
+**Rules:**
+- `adjacent_video(current, current_modified_ms, newer: bool) -> io::Result<Option<PathBuf>>` walks the same sibling list as `next_video`. `next_video` becomes `adjacent_video(.., false)`. Skip the `CLIPPED_PREFIX` and `"[20MB] "` prefixes, compared case-insensitively.
+- `order_videos(paths: &[PathBuf]) -> Vec<PathBuf>`: oldest first, by modified time then name; unreadable paths go last.
+- Commands: `editor_adjacent_file` and `editor_order_files`, as in the shared contracts. Remove `editor_next_file`.
+- [ ] **Step 1: Write failing tests:**
+  - with a(300) b(200) c(100): newer(c) = b, newer(a) = None, older(a) = b;
+  - `[20MB]` files are skipped;
+  - `order_videos` gives [c, b, a], with an unreadable path last.
+- [ ] **Step 2:** Implement and wire the commands.
+- [ ] **Step 3:** Run the full `cargo.exe test` and confirm it passes.
+- [ ] **Step 4: Commit.** `git commit -m "feat: newer/older adjacent video and date ordering for the trim queue"`

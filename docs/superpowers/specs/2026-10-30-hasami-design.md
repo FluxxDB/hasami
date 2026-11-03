@@ -62,13 +62,17 @@ Design for the general case too: H.264, HEVC, AV1, VP9, ProRes in `.mov`, 1 to 6
 Classic-menu cascading entry **Hasami ▸** on `.mp4`, `.mov`, `.mkv`, `.webm`:
 
 - **Quick Trim**: opens the editor (§5). With several files selected, it opens a trim queue (§5.8).
-- **Compress**: shrinks the file to 20 MB or less (§7) and replaces it.
+- **Compress**: shrinks the file to 20 MB or less (§7). *Updated 2026-11-03 (Dang's choice):* it writes a new `[20MB] <name>.mp4` to the Windows Videos folder and keeps the original.
 - **Convert to .mp4** / **Convert to .mov** / **Convert to .mp3**: replaces the file with the new format.
 
 Behavior:
-- **Replace semantics (Dang's choice):** Compress and Convert replace the original. The original goes to the **Recycle Bin**, never a permanent delete, and only after the new file is verified (§8).
+- **Compress keeps the original (Dang's choice, 2026-11-03):**
+  - The new file goes in the Windows Videos known folder (`FOLDERID_Videos`, so a moved or OneDrive Videos folder is honoured), wherever the original was.
+  - It is named `[20MB] <stem>.mp4`. The prefix is never doubled, and a clash adds " (2)", " (3)"….
+  - Nothing is recycled.
+  - *My call:* an "Already under 20 MB" clip still produces no file.
+- **Replace semantics (Dang's choice):** Convert replaces the original. The original goes to the **Recycle Bin**, never a permanent delete, and only after the new file is verified (§8).
 - **Naming:**
-  - Compress keeps the filename. The extension becomes `.mp4` if it wasn't already (*my call*).
   - Convert keeps the filename and changes only the extension (*my call*).
   - Convert to .mp3 mixes all audio tracks into one stereo track. The original video goes to the Recycle Bin, because Dang chose replace.
 - *My call:* the menu hides "Convert to .mp4" on `.mp4` files, and so on for each format.
@@ -91,7 +95,7 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
 - Filename, plus a red dot and "EDITED" once there are unsaved edits.
 - Metadata line: resolution · fps · codec · audio track count · duration · size.
 - Right side:
-  - the **Fit to 20 MB** toggle;
+  - the **20 MB copy** toggle (§5.7);
   - **Export audio** (text link);
   - **Export + save raw** (outlined button);
   - **Quick export** (outlined button with a red border; the primary action);
@@ -122,12 +126,28 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
 - **Linked selection (Dang's choice: linked, with a toggle):** on by default. Clicking a video segment also selects the audio pieces created by the same cuts. Deleting or edge-dragging applies to all of them, so sync is kept. With the toggle off, video and audio are selected and edited separately, and desync is the user's call.
 - **Snapping (Dang's choice):** to the playhead, to cut points and segment edges on any track, and to the end of the video. There's a toolbar toggle. No time-grid snapping.
 - **Zoom:** Ctrl+scroll, plus a zoom slider in the toolbar.
-- **Undo/redo** covers every edit: cuts, deletes, edge drags, volume, mute, and toggles.
+- **Undo/redo** covers every edit: cuts, deletes, edge drags, volume, mute, master volume, and toggles.
+- **Playhead after a delete (Dang's choice, 2026-11-03):** it lands at the join, where the deleted video used to be.
+  - Delete the right half and it sits at the end of what's left.
+  - Delete the left half and it sits at 0:00.
+  - Delete a middle piece and it sits where its neighbours meet.
+  - With several ranges deleted, it goes to the leftmost join.
+  - *My call:* an audio-only delete doesn't move the playhead.
 
 ### 5.4 Track headers
 - Tag (V1, A1…), a small color square for audio tracks, and the track name.
 - For audio tracks: a mute button and one horizontal volume slider with a dB readout. *My call:* range −∞ to +6 dB, default 0 dB.
 - Muted tracks render in grey and are left out of exports.
+- **Master section (Dang's choices, 2026-11-03):** in the timeline toolbar, right of Undo/Redo (*my call on placement*).
+  - **Master volume:**
+    - one gain on the final mix, **exported** in every mode, including Export audio;
+    - range −∞ to **+12 dB**, with **no limiter**: what you set is exported, clipping included;
+    - undoable, and it starts at 0 dB for each clip;
+    - a dB readout, with "−∞ dB" at the bottom.
+  - **− / + buttons:** move master by 3 dB, clamped to the range. Each press is one undo step.
+  - **Dim:** a toggle that lowers everything you hear by 11 dB.
+    - It's for editing only: it is **never exported** and isn't an undo step.
+    - *My call:* it stays on across clips until you turn it off.
 
 ### 5.5 Keyboard (Dang asked to match DaVinci Resolve)
 | Key | Action |
@@ -163,18 +183,27 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
   - use the hardware encoder when available (AMF on this machine; NVENC or QSV elsewhere), with software fallback;
   - keep the source container. *Builder's call* for codec/container combos that need it, e.g. Opus audio in `.webm`.
   - Expect big files from high-bitrate raws: a 10 s trim of a 152 Mbps clip is about 190 MB. That's accepted.
-- **Fit to 20 MB** toggle (Dang's choice: one toggle that applies to both video export buttons). It switches the encode to the Compress pipeline (§7), so the output is `[CLIPPED] <name>.mp4` at 20 MB or less.
+- **20 MB copy toggle (Dang's choice; updated 2026-11-03).** One toggle applies to both video export buttons.
+  - The export itself is always the full-quality `[CLIPPED] <name>.<ext>` beside the original.
+  - With the toggle on, Hasami also saves `[20MB] <name>.mp4` (≤ 20 MB, via the Compress pipeline, §7) to the Windows Videos folder, the same place Compress writes.
+  - *My calls:*
+    - The copy is made from the verified `[CLIPPED]` file, after it's committed and after the original is recycled or moved, so a failed copy never puts anything at risk. A failure says the `[CLIPPED]` file was saved and why the copy wasn't.
+    - The name drops `[CLIPPED]` (it's `[20MB] <name>.mp4`), and a clash adds " (2)".
+    - If the `[CLIPPED]` file is already under 20 MB and Discord-ready, it's copied as-is.
+    - The toggle's label becomes "20 MB COPY".
+    - The clip stays locked, with one progress bar, until both files are done.
 - **Exports run in Hasami's job queue (§10), and the editor stays open (Dang's choice, updated 2026-11-01).** The original is only recycled or moved after its export verifies (§8).
   - After **Quick export** or **Export + save raw**, the clip locks: no more edits, because its original is about to move. A progress bar replaces the export buttons. When it finishes, the top bar shows the saved file's name. On failure, it shows what went wrong and that the original is untouched, and the clip unlocks so you can try again.
   - **Export audio** shows its progress the same way, but the clip stays editable.
   - **The window never closes by itself.** Closing it while exports run is fine: they finish, and a failure shows in the small progress window.
-- **Next video (Dang's choice, 2026-11-01):** opens the next video in the folder in Explorer's order.
-  - Dang's folders sort by date, descending, so "next" is the next older video: sibling `.mp4`/`.mov`/`.mkv`/`.webm` files by modified time, newest first, ties by name.
-  - *My call:* `[CLIPPED]` outputs are skipped, and the `Raw\` subfolder isn't listed.
-  - It still works after the current original has been recycled or moved, because it uses the clip's remembered modified time.
-  - It is disabled when there's no older video.
+- **Prev / Next video (Dang's choice, 2026-11-01; direction updated 2026-11-03):** they step through the videos in the folder by date.
+  - The folder's videos are sibling `.mp4`/`.mov`/`.mkv`/`.webm` files, ordered by modified time, ties by name.
+  - **Next** goes to the next *newer* video, and **‹ Prev** goes to the next *older* one.
+  - *My call:* `[CLIPPED]` and `[20MB]` outputs are skipped, and the `Raw\` subfolder isn't listed.
+  - They still work after the current original has been recycled or moved, because they use the clip's remembered modified time.
+  - Each is disabled when there's nothing further that way.
   - It asks first if the clip has edits that weren't exported.
-  - In queue mode it walks the selected clips first (§5.8).
+  - In queue mode they walk the selected clips first (§5.8).
 - **Export audio** also stops at the end of the video, consistent with every other export (*my call*).
 - Closing with unsaved edits asks for confirmation (*my call*).
 - *My call:* the `[CLIPPED]` prefix is never doubled. A name collision appends " (2)", " (3)", and so on. If the source already sits in a folder named `Raw`, outputs go to that folder's parent and Save Raw leaves the original where it is.
@@ -182,7 +211,7 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 ### 5.8 Trim queue (multi-select → Quick Trim)
 - Opens the first file, with "3 of 30" in the top bar.
 - *Updated 2026-11-01:* exporting no longer moves on by itself. The clip stays, with its progress (§5.7).
-- **Next video** moves to the next selected file. After the last one, it carries on into the folder (§5.7). It replaces Skip and leaves the current file untouched.
+- **Prev / Next video** step through the selected files, ordered by date. *My call:* the queue opens on the oldest selected clip, so Next walks forward in time. Past either end, they carry on into the folder (§5.7). They replace Skip and leave the current file untouched.
 - **Discard** sends the current raw to the Recycle Bin and moves on (Dang's choice).
 - While exports are still running, a small strip in the top bar shows them (e.g. "EXPORTING 2").
 - **Results list:** opens from that strip. It lists each export's result; a failed export says what went wrong and confirms the raw was kept. It never replaces the editor, and it never closes the window.
@@ -263,7 +292,7 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 
 ## 12. Calls made without Dang's explicit input (review these)
 
-1. Compress keeps the filename; Convert changes only the extension; both send the original to the Recycle Bin.
+1. *Updated 2026-11-03:* Compress writes `[20MB] <name>.mp4` to the Videos folder and keeps the original; Convert changes only the extension and sends the original to the Recycle Bin.
 2. Each "Convert to" item is hidden on files already in that format; Convert remuxes when possible and keeps all audio tracks.
 3. Empty audio tracks are hidden behind a toggle; tracks are labeled A1…An.
 4. Audio edges can't overlap their neighbors; volume range −∞ to +6 dB.
