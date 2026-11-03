@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWin
 use crate::cli::{self, Action};
 use crate::compress::{plan_compress, CompressDecision};
 use crate::editor::folder::{self, adjacent_video, order_videos};
-use crate::editor::media::{make_proxy, peaks, prepare, thumbnails, Peaks, PreparedMedia, Thumb};
+use crate::editor::media::{make_proxy, peaks, prepare, thumbnails, Crop, Peaks, PreparedMedia, Thumb};
 use crate::editor::request::ExportRequest;
 use crate::editor::session::{next_session_id, process_running, sweep_stale, EditorSessions};
 use crate::fsops;
@@ -305,6 +305,8 @@ pub struct EditorMediaDto {
     pub bit_rate: Option<u64>,
     pub video: Option<EditorVideoDto>,
     pub tracks: Vec<EditorTrackDto>,
+    /// The picture area inside a fixed black border, in source pixels; `None` when there is none.
+    pub border: Option<Crop>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -349,6 +351,7 @@ impl EditorMediaDto {
                     file: t.file.as_ref().map(|f| f.display().to_string()),
                 })
                 .collect(),
+            border: media.border,
         }
     }
 }
@@ -1689,6 +1692,7 @@ mod tests {
             video: Vec::new(),
             audio: Vec::new(),
             master_db: 0.0,
+            crop: None,
         })))
     }
 
@@ -2067,6 +2071,26 @@ mod tests {
         );
         let files = EditorEvent::Files { paths: strings(&["a.mp4"]) };
         assert_eq!(serde_json::to_value(&files).unwrap(), serde_json::json!({"type": "Files", "paths": ["a.mp4"]}));
+    }
+
+    #[test]
+    fn editor_media_border_serializes_to_the_ui_contract() {
+        let info = crate::media::MediaInfo {
+            path: PathBuf::from("a.mp4"),
+            container: "mp4".into(),
+            duration_s: 5.0,
+            size_bytes: 1,
+            bit_rate: None,
+            video: None,
+            audio: Vec::new(),
+        };
+        let border = Some(Crop { x: 0, y: 0, w: 1440, h: 810 });
+        let media = PreparedMedia { info, tracks: Vec::new(), border };
+        let dto = serde_json::to_value(EditorMediaDto::new(1, Path::new("a.mp4"), &media, 0)).unwrap();
+        assert_eq!(dto["border"], serde_json::json!({"x": 0, "y": 0, "w": 1440, "h": 810}));
+        let media = PreparedMedia { border: None, ..media };
+        let dto = serde_json::to_value(EditorMediaDto::new(1, Path::new("a.mp4"), &media, 0)).unwrap();
+        assert_eq!(dto["border"], serde_json::Value::Null);
     }
 
     #[test]

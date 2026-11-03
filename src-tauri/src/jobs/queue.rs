@@ -902,6 +902,7 @@ mod tests {
             video: Vec::new(),
             audio: Vec::new(),
             master_db: 0.0,
+            crop: None,
         }
     }
 

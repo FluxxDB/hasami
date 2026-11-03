@@ -236,7 +236,7 @@ mod tests {
             video: None,
             audio: Vec::new(),
         };
-        PreparedMedia { info, tracks: Vec::new() }
+        PreparedMedia { info, tracks: Vec::new(), border: None }
     }
 
     #[test]

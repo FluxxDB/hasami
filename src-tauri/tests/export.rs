@@ -3,6 +3,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use hasami_lib::editor::media::Crop;
 use hasami_lib::editor::request::{
     build_graph, encoder_available, AudioPiece, AudioTrackRequest, ExportMode, ExportRequest, VideoPiece,
 };
@@ -14,7 +15,7 @@ use hasami_lib::media::{hidden_command, probe, FfmpegPaths};
 /// Render `req`'s graph over `input` into `out` with plain libx264/aac, panicking with ffmpeg's
 /// stderr on failure.
 fn render_graph(paths: &FfmpegPaths, input: &Path, req: &ExportRequest, out: &Path) {
-    let graph = build_graph(req);
+    let graph = build_graph(req, (1920, 1080));
     let mut cmd = hidden_command(&paths.ffmpeg);
     cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(input)
@@ -59,6 +60,7 @@ fn render_graph_cuts_duration() {
             ],
         }],
         master_db: 0.0,
+        crop: None,
     };
 
     let out = dir.path().join("cut.mp4");
@@ -116,6 +118,7 @@ fn cut_request(input: &Path, mode: ExportMode) -> ExportRequest {
             },
         ],
         master_db: 0.0,
+        crop: None,
     }
 }
 
@@ -183,8 +186,11 @@ fn quick_export_replaces_with_clipped() {
     assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
     let info = probe(&paths, &output).unwrap();
     assert!((info.duration_s - 3.0).abs() < 0.1, "duration was {}", info.duration_s);
-    assert_eq!(info.video.as_ref().unwrap().codec, "hevc");
+    // The HEVC source is exported as Discord-safe H.264 at its own size.
+    let video = info.video.as_ref().unwrap();
+    assert_eq!((video.codec.as_str(), video.width, video.height), ("h264", 1920, 1080));
     assert_eq!(info.audio.len(), 1);
+    assert_eq!(info.audio[0].codec, "aac");
     assert!(!input.exists(), "the original should be recycled");
     assert!(leftover_temp_files(dir.path()).is_empty());
 }
@@ -245,18 +251,20 @@ fn fit_export_saves_clipped_and_a_20mb_copy_in_videos() {
     let (result, passes) = run_export_into(&req, videos.path());
     let output = done(result);
 
-    // The export itself is exactly the non-fit one: same codec, beside the original.
+    // The export itself is exactly the non-fit one: H.264, beside the original.
     assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
     let info = probe(&paths, &output).unwrap();
-    assert_eq!(info.video.as_ref().unwrap().codec, "hevc");
+    assert_eq!(info.video.as_ref().unwrap().codec, "h264");
     assert!((info.duration_s - 3.0).abs() < 0.1, "duration was {}", info.duration_s);
     assert!(!input.exists(), "the original should be recycled");
     assert_eq!(names_in(dir.path()), ["[CLIPPED] clip.mp4"]);
 
-    // HEVC isn't Discord-ready, so the copy is encoded: passes 2 and 3 of 3.
+    // A small H.264 export is already Discord-ready, so the copy is the same file.
     assert_eq!(names_in(videos.path()), ["[20MB] clip.mp4"]);
-    assert_20mb_copy(&paths, &videos.path().join("[20MB] clip.mp4"), 3.0, 1);
-    assert_three_passes(&passes);
+    let copy = videos.path().join("[20MB] clip.mp4");
+    assert_20mb_copy(&paths, &copy, 3.0, 1);
+    assert_eq!(fs::read(&copy).unwrap(), fs::read(&output).unwrap());
+    assert!(passes.contains(&(1, 3)) && passes.contains(&(3, 3)), "{passes:?}");
 }
 
 #[test]
@@ -278,12 +286,13 @@ fn fit_export_under_limit() {
             pieces: vec![AudioPiece { at: 0.0, src_start: 0.0, src_end: 8.0 }],
         }],
         master_db: 0.0,
+        crop: None,
     };
 
     let (result, passes) = run_export_into(&req, videos.path());
     let output = done(result);
 
-    // Full quality: the same-codec export of a 60 Mbit/s clip is far over 20 MB.
+    // Full quality: the export of a 60 Mbit/s clip is far over 20 MB, so the copy is encoded.
     assert_eq!(output, dir.path().join("[CLIPPED] big_h264.mp4"));
     assert!(fs::metadata(&output).unwrap().len() > 20_000_000);
     assert!(!input.exists(), "the original should be recycled");
@@ -311,6 +320,7 @@ fn fit_export_of_a_small_clip_copies_it_as_is() {
             pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 2.0 }],
         }],
         master_db: 0.0,
+        crop: None,
     };
 
     let (result, passes) = run_export_into(&req, videos.path());
@@ -401,6 +411,7 @@ fn video_only_source() {
         video: vec![VideoPiece { src_start: 0.5, src_end: 2.5 }],
         audio: vec![],
         master_db: 0.0,
+        crop: None,
     };
 
     // Audio first: the Quick export below recycles the source.
@@ -415,7 +426,7 @@ fn video_only_source() {
 }
 
 #[test]
-fn vp8_webm_keeps_its_codec() {
+fn vp8_webm_exports_as_h264_mp4() {
     let dir = tempfile::tempdir().unwrap();
     let input = common::fixture_webm_vp8_opus(dir.path());
     let paths = FfmpegPaths::resolve().unwrap();
@@ -432,15 +443,90 @@ fn vp8_webm_keeps_its_codec() {
             pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 1.5 }],
         }],
         master_db: 0.0,
+        crop: None,
     };
 
     let output = done(run_export(&req));
-    assert_eq!(output, dir.path().join("[CLIPPED] clip_vp8.webm"));
+    assert_eq!(output, dir.path().join("[CLIPPED] clip_vp8.mp4"));
     let info = probe(&paths, &output).unwrap();
-    assert_eq!(info.video.as_ref().unwrap().codec, "vp8");
-    assert_eq!(info.audio[0].codec, "opus");
+    assert_eq!(info.container, "mp4");
+    assert_eq!(info.video.as_ref().unwrap().codec, "h264");
+    assert_eq!(info.audio[0].codec, "aac");
     assert!((info.duration_s - 1.0).abs() < 0.1, "duration was {}", info.duration_s);
     assert!(dir.path().join("Raw").join("clip_vp8.webm").exists());
+}
+
+#[test]
+fn mkv_source_exports_as_mp4() {
+    let dir = tempfile::tempdir().unwrap();
+    let small = common::fixture_small_h264_mp4(dir.path());
+    let input = common::remux(&small, &dir.path().join("clip.mkv"));
+    fs::remove_file(small).unwrap();
+    let paths = FfmpegPaths::resolve().unwrap();
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw,
+        fit_20mb: false,
+        duration_s: 1.0,
+        video: vec![VideoPiece { src_start: 0.5, src_end: 1.5 }],
+        audio: vec![AudioTrackRequest {
+            index: 0,
+            gain_db: 0.0,
+            pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 1.5 }],
+        }],
+        master_db: 0.0,
+        crop: None,
+    };
+
+    let output = done(run_export(&req));
+
+    assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
+    let info = probe(&paths, &output).unwrap();
+    assert_eq!(info.container, "mp4");
+    assert_eq!(info.video.as_ref().unwrap().codec, "h264");
+    assert_eq!(info.audio[0].codec, "aac");
+    assert!(dir.path().join("Raw").join("clip.mkv").exists());
+}
+
+/// Whether an RGB colour is (near) black.
+fn is_black([r, g, b]: [u8; 3]) -> bool {
+    r.max(g).max(b) < 32
+}
+
+#[test]
+fn crop_removes_the_border_and_fills_the_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_bordered(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+    assert!(is_black(common::pixel(&input, 1800, 1000)), "the source is black there");
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw,
+        fit_20mb: false,
+        duration_s: 3.0,
+        video: vec![VideoPiece { src_start: 0.0, src_end: 1.0 }, VideoPiece { src_start: 2.0, src_end: 4.0 }],
+        audio: vec![AudioTrackRequest {
+            index: 0,
+            gain_db: 0.0,
+            pieces: vec![
+                AudioPiece { at: 0.0, src_start: 0.0, src_end: 1.0 },
+                AudioPiece { at: 1.0, src_start: 2.0, src_end: 4.0 },
+            ],
+        }],
+        master_db: 0.0,
+        crop: Some(Crop { x: 0, y: 0, w: 1440, h: 810 }),
+    };
+
+    let output = done(run_export(&req));
+
+    let info = probe(&paths, &output).unwrap();
+    let video = info.video.as_ref().unwrap();
+    assert_eq!((video.width, video.height), (1920, 1080));
+    assert!((info.duration_s - 3.0).abs() < 0.1, "duration was {}", info.duration_s);
+    let corner = common::pixel(&output, 1800, 1000);
+    assert!(!is_black(corner), "the picture should fill the frame, got {corner:?}");
 }
 
 #[test]
@@ -548,6 +634,7 @@ fn fit_all_muted_has_no_audio() {
         video: vec![VideoPiece { src_start: 0.0, src_end: 4.0 }],
         audio: vec![],
         master_db: 0.0,
+        crop: None,
     };
 
     let output = done(run_export_into(&req, videos.path()).0);

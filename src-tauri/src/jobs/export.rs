@@ -1,9 +1,10 @@
 //! Export job: render the Quick Trim editor's edit and save it beside the source as
 //! `[CLIPPED] <name>`.
 //!
-//! - **Quick export** and **Export + save raw** re-encode the edit with the source's own video
-//!   codec at about its bitrate, in its own container. The original then goes to the Recycle
-//!   Bin, or into a `Raw` folder next to it.
+//! - **Quick export** and **Export + save raw** re-encode the edit as Discord-safe H.264 with AAC
+//!   in `.mp4`, whatever the source was, at about the source's bitrate (more for HEVC, AV1 and
+//!   VP9, see [`export_bitrate`]). With a crop, the picture is cut to it and scaled back up to the
+//!   source's size. The original then goes to the Recycle Bin, or into a `Raw` folder next to it.
 //! - With the **20 MB copy** toggle on, they then also save `[20MB] <name>.mp4` (at most
 //!   [`SIZE_LIMIT_BYTES`]) in the Windows Videos folder, made from the saved `[CLIPPED]` file by
 //!   the Compress pipeline, or copied as is when that file is already small and Discord-ready.
@@ -20,9 +21,9 @@ use std::path::{Path, PathBuf};
 use super::compress::{claim_new_file, commit_claimed, encode_to_limit, RemoveOnDrop, VideosDirFn};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, SIZE_LIMIT_BYTES};
+use crate::editor::media::Crop;
 use crate::editor::request::{
-    audio_codec_args, build_graph, encoder_available, same_codec_encoder, source_video_bitrate,
-    ExportMode, ExportRequest, Graph, VideoEncoder,
+    build_graph, encoder_available, export_bitrate, h264_encoder, ExportMode, ExportRequest, Graph, VideoEncoder,
 };
 use crate::fsops::{
     clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir,
@@ -35,6 +36,8 @@ use crate::verify::{verify_output, VerifyError};
 const NO_AUDIO: &str = "This clip has no audio to export.";
 /// Shown for a video export whose timeline has no video left in it.
 const NO_VIDEO: &str = "Couldn't export this clip: there's no video left in it.";
+/// Shown when the area to keep doesn't fit inside the source's picture.
+const CROP_DOESNT_FIT: &str = "Couldn't export this clip: the border to remove doesn't fit the picture.";
 /// Shown when the rendered result fails verification for a reason other than its size.
 const DIDNT_CHECK_OUT: &str = "Couldn't export this clip: the result didn't check out.";
 /// Shown when the 20 MB copy is still over the limit at the final check.
@@ -81,17 +84,21 @@ fn export_work(
 ) -> Result<JobOutcome, JobError> {
     let info = probe(paths, &req.input).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
 
+    let source_size = info.video.as_ref().map_or((0, 0), |v| (v.width, v.height));
+
     let (render, graph) = if req.mode == ExportMode::Audio {
         // Video pieces would leave `[vout]` unconnected; only the audio timeline is wanted.
-        let graph = build_graph(&ExportRequest { video: Vec::new(), ..req.clone() });
+        let graph = build_graph(&ExportRequest { video: Vec::new(), ..req.clone() }, source_size);
         if graph.audio_out.is_none() {
             return Err(JobError::Message(NO_AUDIO.to_owned()));
         }
         (Render::Mp3, graph)
     } else if req.video.is_empty() {
         return Err(JobError::Message(NO_VIDEO.to_owned()));
+    } else if req.crop.is_some_and(|c| !fits(c, source_size)) {
+        return Err(JobError::Message(CROP_DOESNT_FIT.to_owned()));
     } else {
-        (Render::SameCodec(Container::of(&info)), build_graph(req))
+        (Render::H264, build_graph(req, source_size))
     };
     // The toggle belongs to the two video exports.
     let make_copy = req.fit_20mb && render != Render::Mp3;
@@ -164,11 +171,18 @@ fn copy_failed(saved: &Path, e: &JobError) -> String {
     format!("Saved \"{name}\", but couldn't make the 20 MB copy: {reason}")
 }
 
+/// Whether `crop` is a non-empty area inside a `size` (width, height) picture.
+fn fits(crop: Crop, (width, height): (u32, u32)) -> bool {
+    let Crop { x, y, w, h } = crop;
+    let within = |start: u32, len: u32, limit: u32| u64::from(start) + u64::from(len) <= u64::from(limit);
+    w > 0 && h > 0 && within(x, w, width) && within(y, h, height)
+}
+
 /// How the edit is turned into a file.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Render {
-    /// The source's video codec, in the source's container.
-    SameCodec(Container),
+    /// H.264 video and AAC audio in `.mp4`.
+    H264,
     /// The audio mix alone, as MP3.
     Mp3,
 }
@@ -176,36 +190,9 @@ enum Render {
 impl Render {
     fn extension(self) -> &'static str {
         match self {
-            Render::SameCodec(c) => c.ext,
+            Render::H264 => "mp4",
             Render::Mp3 => "mp3",
         }
-    }
-}
-
-/// An output container: the file extension and ffmpeg's muxer name for it. The muxer is always
-/// given with `-f`, since the temp file's `.hasami-tmp` extension says nothing.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Container {
-    ext: &'static str,
-    muxer: &'static str,
-}
-
-impl Container {
-    /// The source's own container, from its extension (which is what `MediaInfo::container`
-    /// holds). Anything Hasami doesn't register for is written as `.mp4`.
-    fn of(info: &MediaInfo) -> Self {
-        let (ext, muxer) = match info.container.as_str() {
-            "mov" => ("mov", "mov"),
-            "mkv" => ("mkv", "matroska"),
-            "webm" => ("webm", "webm"),
-            _ => ("mp4", "mp4"),
-        };
-        Container { ext, muxer }
-    }
-
-    /// MP4 and MOV get their index up front, so the clip starts playing before it fully loads.
-    fn faststart(self) -> bool {
-        matches!(self.ext, "mp4" | "mov")
     }
 }
 
@@ -232,9 +219,7 @@ impl Job<'_> {
     ) -> Result<u64, JobError> {
         let input = self.req.input.as_path();
         let args = match self.render {
-            Render::SameCodec(container) => {
-                same_codec_args(input, self.graph, &self.encoder(container), container, self.temp)
-            }
+            Render::H264 => h264_args(input, self.graph, &self.encoder(), self.temp),
             Render::Mp3 => mp3_args(input, self.graph, self.temp),
         };
         run_ffmpeg(self.paths, &args, self.req.duration_s, cancel, &mut |fraction| {
@@ -261,11 +246,9 @@ impl Job<'_> {
         Ok(verified.size_bytes)
     }
 
-    /// The source's codec at about its video bitrate, on AMD hardware when it works here.
-    fn encoder(&self, container: Container) -> VideoEncoder {
-        let codec = self.info.video.as_ref().map_or("h264", |v| v.codec.as_str());
-        let bitrate = source_video_bitrate(self.info);
-        same_codec_encoder(codec, container.ext, bitrate, &|name| encoder_available(self.paths, name))
+    /// H.264 at [`export_bitrate`], on AMD hardware when it works here.
+    fn encoder(&self) -> VideoEncoder {
+        h264_encoder(export_bitrate(self.info), &|name| encoder_available(self.paths, name))
     }
 }
 
@@ -305,24 +288,16 @@ fn graph_args(input: &Path, graph: &Graph) -> Vec<OsString> {
     a
 }
 
-/// Quick / Save raw without fit: the source's codec and container.
-fn same_codec_args(
-    input: &Path,
-    graph: &Graph,
-    encoder: &VideoEncoder,
-    container: Container,
-    out: &Path,
-) -> Vec<OsString> {
+/// Quick / Save raw: H.264 with AAC in MP4, its index up front so the clip starts playing before
+/// it fully loads. The muxer is named since the temp file's `.hasami-tmp` extension says nothing.
+fn h264_args(input: &Path, graph: &Graph, encoder: &VideoEncoder, out: &Path) -> Vec<OsString> {
     let mut a = graph_args(input, graph);
     push(&mut a, &["-c:v", encoder.codec]);
     a.extend(encoder.args.iter().map(OsString::from));
     if graph.audio_out.is_some() {
-        a.extend(audio_codec_args(container.ext).into_iter().map(OsString::from));
+        push(&mut a, &["-c:a", "aac", "-b:a", "192k"]);
     }
-    if container.faststart() {
-        push(&mut a, &["-movflags", "+faststart"]);
-    }
-    push(&mut a, &["-f", container.muxer]);
+    push(&mut a, &["-movflags", "+faststart", "-f", "mp4"]);
     a.push(out.as_os_str().to_owned());
     a
 }
@@ -354,57 +329,41 @@ mod tests {
         }
     }
 
-    fn container(ext: &str) -> Container {
-        Container::of(&MediaInfo {
-            path: PathBuf::from(format!("in.{ext}")),
-            container: ext.to_owned(),
-            duration_s: 10.0,
-            size_bytes: 1,
-            bit_rate: None,
-            video: None,
-            audio: Vec::new(),
-        })
-    }
-
     fn encoder() -> VideoEncoder {
-        VideoEncoder { codec: "hevc_amf", args: vec!["-b:v".to_owned(), "9000000".to_owned()] }
+        VideoEncoder { codec: "h264_amf", args: vec!["-b:v".to_owned(), "9000000".to_owned()] }
     }
 
-    fn same_codec(ext: &str, audio: bool) -> String {
-        let input = PathBuf::from(format!("in.{ext}"));
-        text(&same_codec_args(&input, &graph(audio), &encoder(), container(ext), Path::new("tmp")))
-    }
-
-    #[test]
-    fn containers_map_to_their_muxers() {
-        assert_eq!(container("mp4"), Container { ext: "mp4", muxer: "mp4" });
-        assert_eq!(container("mov"), Container { ext: "mov", muxer: "mov" });
-        assert_eq!(container("mkv"), Container { ext: "mkv", muxer: "matroska" });
-        assert_eq!(container("webm"), Container { ext: "webm", muxer: "webm" });
-        assert_eq!(container("avi"), Container { ext: "mp4", muxer: "mp4" });
+    fn h264(audio: bool) -> String {
+        text(&h264_args(Path::new("in.mkv"), &graph(audio), &encoder(), Path::new("tmp")))
     }
 
     #[test]
-    fn same_codec_maps_the_graph_and_names_the_muxer() {
+    fn h264_maps_the_graph_into_an_mp4() {
         assert_eq!(
-            same_codec("mkv", true),
-            "-i in.mkv -filter_complex G -map [vout] -map [aout] -c:v hevc_amf -b:v 9000000 \
-             -c:a aac -b:a 192k -f matroska tmp"
+            h264(true),
+            "-i in.mkv -filter_complex G -map [vout] -map [aout] -c:v h264_amf -b:v 9000000 \
+             -c:a aac -b:a 192k -movflags +faststart -f mp4 tmp"
         );
     }
 
     #[test]
-    fn same_codec_without_audio_drops_it() {
-        let a = same_codec("mp4", false);
+    fn h264_without_audio_drops_it() {
+        let a = h264(false);
         assert!(a.contains("-map [vout] -an "), "{a}");
         assert!(!a.contains("-c:a"), "{a}");
         assert!(a.ends_with("-movflags +faststart -f mp4 tmp"), "{a}");
     }
 
     #[test]
-    fn webm_gets_opus() {
-        let a = same_codec("webm", true);
-        assert!(a.ends_with("-c:a libopus -b:a 160k -f webm tmp"), "{a}");
+    fn a_crop_must_fit_the_picture() {
+        let size = (1920, 1080);
+        assert!(fits(Crop { x: 0, y: 0, w: 1440, h: 810 }, size));
+        assert!(fits(Crop { x: 480, y: 270, w: 1440, h: 810 }, size));
+        assert!(!fits(Crop { x: 481, y: 0, w: 1440, h: 810 }, size));
+        assert!(!fits(Crop { x: 0, y: 271, w: 1440, h: 810 }, size));
+        assert!(!fits(Crop { x: 0, y: 0, w: 0, h: 810 }, size));
+        assert!(!fits(Crop { x: u32::MAX, y: 0, w: 2, h: 2 }, size));
+        assert!(!fits(Crop { x: 0, y: 0, w: 2, h: 2 }, (0, 0)), "no video");
     }
 
     #[test]
@@ -457,6 +416,23 @@ mod tests {
         out
     }
 
+    /// 4 s of noisy 1080p H.264 at 60 Mbit/s + AAC in an `.mkv` inside `dir`: its export is over
+    /// 20 MB, so the 20 MB copy has to be encoded.
+    fn big_clip(paths: &FfmpegPaths, dir: &Path) -> PathBuf {
+        let out = dir.join("clip.mkv");
+        let status = hidden_command(&paths.ffmpeg)
+            .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=4"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4"])
+            .args(["-vf", "noise=alls=60:allf=t"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "60M", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        out
+    }
+
     fn fit_request(input: &Path) -> ExportRequest {
         ExportRequest {
             session: 1,
@@ -471,6 +447,7 @@ mod tests {
                 pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 2.0 }],
             }],
             master_db: 0.0,
+            crop: None,
         }
     }
 
@@ -519,27 +496,34 @@ mod tests {
         };
         let outcome = export_work(&paths, &fit_request(&input), &lookup, &cancel, &mut cancel_in_copy, root.path());
         let Ok(JobOutcome::Done { output, note, .. }) = outcome else { panic!("{outcome:?}") };
-        assert_eq!(output, dir.path().join("[CLIPPED] clip.mkv"));
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
         assert_eq!(
             note.as_deref(),
-            Some("Saved \"[CLIPPED] clip.mkv\", but couldn't make the 20 MB copy: it was cancelled.")
+            Some("Saved \"[CLIPPED] clip.mp4\", but couldn't make the 20 MB copy: it was cancelled.")
         );
-        assert_eq!(names(dir.path()), ["Raw", "[CLIPPED] clip.mkv"]);
+        assert_eq!(names(dir.path()), ["Raw", "[CLIPPED] clip.mp4"]);
         assert!(names(videos.path()).is_empty(), "{:?}", names(videos.path()));
         assert!(names(root.path()).is_empty(), "pass-log folder left behind after cancel");
 
-        // An .mkv isn't Discord-ready, so the copy is encoded, as passes 2 and 3 of 3.
+        // An export over 20 MB isn't Discord-ready, so the copy is encoded, as passes 2 and 3 of 3.
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = big_clip(&paths, dir.path());
+        let whole = ExportRequest {
+            duration_s: 4.0,
+            video: vec![VideoPiece { src_start: 0.0, src_end: 4.0 }],
+            audio: Vec::new(),
+            ..fit_request(&input)
+        };
         let mut passes = Vec::new();
         let mut saw_log = false;
         let mut record = |p: JobProgress| {
             passes.push((p.pass, p.passes));
             saw_log |= p.pass == 3 && !names(root.path()).is_empty();
         };
-        let outcome = export_work(&paths, &fit_request(&input), &lookup, &CancelToken::new(), &mut record, root.path());
+        let outcome = export_work(&paths, &whole, &lookup, &CancelToken::new(), &mut record, root.path());
         let Ok(JobOutcome::Done { output, note: None, .. }) = outcome else { panic!("{outcome:?}") };
-        assert_eq!(output, dir.path().join("[CLIPPED] clip.mkv"));
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
+        assert!(fs::metadata(&output).unwrap().len() > SIZE_LIMIT_BYTES, "the export should be over 20 MB");
         assert_eq!(names(videos.path()), ["[20MB] clip.mp4"]);
         assert!(saw_log, "the pass log should live under the work root");
         assert!(names(root.path()).is_empty(), "pass-log folder left behind after success");
@@ -557,10 +541,10 @@ mod tests {
 
         let outcome = export_work(&paths, &fit_request(&input), &lookup, &CancelToken::new(), &mut |_| {}, dir.path());
         let Ok(JobOutcome::Done { output, note, .. }) = outcome else { panic!("{outcome:?}") };
-        assert_eq!(output, dir.path().join("[CLIPPED] clip.mkv"));
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
         assert_eq!(
             note.as_deref(),
-            Some("Saved \"[CLIPPED] clip.mkv\", but couldn't make the 20 MB copy: Couldn't find your Videos folder.")
+            Some("Saved \"[CLIPPED] clip.mp4\", but couldn't make the 20 MB copy: Couldn't find your Videos folder.")
         );
     }
 
@@ -597,5 +581,21 @@ mod tests {
         }
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names, ["clip.mkv"]);
+    }
+
+    #[test]
+    fn a_crop_outside_the_picture_is_refused() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        // The clip is 320x180.
+        let req = ExportRequest { crop: Some(Crop { x: 0, y: 0, w: 320, h: 182 }), ..fit_request(&input) };
+        let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
+        let mut ran = false;
+        let err =
+            export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+        assert_eq!(err.to_string(), CROP_DOESNT_FIT);
+        assert!(!ran, "ffmpeg must not run");
+        assert_eq!(names(dir.path()), ["clip.mkv"]);
     }
 }

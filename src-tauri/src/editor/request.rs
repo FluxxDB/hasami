@@ -1,5 +1,5 @@
 //! The export request the editor sends to Rust, the ffmpeg `-filter_complex` graph built from it,
-//! and the same-codec video encoder choice (AMD AMF hardware when available, else software).
+//! and the Discord-safe H.264 encoder choice (AMD AMF hardware when available, else software).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
+use super::media::Crop;
 use crate::media::{hidden_command, FfmpegPaths, MediaInfo};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -55,6 +56,10 @@ pub struct ExportRequest {
     /// sends no audio tracks instead.
     #[serde(default)]
     pub master_db: f64,
+    /// The picture area to keep, in source pixels; it is scaled back up to the source's size.
+    /// `None` keeps the whole frame.
+    #[serde(default)]
+    pub crop: Option<Crop>,
 }
 
 /// A `-filter_complex` string and the labels to `-map`; `None` when there is no such stream.
@@ -73,11 +78,12 @@ fn num(n: f64) -> String {
     if s == "-0" { "0".to_owned() } else { s.to_owned() }
 }
 
-/// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`; each
+/// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`, then,
+/// with a crop, cut to it and scaled back up to `source_size` (the source's width and height); each
 /// audio track's pieces trimmed, delayed to their place on the timeline, mixed and gained into
 /// `[t<k>]`; all tracks mixed, given the master gain, padded with silence and cut to exactly the
 /// output length (kept audio may end before the video does), and made stereo into `[aout]`.
-pub fn build_graph(req: &ExportRequest) -> Graph {
+pub fn build_graph(req: &ExportRequest, source_size: (u32, u32)) -> Graph {
     let mut parts: Vec<String> = Vec::new();
 
     let video_out = if req.video.is_empty() {
@@ -90,12 +96,19 @@ pub fn build_graph(req: &ExportRequest) -> Graph {
                 num(p.src_end)
             ));
         }
-        if req.video.len() == 1 {
-            parts.push("[v0]null[vout]".to_owned());
-        } else {
-            let labels: String = (0..req.video.len()).map(|i| format!("[v{i}]")).collect();
-            parts.push(format!("{labels}concat=n={}:v=1:a=0[vout]", req.video.len()));
+        let labels: String = (0..req.video.len()).map(|i| format!("[v{i}]")).collect();
+        let mut chain = Vec::new();
+        if req.video.len() > 1 {
+            chain.push(format!("concat=n={}:v=1:a=0", req.video.len()));
         }
+        if let Some(Crop { x, y, w, h }) = req.crop {
+            let (sw, sh) = source_size;
+            chain.push(format!("crop={w}:{h}:{x}:{y},scale={sw}:{sh}:flags=lanczos,setsar=1"));
+        }
+        if chain.is_empty() {
+            chain.push("null".to_owned());
+        }
+        parts.push(format!("{labels}{}[vout]", chain.join(",")));
         Some("[vout]".to_owned())
     };
 
@@ -177,59 +190,37 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// Bitrate arguments shared by the AMF and software H.264/HEVC encoders: average `b`, peak 1.5×.
-fn rate_args(b: u64) -> Vec<String> {
-    vec!["-b:v".into(), b.to_string(), "-maxrate".into(), (b + b / 2).to_string()]
+/// The H.264 encoder for a video export at `bitrate` bits/s (average; peak 1.5×): AMD AMF when
+/// `hw("h264_amf")` says it works here (normally [`encoder_available`]), else libx264. Always
+/// 8-bit 4:2:0, which every Discord client plays.
+pub fn h264_encoder(bitrate: u64, hw: &dyn Fn(&str) -> bool) -> VideoEncoder {
+    let b = bitrate;
+    let rate = args(&["-b:v", &b.to_string(), "-maxrate", &(b + b / 2).to_string()]);
+    let pix_fmt = args(&["-pix_fmt", "yuv420p"]);
+    if hw("h264_amf") {
+        VideoEncoder { codec: "h264_amf", args: [args(&["-rc", "vbr_peak"]), rate, pix_fmt].concat() }
+    } else {
+        VideoEncoder {
+            codec: "libx264",
+            args: [args(&["-preset", "medium"]), rate, args(&["-bufsize", &(b * 2).to_string()]), pix_fmt].concat(),
+        }
+    }
 }
 
-/// Pick an encoder that keeps the source's codec at about `bitrate` bits/s. `hw` says whether a
-/// named hardware encoder works here (normally [`encoder_available`]). Codecs without a rule
-/// here (e.g. ProRes) are encoded as H.264, or as VP9 in WebM, which can't hold H.264.
-pub fn same_codec_encoder(
-    source_codec: &str,
-    container: &str,
-    bitrate: u64,
-    hw: &dyn Fn(&str) -> bool,
-) -> VideoEncoder {
-    let b = bitrate;
-    match source_codec {
-        "hevc" => {
-            let (codec, mut a) = if hw("hevc_amf") {
-                ("hevc_amf", [args(&["-rc", "vbr_peak"]), rate_args(b)].concat())
-            } else {
-                (
-                    "libx265",
-                    [args(&["-preset", "medium"]), rate_args(b), args(&["-bufsize", &(b * 2).to_string(), "-pix_fmt", "yuv420p"])]
-                        .concat(),
-                )
-            };
-            if matches!(container, "mp4" | "mov") {
-                a.extend(args(&["-tag:v", "hvc1"]));
-            }
-            VideoEncoder { codec, args: a }
-        }
-        "av1" => {
-            if hw("av1_amf") {
-                VideoEncoder { codec: "av1_amf", args: args(&["-b:v", &b.to_string()]) }
-            } else {
-                VideoEncoder { codec: "libsvtav1", args: args(&["-b:v", &b.to_string()]) }
-            }
-        }
-        "vp9" => VideoEncoder { codec: "libvpx-vp9", args: args(&["-b:v", &b.to_string()]) },
-        "vp8" if matches!(container, "webm" | "mkv") => VideoEncoder { codec: "libvpx", args: args(&["-b:v", &b.to_string()]) },
-        _ if container == "webm" => VideoEncoder { codec: "libvpx-vp9", args: args(&["-b:v", &b.to_string()]) },
-        // h264 and anything else.
-        _ => {
-            if hw("h264_amf") {
-                VideoEncoder { codec: "h264_amf", args: [args(&["-rc", "vbr_peak"]), rate_args(b)].concat() }
-            } else {
-                VideoEncoder {
-                    codec: "libx264",
-                    args: [args(&["-preset", "medium"]), rate_args(b), args(&["-bufsize", &(b * 2).to_string(), "-pix_fmt", "yuv420p"])]
-                        .concat(),
-                }
-            }
-        }
+/// Source codecs that pack more picture into each bit than H.264 does; re-encoding them as H.264
+/// at the same bitrate would lose quality.
+const DENSER_CODECS: [&str; 3] = ["hevc", "av1", "vp9"];
+/// How much more bitrate H.264 gets than a [`DENSER_CODECS`] source had.
+const DENSER_CODEC_FACTOR: f64 = 1.3;
+
+/// The bitrate a video export encodes at: [`source_video_bitrate`], ×1.3 for HEVC, AV1 and VP9.
+pub fn export_bitrate(info: &MediaInfo) -> u64 {
+    let bps = source_video_bitrate(info);
+    let codec = info.video.as_ref().map_or("", |v| v.codec.as_str());
+    if DENSER_CODECS.contains(&codec) {
+        (bps as f64 * DENSER_CODEC_FACTOR).round() as u64
+    } else {
+        bps
     }
 }
 
@@ -248,15 +239,6 @@ pub fn source_video_bitrate(info: &MediaInfo) -> u64 {
     bps.max(1_000_000)
 }
 
-/// Audio encoder arguments for `container`: Opus for WebM, AAC otherwise.
-pub fn audio_codec_args(container: &str) -> Vec<String> {
-    if container == "webm" {
-        args(&["-c:a", "libopus", "-b:a", "160k"])
-    } else {
-        args(&["-c:a", "aac", "-b:a", "192k"])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,8 +254,11 @@ mod tests {
             video,
             audio,
             master_db: 0.0,
+            crop: None,
         }
     }
+
+    const FRAME: (u32, u32) = (1920, 1080);
 
     fn vp(src_start: f64, src_end: f64) -> VideoPiece {
         VideoPiece { src_start, src_end }
@@ -285,7 +270,7 @@ mod tests {
 
     #[test]
     fn graph_single_piece_no_audio() {
-        let g = build_graph(&req(vec![vp(2.0, 5.0)], vec![], 3.0));
+        let g = build_graph(&req(vec![vp(2.0, 5.0)], vec![], 3.0), FRAME);
         assert_eq!(g.filter, "[0:v:0]trim=start=2:end=5,setpts=PTS-STARTPTS[v0];[v0]null[vout]");
         assert_eq!(g.video_out.as_deref(), Some("[vout]"));
         assert_eq!(g.audio_out, None);
@@ -297,7 +282,7 @@ mod tests {
             AudioTrackRequest { index: 0, gain_db: 0.0, pieces: vec![ap(0.0, 0.0, 12.0), ap(12.0, 31.0, 90.0)] },
             AudioTrackRequest { index: 2, gain_db: -6.0, pieces: vec![ap(0.0, 0.0, 12.0)] },
         ];
-        let g = build_graph(&req(vec![vp(0.0, 12.0), vp(31.0, 90.0)], audio, 71.0));
+        let g = build_graph(&req(vec![vp(0.0, 12.0), vp(31.0, 90.0)], audio, 71.0), FRAME);
         let f = &g.filter;
         assert!(f.contains("concat=n=2:v=1:a=0[vout]"), "{f}");
         assert!(f.contains("[0:a:0]atrim=start=31:end=90,asetpts=PTS-STARTPTS,adelay=12000:all=1"), "{f}");
@@ -312,7 +297,7 @@ mod tests {
     fn graph_master_gain_goes_on_the_final_mix_before_the_pad() {
         let track = |index| AudioTrackRequest { index, gain_db: 0.0, pieces: vec![ap(0.0, 0.0, 3.0)] };
         let louder = ExportRequest { master_db: 6.0, ..req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0) };
-        let f = build_graph(&louder).filter;
+        let f = build_graph(&louder, FRAME).filter;
         assert!(
             f.ends_with(
                 "[t0][t1]amix=inputs=2:normalize=0:duration=longest,volume=6.00dB,\
@@ -322,10 +307,10 @@ mod tests {
         );
 
         let single = ExportRequest { master_db: -2.5, ..req(vec![vp(0.0, 3.0)], vec![track(0)], 3.0) };
-        let f = build_graph(&single).filter;
+        let f = build_graph(&single, FRAME).filter;
         assert!(f.ends_with("[t0]volume=-2.50dB,apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"), "{f}");
 
-        let unity = build_graph(&req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0)).filter;
+        let unity = build_graph(&req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0), FRAME).filter;
         assert_eq!(unity.matches("volume=").count(), 2, "only the two track gains: {unity}");
         assert!(unity.contains("duration=longest,apad="), "{unity}");
     }
@@ -340,7 +325,7 @@ mod tests {
     #[test]
     fn graph_audio_mode_has_no_video() {
         let audio = vec![AudioTrackRequest { index: 0, gain_db: 0.0, pieces: vec![ap(0.0, 1.0, 4.0)] }];
-        let g = build_graph(&req(vec![], audio, 3.0));
+        let g = build_graph(&req(vec![], audio, 3.0), FRAME);
         assert_eq!(g.video_out, None);
         assert_eq!(g.audio_out.as_deref(), Some("[aout]"));
         assert!(!g.filter.contains("[0:v:0]"), "{}", g.filter);
@@ -348,54 +333,66 @@ mod tests {
 
     #[test]
     fn graph_numbers_are_trimmed_not_rounded_away() {
-        let g = build_graph(&req(vec![vp(1.5, 2.123_456_789)], vec![], 0.62));
+        let g = build_graph(&req(vec![vp(1.5, 2.123_456_789)], vec![], 0.62), FRAME);
         assert!(g.filter.contains("trim=start=1.5:end=2.123457"), "{}", g.filter);
     }
 
     #[test]
-    fn encoder_hevc_hw_and_tag() {
-        let e = same_codec_encoder("hevc", "mp4", 10_000_000, &|_| true);
-        assert_eq!(e.codec, "hevc_amf");
-        assert!(e.args.windows(2).any(|w| w == ["-tag:v", "hvc1"]), "{:?}", e.args);
-        assert!(e.args.windows(2).any(|w| w == ["-b:v", "10000000"]), "{:?}", e.args);
-        assert!(e.args.windows(2).any(|w| w == ["-maxrate", "15000000"]), "{:?}", e.args);
+    fn graph_crop_cuts_the_picture_and_scales_it_back_up() {
+        let crop = Some(Crop { x: 0, y: 0, w: 1440, h: 810 });
+        let one = ExportRequest { crop, ..req(vec![vp(2.0, 5.0)], vec![], 3.0) };
+        assert_eq!(
+            build_graph(&one, FRAME).filter,
+            "[0:v:0]trim=start=2:end=5,setpts=PTS-STARTPTS[v0];\
+             [v0]crop=1440:810:0:0,scale=1920:1080:flags=lanczos,setsar=1[vout]"
+        );
 
-        let sw = same_codec_encoder("hevc", "mp4", 10_000_000, &|_| false);
-        assert_eq!(sw.codec, "libx265");
+        let two = ExportRequest {
+            crop: Some(Crop { x: 8, y: 6, w: 640, h: 360 }),
+            ..req(vec![vp(0.0, 1.0), vp(2.0, 3.0)], vec![], 2.0)
+        };
+        let f = build_graph(&two, (1280, 720)).filter;
+        assert!(
+            f.ends_with("[v0][v1]concat=n=2:v=1:a=0,crop=640:360:8:6,scale=1280:720:flags=lanczos,setsar=1[vout]"),
+            "{f}"
+        );
     }
 
     #[test]
-    fn encoder_hevc_in_mkv_has_no_hvc1_tag() {
-        let e = same_codec_encoder("hevc", "mkv", 10_000_000, &|_| false);
-        assert!(!e.args.iter().any(|a| a == "-tag:v"), "{:?}", e.args);
+    fn crop_defaults_to_none_and_parses() {
+        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
+        assert_eq!(serde_json::from_str::<ExportRequest>(json).unwrap().crop, None);
+        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[],
+                       "crop":{"x":0,"y":0,"w":1440,"h":810}}"#;
+        let crop = serde_json::from_str::<ExportRequest>(json).unwrap().crop;
+        assert_eq!(crop, Some(Crop { x: 0, y: 0, w: 1440, h: 810 }));
     }
 
     #[test]
-    fn encoder_unknown_falls_back_to_h264() {
-        let e = same_codec_encoder("prores", "mov", 10_000_000, &|_| false);
+    fn h264_on_amf_when_it_works() {
+        let e = h264_encoder(10_000_000, &|n| n == "h264_amf");
+        assert_eq!(e.codec, "h264_amf");
+        assert_eq!(e.args, ["-rc", "vbr_peak", "-b:v", "10000000", "-maxrate", "15000000", "-pix_fmt", "yuv420p"]);
+    }
+
+    #[test]
+    fn h264_falls_back_to_libx264() {
+        let e = h264_encoder(10_000_000, &|_| false);
         assert_eq!(e.codec, "libx264");
-        assert!(e.args.windows(2).any(|w| w == ["-bufsize", "20000000"]), "{:?}", e.args);
-    }
-
-    #[test]
-    fn encoder_av1_and_vp9() {
-        assert_eq!(same_codec_encoder("av1", "mp4", 5_000_000, &|n| n == "av1_amf").codec, "av1_amf");
-        assert_eq!(same_codec_encoder("av1", "mp4", 5_000_000, &|_| false).codec, "libsvtav1");
-        assert_eq!(same_codec_encoder("vp9", "webm", 5_000_000, &|_| true).codec, "libvpx-vp9");
-    }
-
-    #[test]
-    fn encoder_never_puts_h264_in_webm() {
-        // VP8 keeps its codec in containers that take it; WebM takes no H.264 at all.
-        let vp8 = same_codec_encoder("vp8", "webm", 5_000_000, &|_| true);
-        assert_eq!(vp8.codec, "libvpx");
-        assert_eq!(vp8.args, ["-b:v", "5000000"]);
-        assert_eq!(same_codec_encoder("vp8", "mkv", 5_000_000, &|_| true).codec, "libvpx");
-        assert_eq!(same_codec_encoder("theora", "webm", 5_000_000, &|_| true).codec, "libvpx-vp9");
-        assert_eq!(same_codec_encoder("vp8", "mp4", 5_000_000, &|_| false).codec, "libx264");
+        assert_eq!(
+            e.args,
+            [
+                "-preset", "medium", "-b:v", "10000000", "-maxrate", "15000000", "-bufsize", "20000000",
+                "-pix_fmt", "yuv420p"
+            ]
+        );
     }
 
     fn info(video_bps: Option<u64>, total_bps: Option<u64>, tracks: usize) -> MediaInfo {
+        info_with("h264", video_bps, total_bps, tracks)
+    }
+
+    fn info_with(codec: &str, video_bps: Option<u64>, total_bps: Option<u64>, tracks: usize) -> MediaInfo {
         MediaInfo {
             path: PathBuf::from("in.mp4"),
             container: "mp4".into(),
@@ -404,7 +401,7 @@ mod tests {
             bit_rate: total_bps,
             video: Some(VideoStream {
                 index: 0,
-                codec: "h264".into(),
+                codec: codec.into(),
                 width: 1920,
                 height: 1080,
                 fps: 30.0,
@@ -425,8 +422,14 @@ mod tests {
     }
 
     #[test]
-    fn audio_args_follow_container() {
-        assert_eq!(audio_codec_args("webm"), ["-c:a", "libopus", "-b:a", "160k"]);
-        assert_eq!(audio_codec_args("mp4"), ["-c:a", "aac", "-b:a", "192k"]);
+    fn denser_codecs_get_more_bitrate() {
+        for codec in ["hevc", "av1", "vp9"] {
+            assert_eq!(export_bitrate(&info_with(codec, Some(10_000_000), None, 1)), 13_000_000, "{codec}");
+        }
+        for codec in ["h264", "vp8", "prores"] {
+            assert_eq!(export_bitrate(&info_with(codec, Some(10_000_000), None, 1)), 10_000_000, "{codec}");
+        }
+        // The 1 Mbit/s floor comes first.
+        assert_eq!(export_bitrate(&info_with("hevc", Some(200_000), None, 1)), 1_300_000);
     }
 }
