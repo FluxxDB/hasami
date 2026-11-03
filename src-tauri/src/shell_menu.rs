@@ -80,6 +80,9 @@ pub fn register(exe: &Path, classes_root: &str) -> Result<(), MenuError> {
         menu.set_value("MUIVerb", &"Hasami")?;
         menu.set_value("SubCommands", &"")?;
         menu.set_value("Icon", &format!("{exe},0"))?;
+        // Explorer hides a cascade whose parent has the default "Document" model once more than
+        // 15 files are selected, so the parent needs "Player" as well as each verb.
+        menu.set_value("MultiSelectModel", &"Player")?;
 
         let (shell, _) = menu.create_subkey("shell")?;
         for verb in VERBS.iter().filter(|v| v.skip_for != Some(ext)) {
@@ -214,6 +217,11 @@ mod tests {
         let menu = hasami_key("mkv");
         assert_eq!(menu.get_value::<String, _>("MUIVerb").unwrap(), "Hasami");
         assert_eq!(menu.get_value::<String, _>("SubCommands").unwrap(), "");
+        assert_eq!(
+            menu.get_value::<String, _>("MultiSelectModel").unwrap(),
+            "Player",
+            "the cascade itself must allow large selections"
+        );
         assert_eq!(
             menu.get_value::<String, _>("Icon").unwrap(),
             format!(r"{EXE},0")
