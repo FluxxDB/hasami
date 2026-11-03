@@ -4,13 +4,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::fsops::CLIPPED_PREFIX;
+use crate::fsops::{CLIPPED_PREFIX, COMPRESSED_PREFIX};
 
 /// The extensions Hasami treats as videos (the same ones its right-click menu is registered for).
 pub const VIDEO_EXTS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
 
-/// The prefix of Compress's outputs. TODO(Task 17): switch to `fsops::COMPRESSED_PREFIX` once it is merged.
-const COMPRESSED_PREFIX: &str = "[20MB] ";
 
 /// The video next to `current` in the folder's date order: siblings in the same folder with a video extension,
 /// ordered by modified time (oldest first), ties by file name (case-insensitive); `[CLIPPED] ` and `[20MB] `
