@@ -30,7 +30,7 @@ export type JobEvent =
     }
   | { type: 'Progress'; id: number; pass: number; passes: number; fraction: number; eta_s: number | null }
   | { type: 'NeedsConfirm'; id: number; width: number; height: number; fps: number }
-  | { type: 'Done'; id: number; output: string; bytes: number }
+  | { type: 'Done'; id: number; output: string; bytes: number; note?: string }
   | { type: 'Unchanged'; id: number; reason: string }
   // `original_intact` is false when the original went to the Recycle Bin and `message` says
   // where the new file is; the window then leaves out "The original file was not changed."

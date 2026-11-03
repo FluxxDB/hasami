@@ -4,24 +4,30 @@
 //! - **Quick export** and **Export + save raw** re-encode the edit with the source's own video
 //!   codec at about its bitrate, in its own container. The original then goes to the Recycle
 //!   Bin, or into a `Raw` folder next to it.
-//! - With **Fit to 20 MB** they instead render a near-lossless H.264 intermediate and run the
-//!   Compress pipeline on it, giving an `.mp4` of at most [`SIZE_LIMIT_BYTES`].
+//! - With the **20 MB copy** toggle on, they then also save `[20MB] <name>.mp4` (at most
+//!   [`SIZE_LIMIT_BYTES`]) in the Windows Videos folder, made from the saved `[CLIPPED]` file by
+//!   the Compress pipeline, or copied as is when that file is already small and Discord-ready.
+//!   A failed copy never fails the export: the outcome is still `Done`, with a note saying why.
 //! - **Export audio** mixes the kept audio into one `.mp3`; the original is untouched.
 //!
-//! As with every job, the result is written to a hidden temp file, verified, and only then given
+//! As with every job, each result is written to a hidden temp file, verified, and only then given
 //! its name; the original is touched last. On any error or cancel the temp file is deleted.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use super::compress::{create_work_dir, encode_to_limit, RemoveOnDrop};
+use super::compress::{encode_to_limit, RemoveOnDrop};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, SIZE_LIMIT_BYTES};
 use crate::editor::request::{
     audio_codec_args, build_graph, encoder_available, same_codec_encoder, source_video_bitrate,
     ExportMode, ExportRequest, Graph, VideoEncoder,
 };
-use crate::fsops::{clipped_path, commit_new, commit_replace, move_to_raw, temp_path_for};
+use crate::fsops::{
+    clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir,
+    FsError, NO_VIDEOS_FOLDER,
+};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
 use crate::verify::{verify_output, VerifyError};
@@ -32,26 +38,47 @@ const NO_AUDIO: &str = "This clip has no audio to export.";
 const NO_VIDEO: &str = "Couldn't export this clip: there's no video left in it.";
 /// Shown when the rendered result fails verification for a reason other than its size.
 const DIDNT_CHECK_OUT: &str = "Couldn't export this clip: the result didn't check out.";
-/// Shown when a Fit to 20 MB result is still over the limit at the final check.
+/// Shown when the 20 MB copy is still over the limit at the final check.
 const OVER_LIMIT: &str = "Couldn't get this clip under 20 MB.";
-/// A Fit to 20 MB export: the intermediate, then the two Compress passes.
-const FIT_PASSES: u8 = 3;
+/// Shown when the already-small `[CLIPPED]` file couldn't be copied into the Videos folder.
+const COPY_FAILED: &str = "Couldn't copy the file into your Videos folder.";
+/// The reason in the note when the 20 MB copy was cancelled.
+const COPY_CANCELLED: &str = "it was cancelled.";
+/// An export with the 20 MB copy: the `[CLIPPED]` render, then the copy's two Compress passes.
+const COPY_PASSES: u8 = 3;
 
-/// Render `req` and save it as `[CLIPPED] <name>` per its mode (see the module docs).
+/// Finds the folder the 20 MB copy goes into.
+type VideosDirFn<'a> = &'a dyn Fn() -> Result<PathBuf, FsError>;
+
+/// Render `req` and save it as `[CLIPPED] <name>` per its mode, plus the 20 MB copy in the
+/// Windows Videos folder when asked (see the module docs).
 pub fn export(
     paths: &FfmpegPaths,
     req: &ExportRequest,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<JobOutcome, JobError> {
-    export_in(paths, req, cancel, on_progress, &std::env::temp_dir())
+    export_work(paths, req, &videos_dir, cancel, on_progress, &std::env::temp_dir())
 }
 
-/// [`export`] with the parent of the Fit to 20 MB work folder given, so tests can check that it
-/// is cleaned up.
-fn export_in(
+/// [`export`] with the 20 MB copy going into `videos_dir` instead of the Windows Videos folder.
+pub fn export_in(
     paths: &FfmpegPaths,
     req: &ExportRequest,
+    videos_dir: &Path,
+    cancel: &CancelToken,
+    on_progress: &mut dyn FnMut(JobProgress),
+) -> Result<JobOutcome, JobError> {
+    let videos = || Ok(videos_dir.to_path_buf());
+    export_work(paths, req, &videos, cancel, on_progress, &std::env::temp_dir())
+}
+
+/// [`export`] with the Videos folder lookup and the parent of the copy's pass-log folder given,
+/// so tests can check that it is cleaned up.
+fn export_work(
+    paths: &FfmpegPaths,
+    req: &ExportRequest,
+    videos_dir: VideosDirFn,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
     work_root: &Path,
@@ -67,22 +94,91 @@ fn export_in(
         (Render::Mp3, graph)
     } else if req.video.is_empty() {
         return Err(JobError::Message(NO_VIDEO.to_owned()));
-    } else if req.fit_20mb {
-        (Render::Fit, build_graph(req))
     } else {
         (Render::SameCodec(Container::of(&info)), build_graph(req))
     };
+    // The toggle belongs to the two video exports.
+    let make_copy = req.fit_20mb && render != Render::Mp3;
+    let passes = if make_copy { COPY_PASSES } else { 1 };
 
     let final_path = clipped_path(&req.input, render.extension());
     // Deleted however this ends (a committed temp is already gone), unless a failed commit
     // left the only copy of the result there.
     let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
-    let job = Job { paths, req, info: &info, graph: &graph, render, temp: temp.path(), work_root };
+    let job = Job { paths, req, info: &info, graph: &graph, render, temp: temp.path(), passes };
     let result = job.run(&final_path, cancel, on_progress);
     if result.as_ref().is_err_and(JobError::keeps_new_file) {
         temp.keep();
     }
-    result
+    let bytes = result?;
+
+    // The `[CLIPPED]` file is saved and the original dealt with: nothing the copy does can put
+    // either at risk, so its failure is only a note. Its passes 1–2 are this export's 2–3.
+    let note = if make_copy {
+        let mut copy_progress =
+            |p: JobProgress| on_progress(JobProgress { pass: p.pass + 1, passes, fraction: p.fraction });
+        save_20mb_copy(paths, &final_path, videos_dir, work_root, cancel, &mut copy_progress)
+            .err()
+            .map(|e| copy_failed(&final_path, &e))
+    } else {
+        None
+    };
+    Ok(JobOutcome::Done { output: final_path, bytes, note })
+}
+
+/// Save `clipped` (the verified, committed export) as `[20MB] <name>.mp4` in the Videos folder:
+/// copied as is when it's already small and Discord-ready, otherwise through the Compress
+/// pipeline (reported as passes 1–2 of 2; a plain copy reports pass 2 done). Never touches
+/// `clipped`. Returns the copy's path.
+fn save_20mb_copy(
+    paths: &FfmpegPaths,
+    clipped: &Path,
+    videos_dir: VideosDirFn,
+    work_root: &Path,
+    cancel: &CancelToken,
+    on_progress: &mut dyn FnMut(JobProgress),
+) -> Result<PathBuf, JobError> {
+    let videos = videos_dir()?;
+    if !videos.is_dir() {
+        return Err(JobError::Message(NO_VIDEOS_FOLDER.to_owned()));
+    }
+    let info = probe(paths, clipped).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
+    let final_path = compressed_path(clipped, &videos);
+    let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
+
+    match plan_compress(&info)? {
+        CompressDecision::AlreadySmall => {
+            fs::copy(clipped, temp.path()).map_err(|_| JobError::Message(COPY_FAILED.to_owned()))?;
+            verify_output(paths, temp.path(), info.duration_s, Some(SIZE_LIMIT_BYTES))
+                .map_err(plain_verify_error)?;
+            on_progress(JobProgress { pass: 2, passes: 2, fraction: 1.0 });
+        }
+        CompressDecision::Encode(plan) => {
+            encode_to_limit(paths, clipped, &info, &plan, temp.path(), work_root, cancel, on_progress)?;
+        }
+    }
+
+    if cancel.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    if let Err(e) = commit_new(temp.path(), &final_path) {
+        if e.kept_new_file.is_some() {
+            // The rename may have happened after all; keep what may be the only copy.
+            temp.keep();
+        }
+        return Err(e.into());
+    }
+    Ok(final_path)
+}
+
+/// `Saved "<name>", but couldn't make the 20 MB copy: <reason>`
+fn copy_failed(saved: &Path, e: &JobError) -> String {
+    let name = saved.file_name().unwrap_or_default().to_string_lossy();
+    let reason = match e {
+        JobError::Cancelled => COPY_CANCELLED.to_owned(),
+        other => other.to_string(),
+    };
+    format!("Saved \"{name}\", but couldn't make the 20 MB copy: {reason}")
 }
 
 /// How the edit is turned into a file.
@@ -90,8 +186,6 @@ fn export_in(
 enum Render {
     /// The source's video codec, in the source's container.
     SameCodec(Container),
-    /// Intermediate, then the Compress pipeline: H.264/AAC `.mp4` within the size limit.
-    Fit,
     /// The audio mix alone, as MP3.
     Mp3,
 }
@@ -100,7 +194,6 @@ impl Render {
     fn extension(self) -> &'static str {
         match self {
             Render::SameCodec(c) => c.ext,
-            Render::Fit => "mp4",
             Render::Mp3 => "mp3",
         }
     }
@@ -141,30 +234,32 @@ struct Job<'a> {
     graph: &'a Graph,
     render: Render,
     temp: &'a Path,
-    work_root: &'a Path,
+    /// Passes in the whole job; the render is always pass 1.
+    passes: u8,
 }
 
 impl Job<'_> {
     /// Render into the temp file, verify it, then commit it as `final_path` per the mode.
+    /// Returns the saved file's size.
     fn run(
         &self,
         final_path: &Path,
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(JobProgress),
-    ) -> Result<JobOutcome, JobError> {
+    ) -> Result<u64, JobError> {
         let input = self.req.input.as_path();
-        match self.render {
+        let args = match self.render {
             Render::SameCodec(container) => {
-                let args = same_codec_args(input, self.graph, &self.encoder(container), container, self.temp);
-                self.one_pass(&args, cancel, on_progress)?;
+                same_codec_args(input, self.graph, &self.encoder(container), container, self.temp)
             }
-            Render::Mp3 => self.one_pass(&mp3_args(input, self.graph, self.temp), cancel, on_progress)?,
-            Render::Fit => self.fit(cancel, on_progress)?,
-        }
+            Render::Mp3 => mp3_args(input, self.graph, self.temp),
+        };
+        run_ffmpeg(self.paths, &args, self.req.duration_s, cancel, &mut |fraction| {
+            on_progress(JobProgress { pass: 1, passes: self.passes, fraction })
+        })?;
 
-        let max_bytes = (self.render == Render::Fit).then_some(SIZE_LIMIT_BYTES);
         let verified =
-            verify_output(self.paths, self.temp, self.req.duration_s, max_bytes).map_err(plain_verify_error)?;
+            verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
 
         // Last chance to back out; once the commit starts it runs to completion or rolls back.
         if cancel.is_cancelled() {
@@ -179,7 +274,7 @@ impl Job<'_> {
             }
             ExportMode::Audio => commit_new(self.temp, final_path)?,
         }
-        Ok(JobOutcome::Done { output: final_path.to_path_buf(), bytes: verified.size_bytes })
+        Ok(verified.size_bytes)
     }
 
     /// The source's codec at about its video bitrate, on AMD hardware when it works here.
@@ -187,54 +282,6 @@ impl Job<'_> {
         let codec = self.info.video.as_ref().map_or("h264", |v| v.codec.as_str());
         let bitrate = source_video_bitrate(self.info);
         same_codec_encoder(codec, container.ext, bitrate, &|name| encoder_available(self.paths, name))
-    }
-
-    /// Run a single ffmpeg pass over the edit, reported as pass 1 of 1.
-    fn one_pass(
-        &self,
-        args: &[OsString],
-        cancel: &CancelToken,
-        on_progress: &mut dyn FnMut(JobProgress),
-    ) -> Result<(), JobError> {
-        run_ffmpeg(self.paths, args, self.req.duration_s, cancel, &mut |fraction| {
-            on_progress(JobProgress { pass: 1, passes: 1, fraction })
-        })?;
-        Ok(())
-    }
-
-    /// Fit to 20 MB: render the edit to an intermediate in a fresh work folder (pass 1), then
-    /// run the two Compress passes on it (passes 2–3), or, if it already fits, just remux it
-    /// (reported as pass 3, so the bar still ends full).
-    /// The work folder is removed however this ends.
-    fn fit(&self, cancel: &CancelToken, on_progress: &mut dyn FnMut(JobProgress)) -> Result<(), JobError> {
-        let work = RemoveOnDrop::dir(create_work_dir(self.work_root, "hasami-export")?);
-        let intermediate = work.path().join("edit.mp4");
-        let at_pass = |pass: u8, fraction: f64| JobProgress { pass, passes: FIT_PASSES, fraction };
-
-        let args = intermediate_args(&self.req.input, self.graph, &intermediate);
-        run_ffmpeg(self.paths, &args, self.req.duration_s, cancel, &mut |f| on_progress(at_pass(1, f)))?;
-        let info = probe(self.paths, &intermediate).map_err(|_| JobError::Message(DIDNT_CHECK_OUT.to_owned()))?;
-
-        match plan_compress(&info)? {
-            CompressDecision::AlreadySmall => {
-                let args = remux_args(&intermediate, self.temp);
-                run_ffmpeg(self.paths, &args, info.duration_s, cancel, &mut |f| on_progress(at_pass(3, f)))?;
-            }
-            CompressDecision::Encode(plan) => {
-                // Its passes 1–2 are this export's passes 2–3.
-                encode_to_limit(
-                    self.paths,
-                    &intermediate,
-                    &info,
-                    &plan,
-                    self.temp,
-                    work.path(),
-                    cancel,
-                    &mut |p| on_progress(at_pass(p.pass + 1, p.fraction)),
-                )?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -302,32 +349,8 @@ fn mp3_args(input: &Path, graph: &Graph, out: &Path) -> Vec<OsString> {
     a
 }
 
-/// Fit pass 1: the edit at near-source quality, for the Compress pipeline to work from.
-/// 8-bit 4:2:0 so that a remux of it (when it already fits) plays everywhere.
-fn intermediate_args(input: &Path, graph: &Graph, out: &Path) -> Vec<OsString> {
-    let mut a = graph_args(input, graph);
-    push(&mut a, &["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p"]);
-    if graph.audio_out.is_some() {
-        push(&mut a, &["-c:a", "aac", "-b:a", "320k"]);
-    }
-    push(&mut a, &["-f", "mp4"]);
-    a.push(out.as_os_str().to_owned());
-    a
-}
-
-/// Fit when the intermediate is already small enough: copy it into the temp file.
-fn remux_args(input: &Path, out: &Path) -> Vec<OsString> {
-    let mut a = vec![OsString::from("-i"), input.as_os_str().to_owned()];
-    push(&mut a, &["-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4"]);
-    a.push(out.as_os_str().to_owned());
-    a
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-
     use super::*;
     use crate::editor::request::{AudioPiece, AudioTrackRequest, VideoPiece};
     use crate::media::hidden_command;
@@ -398,16 +421,11 @@ mod tests {
     }
 
     #[test]
-    fn mp3_and_intermediate_args() {
+    fn mp3_args_are_vbr_mp3() {
         let audio_only = Graph { video_out: None, ..graph(true) };
         assert_eq!(
             text(&mp3_args(Path::new("in.mp4"), &audio_only, Path::new("tmp"))),
             "-i in.mp4 -filter_complex G -map [aout] -c:a libmp3lame -q:a 2 -f mp3 tmp"
-        );
-        assert_eq!(
-            text(&intermediate_args(Path::new("in.mp4"), &graph(true), Path::new("edit.mp4"))),
-            "-i in.mp4 -filter_complex G -map [vout] -map [aout] -c:v libx264 -preset veryfast -crf 14 \
-             -pix_fmt yuv420p -c:a aac -b:a 320k -f mp4 edit.mp4"
         );
     }
 
@@ -420,6 +438,15 @@ mod tests {
         assert_eq!(
             raw_move_failed(Path::new(r"C:\d\[CLIPPED] clip.mp4")),
             "Saved \"[CLIPPED] clip.mp4\", but couldn't move the original into the Raw folder."
+        );
+        let saved = Path::new(r"C:\d\[CLIPPED] clip.mp4");
+        assert_eq!(
+            copy_failed(saved, &JobError::Message("Couldn't get this video under 20 MB.".into())),
+            "Saved \"[CLIPPED] clip.mp4\", but couldn't make the 20 MB copy: Couldn't get this video under 20 MB."
+        );
+        assert_eq!(
+            copy_failed(saved, &JobError::Cancelled),
+            "Saved \"[CLIPPED] clip.mp4\", but couldn't make the 20 MB copy: it was cancelled."
         );
     }
 
@@ -451,33 +478,98 @@ mod tests {
                 gain_db: 0.0,
                 pieces: vec![AudioPiece { at: 0.0, src_start: 0.5, src_end: 2.0 }],
             }],
+            master_db: 0.0,
+        }
+    }
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> =
+            fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_cancelled_render_saves_nothing() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let videos = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        let lookup = || Ok(videos.path().to_path_buf());
+
+        let cancel = CancelToken::new();
+        let outcome =
+            export_work(&paths, &fit_request(&input), &lookup, &cancel, &mut |_| cancel.cancel(), root.path());
+        assert!(matches!(outcome, Err(JobError::Cancelled)), "{outcome:?}");
+        assert_eq!(names(dir.path()), ["clip.mkv"], "only the untouched input may remain");
+        assert!(names(videos.path()).is_empty());
+        assert!(names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn copy_pass_log_is_removed_after_cancel_and_success() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let videos = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lookup = || Ok(videos.path().to_path_buf());
+
+        // Cancelled during the copy: the [CLIPPED] file is saved and the original moved already,
+        // so the export is still done, with a note.
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        let cancel = CancelToken::new();
+        let mut cancel_in_copy = |p: JobProgress| {
+            if p.pass >= 2 {
+                cancel.cancel();
+            }
+        };
+        let outcome = export_work(&paths, &fit_request(&input), &lookup, &cancel, &mut cancel_in_copy, root.path());
+        let Ok(JobOutcome::Done { output, note, .. }) = outcome else { panic!("{outcome:?}") };
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mkv"));
+        assert_eq!(
+            note.as_deref(),
+            Some("Saved \"[CLIPPED] clip.mkv\", but couldn't make the 20 MB copy: it was cancelled.")
+        );
+        assert_eq!(names(dir.path()), ["Raw", "[CLIPPED] clip.mkv"]);
+        assert!(names(videos.path()).is_empty(), "{:?}", names(videos.path()));
+        assert!(names(root.path()).is_empty(), "pass-log folder left behind after cancel");
+
+        // An .mkv isn't Discord-ready, so the copy is encoded, as passes 2 and 3 of 3.
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        let mut passes = Vec::new();
+        let mut saw_log = false;
+        let mut record = |p: JobProgress| {
+            passes.push((p.pass, p.passes));
+            saw_log |= p.pass == 3 && !names(root.path()).is_empty();
+        };
+        let outcome = export_work(&paths, &fit_request(&input), &lookup, &CancelToken::new(), &mut record, root.path());
+        let Ok(JobOutcome::Done { output, note: None, .. }) = outcome else { panic!("{outcome:?}") };
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mkv"));
+        assert_eq!(names(videos.path()), ["[20MB] clip.mp4"]);
+        assert!(saw_log, "the pass log should live under the work root");
+        assert!(names(root.path()).is_empty(), "pass-log folder left behind after success");
+        for pass in 1..=3 {
+            assert!(passes.contains(&(pass, 3)), "no pass {pass} of 3 in {passes:?}");
         }
     }
 
     #[test]
-    fn fit_work_folder_is_removed_after_cancel_and_success() {
+    fn a_missing_videos_folder_is_a_note() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let empty = |root: &Path| fs::read_dir(root).unwrap().next().is_none();
         let input = small_clip(&paths, dir.path());
+        let lookup = || Err(FsError::new(NO_VIDEOS_FOLDER));
 
-        let cancel = CancelToken::new();
-        let outcome = export_in(&paths, &fit_request(&input), &cancel, &mut |_| cancel.cancel(), root.path());
-        assert!(matches!(outcome, Err(JobError::Cancelled)), "{outcome:?}");
-        assert!(empty(root.path()), "work folder left behind after cancel");
-        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names, ["clip.mkv"], "only the untouched input may remain");
-
-        let mut passes = Vec::new();
-        let mut record = |p: JobProgress| passes.push((p.pass, p.passes));
-        let outcome = export_in(&paths, &fit_request(&input), &CancelToken::new(), &mut record, root.path());
-        let Ok(JobOutcome::Done { output, .. }) = outcome else { panic!("{outcome:?}") };
-        assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
-        assert!(empty(root.path()), "work folder left behind after success");
-        // A small edit already fits, so the intermediate is just remuxed, as the last pass.
-        assert!(passes.contains(&(1, 3)) && passes.contains(&(3, 3)), "{passes:?}");
-        assert!(passes.iter().all(|&(pass, of)| of == 3 && pass != 2), "{passes:?}");
+        let outcome = export_work(&paths, &fit_request(&input), &lookup, &CancelToken::new(), &mut |_| {}, dir.path());
+        let Ok(JobOutcome::Done { output, note, .. }) = outcome else { panic!("{outcome:?}") };
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mkv"));
+        assert_eq!(
+            note.as_deref(),
+            Some("Saved \"[CLIPPED] clip.mkv\", but couldn't make the 20 MB copy: Couldn't find your Videos folder.")
+        );
     }
 
     #[test]
@@ -488,7 +580,9 @@ mod tests {
         for (mode, fit) in [(ExportMode::Quick, false), (ExportMode::SaveRaw, true)] {
             let req = ExportRequest { mode, fit_20mb: fit, video: Vec::new(), ..fit_request(&input) };
             let mut ran = false;
-            let err = export_in(&paths, &req, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+            let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
+            let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path())
+                .unwrap_err();
             assert_eq!(err.to_string(), NO_VIDEO);
             assert!(!ran, "ffmpeg must not run");
         }

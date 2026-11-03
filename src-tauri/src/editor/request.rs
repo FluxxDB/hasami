@@ -51,6 +51,10 @@ pub struct ExportRequest {
     pub duration_s: f64,
     pub video: Vec<VideoPiece>,
     pub audio: Vec<AudioTrackRequest>,
+    /// Gain in dB applied to the final mix of every track. Never −∞: at that setting the editor
+    /// sends no audio tracks instead.
+    #[serde(default)]
+    pub master_db: f64,
 }
 
 /// A `-filter_complex` string and the labels to `-map`; `None` when there is no such stream.
@@ -71,8 +75,8 @@ fn num(n: f64) -> String {
 
 /// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`; each
 /// audio track's pieces trimmed, delayed to their place on the timeline, mixed and gained into
-/// `[t<k>]`; all tracks mixed, padded with silence and cut to exactly the output length (kept
-/// audio may end before the video does), and made stereo into `[aout]`.
+/// `[t<k>]`; all tracks mixed, given the master gain, padded with silence and cut to exactly the
+/// output length (kept audio may end before the video does), and made stereo into `[aout]`.
 pub fn build_graph(req: &ExportRequest) -> Graph {
     let mut parts: Vec<String> = Vec::new();
 
@@ -127,9 +131,14 @@ pub fn build_graph(req: &ExportRequest) -> Graph {
         } else {
             String::new()
         };
+        let master = if req.master_db != 0.0 {
+            format!("volume={:.2}dB,", req.master_db)
+        } else {
+            String::new()
+        };
         let dur = num(req.duration_s);
         parts.push(format!(
-            "{}{mix}apad=whole_dur={dur},atrim=end={dur},aformat=channel_layouts=stereo[aout]",
+            "{}{mix}{master}apad=whole_dur={dur},atrim=end={dur},aformat=channel_layouts=stereo[aout]",
             track_labels.concat()
         ));
         Some("[aout]".to_owned())
@@ -262,6 +271,7 @@ mod tests {
             duration_s,
             video,
             audio,
+            master_db: 0.0,
         }
     }
 
@@ -296,6 +306,35 @@ mod tests {
         assert!(f.contains("amix=inputs=2:normalize=0:duration=longest"), "{f}");
         assert!(f.ends_with("apad=whole_dur=71,atrim=end=71,aformat=channel_layouts=stereo[aout]"), "{f}");
         assert_eq!(g.audio_out.as_deref(), Some("[aout]"));
+    }
+
+    #[test]
+    fn graph_master_gain_goes_on_the_final_mix_before_the_pad() {
+        let track = |index| AudioTrackRequest { index, gain_db: 0.0, pieces: vec![ap(0.0, 0.0, 3.0)] };
+        let louder = ExportRequest { master_db: 6.0, ..req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0) };
+        let f = build_graph(&louder).filter;
+        assert!(
+            f.ends_with(
+                "[t0][t1]amix=inputs=2:normalize=0:duration=longest,volume=6.00dB,\
+                 apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"
+            ),
+            "{f}"
+        );
+
+        let single = ExportRequest { master_db: -2.5, ..req(vec![vp(0.0, 3.0)], vec![track(0)], 3.0) };
+        let f = build_graph(&single).filter;
+        assert!(f.ends_with("[t0]volume=-2.50dB,apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"), "{f}");
+
+        let unity = build_graph(&req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0)).filter;
+        assert_eq!(unity.matches("volume=").count(), 2, "only the two track gains: {unity}");
+        assert!(unity.contains("duration=longest,apad="), "{unity}");
+    }
+
+    #[test]
+    fn master_db_defaults_to_zero() {
+        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
+        let req: ExportRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.master_db, 0.0);
     }
 
     #[test]

@@ -266,7 +266,15 @@ pub enum EditorEvent {
     ExportStarted { id: u64, input: String },
     /// `fraction` covers the whole export, across all its passes.
     ExportProgress { id: u64, fraction: f64 },
-    ExportDone { id: u64, input: String, output: String, bytes: u64 },
+    ExportDone {
+        id: u64,
+        input: String,
+        output: String,
+        bytes: u64,
+        /// The export was saved but something else wasn't (the 20 MB copy); plain language.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     ExportFailed { id: u64, input: String, message: String, original_intact: bool },
     ProxyProgress { session: u64, fraction: f64 },
     /// A deferred discard sent the clip to the Recycle Bin.
@@ -978,9 +986,9 @@ impl Flow {
                 out.push(Effect::Decline(id));
                 return;
             }
-            JobEvent::Done { output, bytes, .. } => {
+            JobEvent::Done { output, bytes, note, .. } => {
                 self.exports.remove(&id);
-                EditorEvent::ExportDone { id, input: input.clone(), output, bytes }
+                EditorEvent::ExportDone { id, input: input.clone(), output, bytes, note }
             }
             JobEvent::Unchanged { reason, .. } => {
                 self.exports.remove(&id);
@@ -1376,7 +1384,7 @@ mod tests {
     }
 
     fn done(id: u64) -> JobEvent {
-        JobEvent::Done { id, output: format!("{id}.out.mp4"), bytes: 2 }
+        JobEvent::Done { id, output: format!("{id}.out.mp4"), bytes: 2, note: None }
     }
 
     fn emits(events: &[JobEvent]) -> Vec<Effect> {
@@ -1578,7 +1586,7 @@ mod tests {
             if spec.input.to_string_lossy().starts_with("fail") {
                 return Err(JobError::Message("Couldn't export this clip.".into()));
             }
-            Ok(JobOutcome::Done { output: spec.input.with_extension("out.mp4"), bytes: 2 })
+            Ok(JobOutcome::Done { output: spec.input.with_extension("out.mp4"), bytes: 2, note: None })
         }
     }
 
@@ -1639,6 +1647,7 @@ mod tests {
             duration_s: 2.0,
             video: Vec::new(),
             audio: Vec::new(),
+            master_db: 0.0,
         })))
     }
 
@@ -1654,7 +1663,7 @@ mod tests {
             to_editor(&[
                 EditorEvent::ExportStarted { id, input: "t.mp4".into() },
                 EditorEvent::ExportProgress { id, fraction: 0.5 },
-                EditorEvent::ExportDone { id, input: "t.mp4".into(), output: "t.out.mp4".into(), bytes: 2 },
+                EditorEvent::ExportDone { id, input: "t.mp4".into(), output: "t.out.mp4".into(), bytes: 2, note: None },
             ])
         );
         assert!(f.on_editor_closed(true).contains(&Effect::Exit));
@@ -1744,7 +1753,20 @@ mod tests {
                 id: 5,
                 input: "t.mp4".into(),
                 output: "5.out.mp4".into(),
-                bytes: 2
+                bytes: 2,
+                note: None
+            }])
+        );
+        let mut f = exporting();
+        let noted = JobEvent::Done { id: 5, output: "o.mp4".into(), bytes: 2, note: Some("n".into()) };
+        assert_eq!(
+            f.on_job_event(noted, false),
+            to_editor(&[EditorEvent::ExportDone {
+                id: 5,
+                input: "t.mp4".into(),
+                output: "o.mp4".into(),
+                bytes: 2,
+                note: Some("n".into())
             }])
         );
         assert_eq!(f.on_job_event(JobEvent::Drained, true), vec![]);

@@ -139,6 +139,9 @@ pub enum JobEvent {
         id: u64,
         output: String,
         bytes: u64,
+        /// See [`JobOutcome::Done`]: the output was saved, but something else wasn't.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Unchanged {
         id: u64,
@@ -430,8 +433,8 @@ impl Shared {
                 }
                 Ok(JobOutcome::NeedsConfirm { .. }) if cancel.is_cancelled() => cancelled(),
                 Ok(JobOutcome::NeedsConfirm { .. }) => JobEvent::Failed { id, message: UNEXPECTED.into(), original_intact: true },
-                Ok(JobOutcome::Done { output, bytes }) => {
-                    JobEvent::Done { id, output: output.display().to_string(), bytes }
+                Ok(JobOutcome::Done { output, bytes, note }) => {
+                    JobEvent::Done { id, output: output.display().to_string(), bytes, note }
                 }
                 Ok(JobOutcome::Unchanged { reason }) => JobEvent::Unchanged { id, reason },
                 Err(_) if cancel.is_cancelled() => cancelled(),
@@ -598,7 +601,7 @@ mod tests {
     }
 
     fn done_outcome(spec: &JobSpec) -> Result<JobOutcome, JobError> {
-        Ok(JobOutcome::Done { output: spec.input.with_extension("out"), bytes: 10 })
+        Ok(JobOutcome::Done { output: spec.input.with_extension("out"), bytes: 10, note: None })
     }
 
     /// Blocks until the cancel token is set, like a real encode would.
@@ -898,6 +901,7 @@ mod tests {
             duration_s: 2.0,
             video: Vec::new(),
             audio: Vec::new(),
+            master_db: 0.0,
         }
     }
 
@@ -920,6 +924,19 @@ mod tests {
             "{started:?}"
         );
         assert!(all.iter().any(done(id)));
+    }
+
+    #[test]
+    fn a_done_note_reaches_the_event() {
+        let (queue, events, _log) = queue_with(|spec, _, _, _| {
+            Ok(JobOutcome::Done { output: spec.input.clone(), bytes: 1, note: Some("but".into()) })
+        });
+        let id = queue.enqueue_one(JobKind::Export(ExportJob(Arc::new(export_request("c.mp4")))), PathBuf::from("c.mp4"));
+        let all = events.wait_drained();
+        assert!(
+            all.iter().any(|e| matches!(e, JobEvent::Done { id: i, note: Some(n), .. } if *i == id && n == "but")),
+            "{all:?}"
+        );
     }
 
     /// Exports belong to the editor: they never appear in the progress window's "File N of M"
@@ -1015,6 +1032,13 @@ mod tests {
             serde_json::json!({"type": "Queued", "snapshot": {"current_index": 3, "total": 12}})
         );
         assert_eq!(serde_json::to_value(&JobEvent::Drained).unwrap(), serde_json::json!({"type": "Drained"}));
+        let done = JobEvent::Done { id: 3, output: "o.mp4".into(), bytes: 9, note: None };
+        assert_eq!(
+            serde_json::to_value(&done).unwrap(),
+            serde_json::json!({"type": "Done", "id": 3, "output": "o.mp4", "bytes": 9})
+        );
+        let noted = JobEvent::Done { id: 3, output: "o.mp4".into(), bytes: 9, note: Some("n".into()) };
+        assert_eq!(serde_json::to_value(&noted).unwrap()["note"], "n");
     }
 
     #[test]
