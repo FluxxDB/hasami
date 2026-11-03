@@ -131,3 +131,38 @@ fn run_progress_comes_from_out_time_not_just_end_marker() {
     );
     assert_eq!(seen.last(), Some(&1.0), "progress=end should finish at 1.0: {seen:?}");
 }
+
+#[test]
+fn a_cancelled_token_starts_no_run() {
+    let cancel = CancelToken::new();
+    assert!(cancel.start_run().is_some());
+    cancel.cancel();
+    assert!(cancel.start_run().is_none());
+}
+
+#[test]
+fn waiting_for_runs_waits_until_each_has_ended() {
+    let cancel = CancelToken::new();
+    // Nothing running: no wait.
+    assert!(cancel.wait_for_runs(Instant::now()));
+
+    let run = cancel.start_run().unwrap();
+    let ends = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        drop(run);
+        Instant::now()
+    });
+    cancel.cancel();
+    assert!(cancel.wait_for_runs(Instant::now() + Duration::from_secs(5)));
+    let returned = Instant::now();
+    assert!(returned >= ends.join().unwrap(), "returned before the run ended");
+}
+
+#[test]
+fn waiting_for_runs_gives_up_at_the_deadline() {
+    let cancel = CancelToken::new();
+    let _run = cancel.start_run().unwrap();
+    let start = Instant::now();
+    assert!(!cancel.wait_for_runs(start + Duration::from_millis(100)));
+    assert!(start.elapsed() < Duration::from_secs(2));
+}

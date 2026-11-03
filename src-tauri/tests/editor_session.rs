@@ -36,3 +36,34 @@ fn open_creates_and_close_removes_work_dir() {
     drop(sessions);
     assert!(!second_dir.exists());
 }
+
+/// Discard recycles the clip as soon as its session has closed, so closing must not return while
+/// a cancelled ffmpeg still has the clip open. Thumbnails write a picture only now and then, so
+/// the work folder can be deleted while their ffmpeg is still reading the clip.
+#[test]
+fn close_returns_only_once_ffmpeg_has_let_go_of_the_clip() {
+    use hasami_lib::editor::media::thumbnails;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_big_h264(dir.path(), 20);
+    let paths = FfmpegPaths::resolve().expect("bundled ffmpeg not found");
+    let mut sessions = EditorSessions::new();
+    let (id, media, work_dir) = sessions.open(&paths, &input).unwrap();
+    let cancel = sessions.cancel_token(id).unwrap();
+
+    let (run_paths, run_input) = (paths.clone(), input.clone());
+    let run = std::thread::spawn(move || {
+        thumbnails(&run_paths, &run_input, media.info.duration_s, &work_dir.join("thumbs"), &cancel)
+    });
+    // Decoding a 20 s 1080p clip for its pictures takes well over this.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!run.is_finished(), "the thumbnails finished before the close; the test proves nothing");
+
+    sessions.close(id);
+    // What the Recycle Bin needs: nothing may hold the clip without allowing it to be moved.
+    let moved = dir.path().join("moved.mp4");
+    let result = std::fs::rename(&input, &moved);
+    let _ = run.join();
+    result.expect("the clip was still open after the session closed");
+}

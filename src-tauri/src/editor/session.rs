@@ -84,7 +84,7 @@ impl EditorSessions {
     pub fn finish(&mut self, id: u64, result: Result<PreparedMedia, JobError>) -> Result<PreparedMedia, JobError> {
         let Some(session) = self.open.get_mut(&id) else {
             // Closed meanwhile; `prepare` may have written more after the close deleted the folder.
-            remove_dirs(vec![work_dir_for(id)]);
+            remove_dirs(vec![work_dir_for(id)], Instant::now() + CLOSE_WAIT);
             return Err(JobError::Cancelled);
         };
         match result {
@@ -120,12 +120,10 @@ impl EditorSessions {
     }
 
     /// Stop the session's ffmpeg runs and delete its folder, waiting up to [`CLOSE_WAIT`] for
-    /// them to let go of it. Unknown ids are ignored.
+    /// them to let go of it and of the clip (a discard recycles the clip right after this).
+    /// Unknown ids are ignored.
     pub fn close(&mut self, id: u64) {
-        if let Some(session) = self.open.remove(&id) {
-            session.cancel.cancel();
-            remove_dirs(vec![session.work_dir]);
-        }
+        self.close_where(|open| open == id);
     }
 
     /// [`close`](Self::close) every session, waiting at most [`CLOSE_WAIT`] in all.
@@ -146,7 +144,13 @@ impl EditorSessions {
         for session in &sessions {
             session.cancel.cancel();
         }
-        remove_dirs(sessions.into_iter().map(|s| s.work_dir).collect());
+        let deadline = Instant::now() + CLOSE_WAIT;
+        // A run's work folder can often be deleted while its ffmpeg still reads the clip (the
+        // thumbnails write a picture only now and then), so wait for the runs themselves.
+        for session in &sessions {
+            session.cancel.wait_for_runs(deadline);
+        }
+        remove_dirs(sessions.into_iter().map(|s| s.work_dir).collect(), deadline);
     }
 }
 
@@ -166,10 +170,9 @@ fn work_dir_for(id: u64) -> PathBuf {
     std::env::temp_dir().join(format!("{WORK_DIR_PREFIX}{}-{id}", std::process::id()))
 }
 
-/// Delete `dirs`, retrying until [`CLOSE_WAIT`] has passed while a cancelled ffmpeg still holds a
-/// file in one of them.
-fn remove_dirs(mut dirs: Vec<PathBuf>) {
-    let deadline = Instant::now() + CLOSE_WAIT;
+/// Delete `dirs`, retrying until `deadline` while a cancelled ffmpeg still holds a file in one of
+/// them.
+fn remove_dirs(mut dirs: Vec<PathBuf>, deadline: Instant) {
     loop {
         dirs.retain(|dir| std::fs::remove_dir_all(dir).is_err() && dir.exists());
         if dirs.is_empty() || Instant::now() >= deadline {
