@@ -79,7 +79,7 @@ fn num(n: f64) -> String {
 }
 
 /// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`, then,
-/// with a crop, cut to it and scaled back up to `source_size` (the source's width and height); each
+/// with a crop, cut to it (see [`crop_filter`]; `source_size` is the source's width and height); each
 /// audio track's pieces trimmed, delayed to their place on the timeline, mixed and gained into
 /// `[t<k>]`; all tracks mixed, given the master gain, padded with silence and cut to exactly the
 /// output length (kept audio may end before the video does), and made stereo into `[aout]`.
@@ -101,9 +101,8 @@ pub fn build_graph(req: &ExportRequest, source_size: (u32, u32)) -> Graph {
         if req.video.len() > 1 {
             chain.push(format!("concat=n={}:v=1:a=0", req.video.len()));
         }
-        if let Some(Crop { x, y, w, h }) = req.crop {
-            let (sw, sh) = source_size;
-            chain.push(format!("crop={w}:{h}:{x}:{y},scale={sw}:{sh}:flags=lanczos,setsar=1"));
+        if let Some(crop) = req.crop {
+            chain.push(crop_filter(crop, source_size));
         }
         if chain.is_empty() {
             chain.push("null".to_owned());
@@ -158,6 +157,33 @@ pub fn build_graph(req: &ExportRequest, source_size: (u32, u32)) -> Graph {
     };
 
     Graph { filter: parts.join(";"), video_out, audio_out }
+}
+
+/// How far (as a fraction) a crop's aspect ratio may be from the source's and still be scaled
+/// back up to the source's size.
+const SAME_ASPECT_TOLERANCE: f64 = 0.01;
+
+/// `n` rounded down to even, as 4:2:0 H.264 needs.
+fn even(n: u32) -> u32 {
+    n & !1
+}
+
+/// The filters that cut the picture to `crop`. When the crop has the source's aspect ratio
+/// (within 1%), the picture is scaled back up to `source_size` so it fills the frame, the way an
+/// OBS canvas bigger than the game leaves it; otherwise it keeps the crop's own size, so a
+/// pillarboxed or letterboxed picture is never stretched. Sizes are kept even.
+pub fn crop_filter(crop: Crop, source_size: (u32, u32)) -> String {
+    let Crop { x, y, w, h } = crop;
+    let (sw, sh) = source_size;
+    let (w, h) = (even(w), even(h));
+    let same_aspect = h > 0
+        && sh > 0
+        && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE;
+    if same_aspect {
+        format!("crop={w}:{h}:{x}:{y},scale={}:{}:flags=lanczos,setsar=1", even(sw), even(sh))
+    } else {
+        format!("crop={w}:{h}:{x}:{y}")
+    }
 }
 
 /// A video encoder name for `-c:v` and the rate/format arguments that go with it.
@@ -355,6 +381,31 @@ mod tests {
         assert!(
             f.ends_with("[v0][v1]concat=n=2:v=1:a=0,crop=640:360:8:6,scale=1280:720:flags=lanczos,setsar=1[vout]"),
             "{f}"
+        );
+    }
+
+    #[test]
+    fn crop_of_another_aspect_keeps_its_own_size() {
+        // A 4:3 game pillarboxed in 16:9, and a 21:9 letterbox: cut out, never stretched.
+        assert_eq!(crop_filter(Crop { x: 240, y: 0, w: 1440, h: 1080 }, FRAME), "crop=1440:1080:240:0");
+        assert_eq!(crop_filter(Crop { x: 0, y: 140, w: 1920, h: 800 }, FRAME), "crop=1920:800:0:140");
+        // Odd sizes are rounded down to even.
+        assert_eq!(crop_filter(Crop { x: 241, y: 1, w: 1441, h: 1079 }, FRAME), "crop=1440:1078:241:1");
+    }
+
+    #[test]
+    fn crop_within_one_percent_of_the_frame_aspect_is_scaled_back_up() {
+        let scaled = |w, h| crop_filter(Crop { x: 0, y: 0, w, h }, FRAME).contains("scale=1920:1080");
+        assert!(scaled(1440, 810));
+        // 1.778 × 1.01 ≈ 1.796 and × 0.99 ≈ 1.760.
+        assert!(scaled(1452, 810), "1.793 is within 1%");
+        assert!(scaled(1426, 810), "1.760 is within 1%");
+        assert!(!scaled(1456, 810), "1.798 is not");
+        assert!(!scaled(1424, 810), "1.758 is not");
+        // An odd source size is scaled to even.
+        assert_eq!(
+            crop_filter(Crop { x: 0, y: 0, w: 960, h: 540 }, (1921, 1081)),
+            "crop=960:540:0:0,scale=1920:1080:flags=lanczos,setsar=1"
         );
     }
 

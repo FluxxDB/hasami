@@ -39,9 +39,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const BORDER_WINDOWS: usize = 10;
 /// Seconds decoded per border window, from the keyframe at or before its start.
 const BORDER_WINDOW_S: f64 = 0.25;
-/// `cropdetect`: anything at most this bright (of 255) counts as black, the result is rounded to
-/// even sizes, and it reports the union of every frame it has seen.
-const CROPDETECT: &str = "cropdetect=limit=24:round=2:reset=0";
+/// `cropdetect`: anything at most 24/255 bright counts as black, the result is rounded to even
+/// sizes, and it reports the union of every frame it has seen. The limit is given as a fraction
+/// so ffmpeg scales it to the source's bit depth: an absolute 24 is below 10-bit black (64).
+const CROPDETECT: &str = "cropdetect=limit=0.0941:round=2:reset=0";
+/// Decoder threads per border window, so ten windows at once don't each start a full set.
+const BORDER_WINDOW_THREADS: &str = "2";
 
 /// One audio track of the input.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -224,6 +227,7 @@ fn border_args(input: &Path, duration_s: f64) -> Vec<OsString> {
     let mut chains = Vec::new();
     for i in 0..BORDER_WINDOWS {
         let start = duration_s * (i as f64 + 0.5) / BORDER_WINDOWS as f64;
+        args.extend([os("-threads"), os(BORDER_WINDOW_THREADS)]);
         args.extend([os("-ss"), os(&format!("{start:.3}")), os("-noaccurate_seek")]);
         args.extend([os("-t"), os(&BORDER_WINDOW_S.to_string()), os("-i"), input.as_os_str().to_os_string()]);
         chains.push(format!("[{i}:v:0]{CROPDETECT}[w{i}]"));
@@ -253,10 +257,15 @@ fn window_crops(log: &str, windows: usize) -> Vec<Option<(i64, i64, i64, i64)>> 
 }
 
 /// The border every window agrees on, if it is a real one: inside `frame`, smaller than it and at
-/// least a quarter of its area.
+/// least a quarter of its area. An all-black window (a fade or a loading screen, reported with a
+/// non-positive size) agrees with any border, but at least one window must show the picture; a
+/// window that reported nothing at all disagrees.
 fn agreed_border(found: &[Option<(i64, i64, i64, i64)>], frame: (u32, u32)) -> Option<Crop> {
-    let first = (*found.first()?)?;
-    if found.iter().any(|f| *f != Some(first)) {
+    let all_black = |&(_, _, w, h): &(i64, i64, i64, i64)| w <= 0 || h <= 0;
+    let mut seen = found.iter().copied().collect::<Option<Vec<_>>>()?;
+    seen.retain(|f| !all_black(f));
+    let first = *seen.first()?;
+    if seen.iter().any(|f| *f != first) {
         return None;
     }
     let (x, y, w, h) = first;
@@ -706,6 +715,13 @@ mod tests {
         silent[3] = None;
         assert_eq!(agreed_border(&silent, FRAME), None, "one stretch reported nothing");
         assert_eq!(agreed_border(&[], FRAME), None);
+
+        // A fade to black in one stretch doesn't hide the border; an all-black clip has none.
+        let black = Some((1920, 1080, -1918, -1078));
+        let mut faded = [picture; 10];
+        faded[0] = black;
+        assert_eq!(agreed_border(&faded, FRAME), Some(Crop { x: 0, y: 0, w: 1440, h: 810 }));
+        assert_eq!(agreed_border(&[black; 10], FRAME), None);
     }
 
     #[test]
@@ -716,8 +732,7 @@ mod tests {
         let quarter = Some(Crop { x: 480, y: 270, w: 960, h: 540 });
         assert_eq!(agreed_border(&[Some((480, 270, 960, 540)); 3], FRAME), quarter);
         assert_eq!(agreed_border(&[Some((480, 270, 958, 540)); 3], FRAME), None);
-        // An all-black clip, or numbers that don't fit the frame.
-        assert_eq!(agreed_border(&[Some((1920, 1080, -1918, -1078)); 3], FRAME), None);
+        // Numbers that don't fit the frame.
         assert_eq!(agreed_border(&[Some((600, 0, 1440, 810)); 3], FRAME), None);
     }
 
@@ -729,8 +744,9 @@ mod tests {
         let want: Vec<String> = (0..10).map(|i| format!("{}.000", 5 + 10 * i)).collect();
         assert_eq!(starts, want);
         let graph = &text[text.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.starts_with("[0:v:0]cropdetect=limit=24:round=2:reset=0[w0];[1:v:0]"), "{graph}");
-        assert!(graph.ends_with("[9:v:0]cropdetect=limit=24:round=2:reset=0[w9]"), "{graph}");
+        assert!(graph.starts_with("[0:v:0]cropdetect=limit=0.0941:round=2:reset=0[w0];[1:v:0]"), "{graph}");
+        assert!(graph.ends_with("[9:v:0]cropdetect=limit=0.0941:round=2:reset=0[w9]"), "{graph}");
+        assert_eq!(text.windows(2).filter(|w| w[0] == "-threads" && w[1] == "2").count(), 10);
         assert_eq!(text.iter().filter(|a| *a == "-map").count(), 10);
     }
 

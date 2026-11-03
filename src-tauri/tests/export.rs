@@ -500,6 +500,8 @@ fn crop_removes_the_border_and_fills_the_frame() {
     let input = common::fixture_bordered(dir.path());
     let paths = FfmpegPaths::resolve().unwrap();
     assert!(is_black(common::pixel(&input, 1800, 1000)), "the source is black there");
+    // Sampled now: Save raw moves the original into Raw\.
+    let bars = [common::pixel(&input, 300, 150), common::pixel(&input, 750, 450)];
     let req = ExportRequest {
         session: 1,
         input: input.clone(),
@@ -527,6 +529,46 @@ fn crop_removes_the_border_and_fills_the_frame() {
     assert!((info.duration_s - 3.0).abs() < 0.1, "duration was {}", info.duration_s);
     let corner = common::pixel(&output, 1800, 1000);
     assert!(!is_black(corner), "the picture should fill the frame, got {corner:?}");
+    // Scaled by 4/3 from the top-left corner: the colour bars line up with the source's.
+    assert_close(common::pixel(&output, 400, 200), bars[0]);
+    assert_close(common::pixel(&output, 1000, 600), bars[1]);
+}
+
+/// Two colours from different encodes of the same picture: each channel within 40.
+fn assert_close(got: [u8; 3], want: [u8; 3]) {
+    let near = got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 40);
+    assert!(near, "got {got:?}, want about {want:?}");
+}
+
+#[test]
+fn crop_of_another_aspect_is_cut_out_unstretched() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_pillarboxed(dir.path());
+    let paths = FfmpegPaths::resolve().unwrap();
+    let req = ExportRequest {
+        session: 1,
+        input: input.clone(),
+        mode: ExportMode::SaveRaw,
+        fit_20mb: false,
+        duration_s: 2.0,
+        video: vec![VideoPiece { src_start: 0.0, src_end: 2.0 }],
+        audio: vec![],
+        master_db: 0.0,
+        crop: Some(Crop { x: 240, y: 0, w: 1440, h: 1080 }),
+    };
+    // Sampled now: Save raw moves the original into Raw\.
+    let spots = [(4, 4), (720, 540), (1430, 1070)];
+    let source: Vec<[u8; 3]> = spots.iter().map(|&(x, y)| common::pixel(&input, x + 240, y)).collect();
+
+    let output = done(run_export(&req));
+
+    // A 4:3 picture in a 16:9 frame keeps its own size rather than being stretched to 1920x1080.
+    let info = probe(&paths, &output).unwrap();
+    let video = info.video.as_ref().unwrap();
+    assert_eq!((video.width, video.height), (1440, 1080));
+    for (&(x, y), &want) in spots.iter().zip(&source) {
+        assert_close(common::pixel(&output, x, y), want);
+    }
 }
 
 #[test]

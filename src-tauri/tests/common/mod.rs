@@ -52,20 +52,42 @@ pub fn fixture_multitrack_hevc(dir: &Path) -> PathBuf {
     out
 }
 
+/// 5 s of a `picture`-sized test pattern placed in a black 1920x1080 frame by `pad`, with one
+/// AAC track, as `name` in `dir`. `video` is the video encoder's arguments.
+fn boxed(dir: &Path, name: &str, picture: &str, pad: &str, video: &[&str]) -> PathBuf {
+    let out = out_path(dir, name);
+    let source = format!("testsrc2=size={picture}:rate=30:duration=5");
+    let mut args = vec![
+        "-f", "lavfi", "-i", &source,
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=5",
+        "-vf", pad,
+    ];
+    args.extend(video);
+    args.extend(["-c:a", "aac", "-ac", "2", "-t", "5", s(&out)]);
+    ffmpeg(&args);
+    out
+}
+
+const H264_8BIT: [&str; 8] = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p"];
+
 /// 5 s of a 1440x810 picture in the top-left corner of a black 1920x1080 frame, as some OBS
 /// setups record a game, in H.264 with one AAC track.
 pub fn fixture_bordered(dir: &Path) -> PathBuf {
-    let out = out_path(dir, "bordered.mp4");
-    ffmpeg(&[
-        "-f", "lavfi", "-i", "testsrc2=size=1440x810:rate=30:duration=5",
-        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=5",
-        "-vf", "pad=1920:1080:0:0",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ac", "2",
-        "-t", "5",
-        s(&out),
-    ]);
-    out
+    boxed(dir, "bordered.mp4", "1440x810", "pad=1920:1080:0:0", &H264_8BIT)
+}
+
+/// [`fixture_bordered`] as 10-bit HEVC (Main 10), whose black is 64 rather than 16.
+pub fn fixture_bordered_10bit(dir: &Path) -> PathBuf {
+    boxed(dir, "bordered_10bit.mp4", "1440x810", "pad=1920:1080:0:0", &[
+        "-c:v", "libx265", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p10le",
+        "-tag:v", "hvc1", "-x265-params", "log-level=error",
+    ])
+}
+
+/// 5 s of a 4:3 1440x1080 picture pillarboxed in the middle of a black 1920x1080 frame, in H.264
+/// with one AAC track.
+pub fn fixture_pillarboxed(dir: &Path) -> PathBuf {
+    boxed(dir, "pillarboxed.mp4", "1440x1080", "pad=1920:1080:240:0", &H264_8BIT)
 }
 
 /// The RGB colour of the pixel at (`x`, `y`) in the first frame of `file`.
