@@ -328,4 +328,16 @@ describe('PlaybackEngine: master volume and Dim', () => {
     expect(el.volume).toBe(0);
     expect(el.muted).toBe(true);
   });
+
+  it('without Web Audio, Dim still takes 11 dB off a boosted mix: it applies after the cap', () => {
+    const el = new FakeMedia();
+    const { engine } = makeEngine([el]);
+    engine.setTimeline(setMaster(tl, 12));
+    engine.load('', [{ index: 0, src: 'a0.m4a' }]);
+    expect(el.volume).toBe(1);
+    engine.setDim(true);
+    expect(el.volume).toBeCloseTo(10 ** (-11 / 20), 9); // ≈ 0.282
+    engine.setTimeline(setMaster(tl, 6));
+    expect(el.volume).toBeCloseTo(10 ** (-11 / 20), 9);
+  });
 });

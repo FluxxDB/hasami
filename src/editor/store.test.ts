@@ -1067,6 +1067,33 @@ describe('EditorStore queue and exports', () => {
     expect(s.current).toEqual({ path: FILES[0], at: 3 });
   });
 
+  it("a neighbour whose Quick export fails is back: the open clip's look-ahead runs again", async () => {
+    folder(E);
+    const s = await queued([FILES[2]]);
+    await s.nextVideo(); // d, the newest in the folder
+    await s.exportClip('quick'); // d is on its way out
+    await s.prevVideo();
+    expect(s.media?.path).toBe(FILES[2]);
+    expect(s.canNext).toBe(false); // d is passed over, and there's nothing newer
+    s.applyEvent({ type: 'ExportFailed', id: 100, input: D, message: 'No.', original_intact: true });
+    await settle();
+    expect(s.canNext).toBe(true);
+    expect(s.nextTarget?.path).toBe(D);
+  });
+
+  it("a neighbour kept by a deferred discard is back: the open clip's look-ahead runs again", async () => {
+    folder(E);
+    const s = await queued([FILES[2]]);
+    await s.nextVideo(); // d
+    await s.exportClip('audio');
+    await s.discard(); // waits for the audio export; nothing newer, so on to c
+    expect(s.media?.path).toBe(FILES[2]);
+    expect(s.canNext).toBe(false);
+    s.applyEvent({ type: 'DiscardKept', path: D, message: 'Kept.' });
+    await settle();
+    expect(s.canNext).toBe(true);
+  });
+
   it('a clip that cannot be opened can still be moved on from in a queue', async () => {
     vi.mocked(api.open).mockRejectedValueOnce("Couldn't open this clip in the editor.");
     const s = await queued();
@@ -1094,6 +1121,15 @@ describe('EditorStore queue and exports', () => {
     // The recycled clip's remembered modified time still finds the next one.
     expect(api.adjacentFile).toHaveBeenNthCalledWith(1, FILES[0], modifiedOf(FILES[0]), true);
     expect(s.media?.path).toBe(FILES[1]);
+  });
+
+  it("discard that can't look for a newer clip moves on to an older one, and says why", async () => {
+    folder();
+    const s = await queued([FILES[2]]);
+    vi.mocked(api.adjacentFile).mockRejectedValueOnce(undefined);
+    await s.discard();
+    expect(s.media?.path).toBe(FILES[1]);
+    expect(s.notice).toBe("Couldn't look for the next video in this folder.");
   });
 
   it('discard of the newest clip moves on to the next older one', async () => {
@@ -1237,6 +1273,21 @@ describe('EditorStore queue and exports', () => {
     expect(s.queue.files).toEqual([...FILES, D, E]);
     await s.nextVideo();
     expect(s.current).toEqual({ path: D, at: 3 });
+  });
+
+  it('a Files event whose files Next opens while they are ordered keeps the opened one in place', async () => {
+    const s = await queued(FILES.slice(0, 2));
+    let release!: () => void;
+    vi.mocked(api.orderFiles).mockImplementationOnce(
+      (paths) => new Promise((r) => (release = () => r([...paths].sort((x, y) => modifiedOf(x) - modifiedOf(y))))),
+    );
+    const adding = s.addFiles([FILES[2]]);
+    await settle();
+    await s.nextVideo(); // b, from the part being ordered
+    release();
+    await adding;
+    expect(s.queue.files).toEqual(FILES);
+    expect(s.current).toEqual({ path: FILES[1], at: 1 });
   });
 
   it('two Files events close together both land', async () => {

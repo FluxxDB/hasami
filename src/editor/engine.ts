@@ -2,7 +2,9 @@
 // audio track for the sound, kept in sync with it (spec 5.2, 6). Each <audio> goes through a Web
 // Audio GainNode so per-track volume and mute apply live, above 0 dB too, and then through one
 // master GainNode (master volume, and Dim) before the speakers. Audio is streamed by its element,
-// never decoded whole into memory.
+// never decoded whole into memory. Without Web Audio, a track plays on its own element, whose
+// volume can't go above 0 dB: boosts (track or master) aren't heard there, though exports keep them.
+// Dim still always takes its 11 dB off.
 //
 // The clock is the video while it has a playable source. With no source (an audio-only file, the
 // browser mock, a preview that's still being prepared) the clock is the wall clock, so the
@@ -34,6 +36,9 @@ export function trackGain(db: number, muted: boolean): number {
 
 /** How much Dim takes off everything you hear while editing (spec 5.4). */
 export const DIM_DB = 11;
+
+/** Dim as a linear factor. */
+const DIM_FACTOR = 10 ** (-DIM_DB / 20);
 
 /** The master's linear gain: 10^((master − Dim)/20), or 0 at the bottom of the fader (−∞). */
 export function masterGain(masterDb: number, dim: boolean): number {
@@ -317,9 +322,10 @@ export class PlaybackEngine {
       // A short ramp, so moving the fader doesn't click.
       tr.graph.gain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.015);
     } else {
-      // A plain element skips the master node, so the master is applied here.
-      const v = g * this.masterLevel();
-      tr.el.volume = Math.min(1, v);
+      // A plain element skips the master node, so the master is applied here. Dim comes after the
+      // cap, so it still lowers a boosted mix by its full 11 dB.
+      const v = Math.min(1, g * masterGain(this.tl?.masterDb ?? 0, false)) * (this.dim ? DIM_FACTOR : 1);
+      tr.el.volume = v;
       tr.el.muted = v === 0;
     }
   }

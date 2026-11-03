@@ -206,6 +206,8 @@ export class EditorStore {
   private modified = new Map<string, number>();
   /** Bumped by each open, so an answer for a clip no longer wanted is dropped. */
   private openSeq = 0;
+  /** Bumped by each look-ahead, so only the latest one's answer lands. */
+  private lookSeq = 0;
   /**
    * Files recycled or moved by a finished Quick / Save raw export or discard: Prev / Next pass over
    * them in the queue. A new trim of one (it was restored) takes it off.
@@ -466,17 +468,21 @@ export class EditorStore {
       }
       if (after.length === 0) this.markGone(path);
       let to: Current | null = null;
+      let why: string | null = null;
       for (const dir of ['next', 'prev'] as const) {
         try {
           to = await this.step(from, dir);
         } catch (err) {
-          this.notice = plain(err, LOOK_FAILED[dir]);
+          why ??= plain(err, LOOK_FAILED[dir]);
         }
         if (to) break;
       }
       if (to) {
         await this.show(to);
+        // Gone older because the newer look failed: say so (the open cleared the status bar).
+        if (why) this.notice = why;
       } else {
+        this.notice = why;
         // Nothing left to trim: the window stays, with the results list.
         this.current = null;
         this.visit += 1;
@@ -522,11 +528,14 @@ export class EditorStore {
         // A Quick / Save raw export has recycled or moved its original by now.
         const entry = this.log.find((l) => 'id' in l && l.id === e.id);
         if (entry && (entry.action === 'quick' || entry.action === 'save_raw')) this.markGone(entry.input);
+        this.refreshAhead();
         return;
       }
       case 'ExportFailed':
         this.finish(e.id);
         x.failed.push({ id: e.id, input: e.input, message: e.message, originalIntact: e.original_intact });
+        // Its original stayed: Prev / Next may reach it again.
+        this.refreshAhead();
         return;
       case 'ProxyProgress':
         if (e.session === this.media?.session && this.proxyFraction !== null) this.proxyFraction = e.fraction;
@@ -538,6 +547,7 @@ export class EditorStore {
         entry.state = e.type === 'DiscardDone' ? 'done' : 'kept';
         if (e.type === 'DiscardKept') entry.message = e.message;
         else this.markGone(e.path);
+        this.refreshAhead();
         return;
       }
     }
@@ -597,17 +607,29 @@ export class EditorStore {
   private async lookAhead(seq: number): Promise<void> {
     const from = this.current;
     if (!from) return;
+    const mine = ++this.lookSeq;
+    const latest = () => seq === this.openSeq && mine === this.lookSeq;
     const look = async (dir: Direction) => {
       if (this.queueStep(from, dir)) return;
       try {
         const to = await this.folderStep(from, dir);
-        if (seq === this.openSeq) this.ahead = { ...this.ahead, [dir]: to };
+        if (!latest()) return;
+        this.ahead = { ...this.ahead, [dir]: to };
+        this.aheadUnknown = { ...this.aheadUnknown, [dir]: false };
       } catch (err) {
         console.error('editor_adjacent_file failed', err);
-        if (seq === this.openSeq) this.aheadUnknown = { ...this.aheadUnknown, [dir]: true };
+        if (latest()) this.aheadUnknown = { ...this.aheadUnknown, [dir]: true };
       }
     };
     await Promise.all([look('next'), look('prev')]);
+  }
+
+  /**
+   * Looks ahead again for the open clip: an export or discard that ended can change which clips
+   * are on their way out (one whose export failed is back, say). A clip still opening runs its own.
+   */
+  private refreshAhead(): void {
+    if (this.current && (this.media || this.error)) void this.lookAhead(this.openSeq);
   }
 
   private canGo(dir: Direction): boolean {
@@ -616,6 +638,7 @@ export class EditorStore {
     return this.queueStep(from, dir) !== null || !!this.ahead[dir] || this.aheadUnknown[dir];
   }
 
+  /** For the tooltip and disabled state only: `go` always works the step out afresh. */
   private target(dir: Direction): Current | null | undefined {
     const from = this.current;
     if (!from) return null;
