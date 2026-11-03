@@ -193,6 +193,49 @@ pub fn clipped_path(input: &Path, ext: &str) -> PathBuf {
     unique_path(&dir.join(name), None)
 }
 
+/// Prefix of every file Compress (and the editor's 20 MB copy) writes.
+pub const COMPRESSED_PREFIX: &str = "[20MB] ";
+
+/// Where a 20 MB copy of `input` goes: `[20MB] <stem>.mp4` in `videos_dir`. Any `[CLIPPED] ` or
+/// `[20MB] ` prefix already on the stem is dropped first, so the prefix is never doubled. The
+/// name is free (numbered like `unique_path` if it isn't).
+pub fn compressed_path(input: &Path, videos_dir: &Path) -> PathBuf {
+    let stem = input.file_stem().unwrap_or_default();
+    let stem = match stem.to_str() {
+        Some(mut bare) => {
+            while let Some(rest) =
+                bare.strip_prefix(CLIPPED_PREFIX).or_else(|| bare.strip_prefix(COMPRESSED_PREFIX))
+            {
+                bare = rest;
+            }
+            OsString::from(bare)
+        }
+        None => stem.to_os_string(),
+    };
+    let mut name = OsString::from(COMPRESSED_PREFIX);
+    name.push(stem);
+    name.push(".mp4");
+    unique_path(&videos_dir.join(name), None)
+}
+
+/// Shown when Windows can't say where the Videos folder is (or it no longer exists).
+pub const NO_VIDEOS_FOLDER: &str = "Couldn't find your Videos folder.";
+
+/// The Windows Videos folder (`FOLDERID_Videos`), wherever the user has moved it, e.g. into
+/// OneDrive. Fails if Windows has no such folder on record or it doesn't exist.
+pub fn videos_dir() -> Result<PathBuf, FsError> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+    let found = unsafe { SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None) }
+        .map_err(|e| FsError::with_source(NO_VIDEOS_FOLDER, e))?;
+    // Windows allocated the string; copy it out, then hand the memory back.
+    let path = unsafe { PathBuf::from(OsString::from_wide(found.as_wide())) };
+    unsafe { CoTaskMemFree(Some(found.0 as *const std::ffi::c_void)) };
+    Ok(path)
+}
+
 /// True when the folder holding `path` is named `Raw` (any letter case).
 pub fn in_raw_folder(path: &Path) -> bool {
     path.parent()
@@ -1171,6 +1214,38 @@ mod tests {
             clipped_path(&dir.path().join("raw").join("a.mov"), "mp4"),
             dir.path().join("[CLIPPED] a.mp4")
         );
+    }
+
+    #[test]
+    fn compressed_path_drops_existing_prefixes_and_is_always_mp4() {
+        let videos = test_dir();
+        let v = videos.path();
+        for (input, want) in [
+            (r"C:\d\Replay 1.mkv", "[20MB] Replay 1.mp4"),
+            (r"C:\d\[CLIPPED] Replay 1.mov", "[20MB] Replay 1.mp4"),
+            (r"C:\d\[20MB] Replay 1.mp4", "[20MB] Replay 1.mp4"),
+            (r"C:\d\[20MB] [CLIPPED] Replay 1.webm", "[20MB] Replay 1.mp4"),
+            (r"C:\d\Raw\Replay [CLIPPED] 1.MP4", "[20MB] Replay [CLIPPED] 1.mp4"),
+        ] {
+            assert_eq!(compressed_path(Path::new(input), v), v.join(want), "{input}");
+        }
+    }
+
+    #[test]
+    fn compressed_path_counts_collisions() {
+        let videos = test_dir();
+        fs::write(videos.path().join("[20MB] a.mp4"), b"1").unwrap();
+        fs::write(videos.path().join("[20MB] a (2).mp4"), b"2").unwrap();
+        assert_eq!(
+            compressed_path(Path::new(r"C:\d\[CLIPPED] a.mp4"), videos.path()),
+            videos.path().join("[20MB] a (3).mp4")
+        );
+    }
+
+    #[test]
+    fn videos_dir_is_an_absolute_path() {
+        // Only asks Windows where the folder is; nothing in it is read or written.
+        assert!(videos_dir().unwrap().is_absolute());
     }
 
     #[test]

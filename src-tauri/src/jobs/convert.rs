@@ -163,7 +163,7 @@ fn encode_and_commit(
     }
     commit_replace(temp, input, final_path)?;
     let bytes = std::fs::metadata(final_path).map(|m| m.len()).unwrap_or(0);
-    Ok(JobOutcome::Done { output: final_path.to_path_buf(), bytes })
+    Ok(JobOutcome::Done { output: final_path.to_path_buf(), bytes, note: None })
 }
 
 /// Replace a verification failure's technical text with plain language for the user.

@@ -34,7 +34,7 @@ fn convert_mp4_to_mov_keeps_all_tracks() {
 
     let outcome = run(&input, Target::Mov).unwrap();
 
-    let JobOutcome::Done { output, bytes } = outcome else { panic!("expected Done, got {outcome:?}") };
+    let JobOutcome::Done { output, bytes, note: None } = outcome else { panic!("expected Done, got {outcome:?}") };
     assert_eq!(output, dir.path().join("multitrack_hevc.mov"));
     assert!(bytes > 0);
     assert!(!input.exists(), "original should be recycled");

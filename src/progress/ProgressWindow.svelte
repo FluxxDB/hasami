@@ -49,13 +49,15 @@
         ? `.${view.ext}`
         : '',
   );
-  const attention = $derived(view.phase === 'failed' || view.phase === 'unchanged');
+  const attention = $derived(view.phase === 'failed' || view.phase === 'unchanged' || view.phase === 'noted');
   const shownName = $derived(
     view.phase === 'failed'
       ? (view.failure?.fileName ?? view.fileName)
       : view.phase === 'unchanged'
         ? (view.notice?.fileName ?? view.fileName)
-        : view.fileName,
+        : view.phase === 'noted'
+          ? (view.note?.fileName ?? view.fileName)
+          : view.fileName,
   );
 </script>
 
@@ -95,6 +97,14 @@
       <p class="message">{view.notice?.reason}</p>
       <div class="foot">
         <span class="sub">The original file was not changed.</span>
+        <button type="button" class="btn cap" onclick={onClose}>Close</button>
+      </div>
+    {:else if view.phase === 'noted'}
+      <!-- Saved: the message itself says so. No "original not changed" line, which a Quick
+           export would make untrue. -->
+      <p class="message">{view.note?.message}</p>
+      <div class="foot">
+        <span class="sub"></span>
         <button type="button" class="btn cap" onclick={onClose}>Close</button>
       </div>
     {:else if view.phase === 'confirm' && view.target && view.id !== null}

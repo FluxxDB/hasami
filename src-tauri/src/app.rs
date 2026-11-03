@@ -267,7 +267,15 @@ pub enum EditorEvent {
     ExportStarted { id: u64, input: String },
     /// `fraction` covers the whole export, across all its passes.
     ExportProgress { id: u64, fraction: f64 },
-    ExportDone { id: u64, input: String, output: String, bytes: u64 },
+    ExportDone {
+        id: u64,
+        input: String,
+        output: String,
+        bytes: u64,
+        /// The export was saved but something else wasn't (the 20 MB copy); plain language.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     ExportFailed { id: u64, input: String, message: String, original_intact: bool },
     ProxyProgress { session: u64, fraction: f64 },
     /// A deferred discard sent the clip to the Recycle Bin.
@@ -979,7 +987,8 @@ impl Flow {
     }
 
     /// Route an export's event to the editor that asked for it. With that editor gone, only a
-    /// failure is shown, in the progress window.
+    /// failure, or a saved export with a note (its 20 MB copy wasn't made), is shown, in the
+    /// progress window.
     fn on_export_event(&mut self, id: u64, event: JobEvent, out: &mut Vec<Effect>) {
         let info = &self.exports[&id];
         let to_editor = self.editor_open && info.editor == self.editor_count;
@@ -1001,9 +1010,9 @@ impl Flow {
                 out.push(Effect::Decline(id));
                 return;
             }
-            JobEvent::Done { output, bytes, .. } => {
+            JobEvent::Done { output, bytes, note, .. } => {
                 self.exports.remove(&id);
-                EditorEvent::ExportDone { id, input: input.clone(), output, bytes }
+                EditorEvent::ExportDone { id, input: input.clone(), output, bytes, note }
             }
             JobEvent::Unchanged { reason, .. } => {
                 self.exports.remove(&id);
@@ -1022,9 +1031,17 @@ impl Flow {
         };
         if to_editor {
             self.send_editor(editor_event, out);
-        } else if let EditorEvent::ExportFailed { message, original_intact, .. } = editor_event {
-            if message != CANCELLED {
-                self.show_export_failure(id, input, message, original_intact, out);
+        } else {
+            match editor_event {
+                EditorEvent::ExportFailed { message, original_intact, .. } if message != CANCELLED => {
+                    self.show_export_failure(id, input, message, original_intact, out);
+                }
+                // Saved, but something else wasn't: a notice, not a failure.
+                EditorEvent::ExportDone { output, bytes, note: Some(note), .. } => {
+                    let done = JobEvent::Done { id, output, bytes, note: Some(note) };
+                    self.show_export_outcome(id, input, done, out);
+                }
+                _ => {}
             }
         }
         // After the export's own outcome, so the editor hears of it first.
@@ -1035,13 +1052,19 @@ impl Flow {
 
     /// Show a failed export in the progress window, opening it if needed.
     fn show_export_failure(&mut self, id: u64, input: String, message: String, original_intact: bool, out: &mut Vec<Effect>) {
+        self.show_export_outcome(id, input, JobEvent::Failed { id, message, original_intact }, out);
+    }
+
+    /// Show how an export ended (`outcome`, its `Failed` or `Done` event) in the progress window,
+    /// opening it if needed.
+    fn show_export_outcome(&mut self, id: u64, input: String, outcome: JobEvent, out: &mut Vec<Effect>) {
         if !self.window_open {
             self.open_window(("export", None), out);
         }
         let started = JobEvent::Started {
             id,
             input,
-            input_bytes: 0, // not shown with a failure
+            input_bytes: 0, // not shown with a failure or a note
             kind: Some("export".into()),
             ext: None,
             width: None,
@@ -1049,7 +1072,7 @@ impl Flow {
             fps: None,
         };
         self.send(started, out);
-        self.send(JobEvent::Failed { id, message, original_intact }, out);
+        self.send(outcome, out);
     }
 
     /// The window's listener is attached.
@@ -1399,7 +1422,7 @@ mod tests {
     }
 
     fn done(id: u64) -> JobEvent {
-        JobEvent::Done { id, output: format!("{id}.out.mp4"), bytes: 2 }
+        JobEvent::Done { id, output: format!("{id}.out.mp4"), bytes: 2, note: None }
     }
 
     fn emits(events: &[JobEvent]) -> Vec<Effect> {
@@ -1571,7 +1594,8 @@ mod tests {
     // ---- Editor ----
 
     /// A real [`JobQueue`] whose jobs wait for [`RealQueue::release`], then report one progress
-    /// tick (pass 1 of 1, half done) and finish (they fail when the input's name starts with "fail"). Its events are collected in emission order, so
+    /// tick (pass 1 of 1, half done) and finish (they fail when the input's name starts with "fail",
+    /// and are done with a note when it starts with "note"). Its events are collected in emission order, so
     /// a Flow can be fed exactly what the queue sends.
     struct RealQueue {
         queue: JobQueue,
@@ -1598,10 +1622,12 @@ mod tests {
                 is_open = cv.wait_timeout(is_open, ms(10)).unwrap().0;
             }
             progress(JobProgress { pass: 1, passes: 1, fraction: 0.5 });
-            if spec.input.to_string_lossy().starts_with("fail") {
+            let name = spec.input.to_string_lossy();
+            if name.starts_with("fail") {
                 return Err(JobError::Message("Couldn't export this clip.".into()));
             }
-            Ok(JobOutcome::Done { output: spec.input.with_extension("out.mp4"), bytes: 2 })
+            let note = name.starts_with("note").then(|| "Saved, but no 20 MB copy.".to_owned());
+            Ok(JobOutcome::Done { output: spec.input.with_extension("out.mp4"), bytes: 2, note })
         }
     }
 
@@ -1662,6 +1688,7 @@ mod tests {
             duration_s: 2.0,
             video: Vec::new(),
             audio: Vec::new(),
+            master_db: 0.0,
         })))
     }
 
@@ -1677,7 +1704,7 @@ mod tests {
             to_editor(&[
                 EditorEvent::ExportStarted { id, input: "t.mp4".into() },
                 EditorEvent::ExportProgress { id, fraction: 0.5 },
-                EditorEvent::ExportDone { id, input: "t.mp4".into(), output: "t.out.mp4".into(), bytes: 2 },
+                EditorEvent::ExportDone { id, input: "t.mp4".into(), output: "t.out.mp4".into(), bytes: 2, note: None },
             ])
         );
         assert!(f.on_editor_closed(true).contains(&Effect::Exit));
@@ -1767,7 +1794,20 @@ mod tests {
                 id: 5,
                 input: "t.mp4".into(),
                 output: "5.out.mp4".into(),
-                bytes: 2
+                bytes: 2,
+                note: None
+            }])
+        );
+        let mut f = exporting();
+        let noted = JobEvent::Done { id: 5, output: "o.mp4".into(), bytes: 2, note: Some("n".into()) };
+        assert_eq!(
+            f.on_job_event(noted, false),
+            to_editor(&[EditorEvent::ExportDone {
+                id: 5,
+                input: "t.mp4".into(),
+                output: "o.mp4".into(),
+                bytes: 2,
+                note: Some("n".into())
             }])
         );
         assert_eq!(f.on_job_event(JobEvent::Drained, true), vec![]);
@@ -1805,6 +1845,37 @@ mod tests {
         };
         assert_eq!(f.on_ready(), emits(&[shown, failed(5, "boom")]));
         assert_eq!(f.on_job_event(JobEvent::Drained, true), emits(&[JobEvent::Drained]));
+        assert_eq!(f.on_window_closed(true), vec![Effect::Exit]);
+    }
+
+    #[test]
+    fn a_noted_export_without_editor_shows_in_progress_window() {
+        let mut f = editing();
+        let rq = RealQueue::new();
+        let id = rq.queue.enqueue_one(export_job("note.mp4"), PathBuf::from("note.mp4"));
+        f.on_export_enqueued(id, "note.mp4".into());
+        assert_eq!(f.on_editor_closed(false), vec![], "the export is still running");
+
+        let effects = feed(&mut f, rq.drained());
+        assert_eq!(effects, vec![OPEN_EXPORT], "only the note opens the window");
+        let shown = JobEvent::Started {
+            id,
+            input: "note.mp4".into(),
+            input_bytes: 0,
+            kind: Some("export".into()),
+            ext: None,
+            width: None,
+            height: None,
+            fps: None,
+        };
+        // A Done, not a Failed: the export was saved.
+        let done = JobEvent::Done {
+            id,
+            output: "note.out.mp4".into(),
+            bytes: 2,
+            note: Some("Saved, but no 20 MB copy.".into()),
+        };
+        assert_eq!(f.on_ready(), emits(&[shown, done, JobEvent::Drained]));
         assert_eq!(f.on_window_closed(true), vec![Effect::Exit]);
     }
 

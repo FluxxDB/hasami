@@ -1,9 +1,9 @@
 //! Compress job: re-encode any input into an H.264/AAC `.mp4` of at most
-//! [`SIZE_LIMIT_BYTES`] and replace the original safely.
+//! [`SIZE_LIMIT_BYTES`], saved as a new `[20MB] <name>.mp4` in the Windows Videos folder.
 //!
 //! The encode goes to a hidden temp file next to the output, is verified (duration and size),
-//! and only then replaces the original, which goes to the Recycle Bin. On any error or cancel
-//! the temp file and the two-pass logs are deleted and the original is left as it was.
+//! and only then given its name, never replacing anything. The original is never touched. On any
+//! error or cancel the temp file and the two-pass logs are deleted.
 
 use std::ffi::OsString;
 use std::fs;
@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, CompressPlan, SIZE_LIMIT_BYTES};
-use crate::fsops::{commit_replace, temp_path_for, unique_path, with_extension};
+use crate::fsops::{commit_new, compressed_path, temp_path_for, videos_dir, FsError, NO_VIDEOS_FOLDER};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
 use crate::verify::{verify_output, VerifyError};
@@ -31,15 +31,14 @@ const NEVER_FIT: &str = "Couldn't get this video under 20 MB.";
 const DIDNT_CHECK_OUT: &str = "Couldn't compress this video: the result didn't check out.";
 /// Where pass 1 writes its (discarded) output. The crate is Windows-only.
 const NULL_OUTPUT: &str = "NUL";
+/// Shown when the Videos folder is there but a new file can't be written in it.
+const NO_WRITE_VIDEOS: &str = "Couldn't write the new file in your Videos folder.";
 
-/// Compress `input` to an `.mp4` of at most [`SIZE_LIMIT_BYTES`] and replace it.
-///
-/// - Already small and compatible: [`JobOutcome::Unchanged`], nothing is touched.
-/// - The plan drops the video below 480p (and below the source's own height) and
-///   `confirmed_low_res` is false: [`JobOutcome::NeedsConfirm`], nothing is written.
-/// - Otherwise a two-pass libx264 encode (one AAC pass for audio-only input), retried at a
-///   lower bitrate up to [`MAX_RETRIES`] times if it comes out too big. The output keeps the
-///   input's name with an `.mp4` extension, numbered if another file already has that name.
+/// Finds the folder a `[20MB]` file goes into; only called once something will be written.
+pub(super) type VideosDirFn<'a> = &'a dyn Fn() -> Result<PathBuf, FsError>;
+
+/// Compress `input` to a new `.mp4` of at most [`SIZE_LIMIT_BYTES`] in the Windows Videos
+/// folder (see [`compress_in`]).
 pub fn compress(
     paths: &FfmpegPaths,
     input: &Path,
@@ -47,9 +46,31 @@ pub fn compress(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<JobOutcome, JobError> {
-    compress_in(
+    compress_work(paths, input, &videos_dir, confirmed_low_res, cancel, on_progress, &std::env::temp_dir())
+}
+
+/// Compress `input` to a new `.mp4` of at most [`SIZE_LIMIT_BYTES`] in `out_dir`, named by
+/// [`compressed_path`]: `[20MB] <name>.mp4`, numbered if that name is taken. `input` is never
+/// touched.
+///
+/// - Already small and compatible: [`JobOutcome::Unchanged`], nothing is written.
+/// - The plan drops the video below 480p (and below the source's own height) and
+///   `confirmed_low_res` is false: [`JobOutcome::NeedsConfirm`], nothing is written.
+/// - Otherwise a two-pass libx264 encode (one AAC pass for audio-only input), retried at a
+///   lower bitrate up to [`MAX_RETRIES`] times if it comes out too big.
+pub fn compress_in(
+    paths: &FfmpegPaths,
+    input: &Path,
+    out_dir: &Path,
+    confirmed_low_res: bool,
+    cancel: &CancelToken,
+    on_progress: &mut dyn FnMut(JobProgress),
+) -> Result<JobOutcome, JobError> {
+    let out_dir = || Ok(out_dir.to_path_buf());
+    compress_work(
         paths,
         input,
+        &out_dir,
         confirmed_low_res,
         cancel,
         on_progress,
@@ -57,11 +78,13 @@ pub fn compress(
     )
 }
 
-/// [`compress`] with the parent folder of the two-pass log folder given, so tests can check
-/// that it is cleaned up.
-fn compress_in(
+/// [`compress_in`] with the output folder looked up by `out_dir` (only once there is something
+/// to write) and the parent folder of the two-pass log folder given, so tests can check that it
+/// is cleaned up.
+fn compress_work(
     paths: &FfmpegPaths,
     input: &Path,
+    out_dir: VideosDirFn,
     confirmed_low_res: bool,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
@@ -84,8 +107,8 @@ fn compress_in(
         return Ok(JobOutcome::NeedsConfirm { plan });
     }
 
-    let final_path = unique_path(&desired_output(input), Some(input));
-    let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
+    let final_path = compressed_path(input, &out_dir()?);
+    let mut temp = claim_new_file(&final_path)?;
     let verified = encode_to_limit(
         paths,
         input,
@@ -97,21 +120,44 @@ fn compress_in(
         on_progress,
     )?;
 
-    // Last chance to back out; once the commit starts it runs to completion or rolls back.
+    commit_claimed(&mut temp, &final_path, cancel)?;
+    Ok(JobOutcome::Done {
+        output: final_path,
+        bytes: verified.size_bytes,
+        note: None,
+    })
+}
+
+/// Start a new file that will be named `final_path` (in the Videos folder): create its hidden
+/// temp file now, which proves the folder is there and writable before any encode runs. The
+/// temp file is deleted when the guard drops, unless [`commit_claimed`] keeps it.
+pub(super) fn claim_new_file(final_path: &Path) -> Result<RemoveOnDrop, JobError> {
+    if !final_path.parent().is_some_and(Path::is_dir) {
+        return Err(JobError::Message(NO_VIDEOS_FOLDER.to_owned()));
+    }
+    let temp = temp_path_for(final_path);
+    fs::File::create(&temp).map_err(|_| JobError::Message(NO_WRITE_VIDEOS.to_owned()))?;
+    Ok(RemoveOnDrop::file(temp))
+}
+
+/// Give a finished, verified [`claim_new_file`] temp file its name, never replacing anything.
+/// Checks `cancel` one last time first. If the rename may have happened after all, the temp
+/// file is kept, since it may be the only copy.
+pub(super) fn commit_claimed(
+    temp: &mut RemoveOnDrop,
+    final_path: &Path,
+    cancel: &CancelToken,
+) -> Result<(), JobError> {
     if cancel.is_cancelled() {
         return Err(JobError::Cancelled);
     }
-    if let Err(e) = commit_replace(temp.path(), input, &final_path) {
+    if let Err(e) = commit_new(temp.path(), final_path) {
         if e.kept_new_file.is_some() {
-            // The original is already in the Recycle Bin; this is the only copy of the result.
             temp.keep();
         }
         return Err(e.into());
     }
-    Ok(JobOutcome::Done {
-        output: final_path,
-        bytes: verified.size_bytes,
-    })
+    Ok(())
 }
 
 /// Two-pass encode of `input` per `plan` into `output`, retried smaller until it verifies at
@@ -149,19 +195,6 @@ pub(crate) fn encode_to_limit(
         )?)
     })
     .map_err(plain_verify_error)
-}
-
-/// The output name before de-duplication: the input itself if it already is an `.mp4`
-/// (keeping its exact spelling, e.g. `.MP4`), otherwise the input with an `.mp4` extension.
-fn desired_output(input: &Path) -> PathBuf {
-    let is_mp4 = input
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mp4"));
-    if is_mp4 {
-        input.to_path_buf()
-    } else {
-        with_extension(input, "mp4")
-    }
 }
 
 /// Call `attempt` with a bitrate scale of 1.0, then, while the result is over the size limit,
@@ -474,18 +507,6 @@ mod tests {
         assert_eq!(calls, 1);
     }
 
-    #[test]
-    fn mp4_keeps_its_exact_name() {
-        assert_eq!(
-            desired_output(Path::new(r"C:\d\Clip.MP4")),
-            Path::new(r"C:\d\Clip.MP4")
-        );
-        assert_eq!(
-            desired_output(Path::new(r"C:\d\Clip.mkv")),
-            Path::new(r"C:\d\Clip.mp4")
-        );
-    }
-
     fn info(video: bool, audio_tracks: usize) -> MediaInfo {
         MediaInfo {
             path: PathBuf::from("in.mkv"),
@@ -660,12 +681,50 @@ mod tests {
     }
 
     #[test]
+    fn an_already_small_file_never_asks_for_the_videos_folder() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // H.264 in an .mp4 with no audio, well under 20 MB: already Discord-ready.
+        let input = small_mkv(&paths, dir.path(), "small.mp4");
+        let lookup = || -> Result<PathBuf, FsError> { panic!("nothing is written, so no folder is needed") };
+
+        let outcome = compress_work(
+            &paths,
+            &input,
+            &lookup,
+            false,
+            &CancelToken::new(),
+            &mut |_| panic!("nothing is encoded"),
+            dir.path(),
+        );
+        assert!(
+            matches!(&outcome, Ok(JobOutcome::Unchanged { reason }) if reason == ALREADY_SMALL),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn claim_new_file_needs_the_folder_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone").join("[20MB] a.mp4");
+        let err = claim_new_file(&missing).err().unwrap();
+        assert_eq!(err.to_string(), NO_VIDEOS_FOLDER);
+
+        let final_path = dir.path().join("[20MB] a.mp4");
+        let claim = claim_new_file(&final_path).unwrap();
+        assert!(claim.path().is_file(), "the temp file is created up front");
+        drop(claim);
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none(), "and deleted when dropped");
+    }
+
+    #[test]
     fn passlog_folder_is_removed_after_success_and_cancel() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let empty = |root: &Path| fs::read_dir(root).unwrap().next().is_none();
 
+        let out_dir = || Ok(dir.path().to_path_buf());
         let input = small_mkv(&paths, dir.path(), "ok.mkv");
         let mut saw_log = false;
         let mut watch = |p: JobProgress| {
@@ -674,9 +733,10 @@ mod tests {
                 saw_log |= !empty(root.path());
             }
         };
-        let outcome = compress_in(
+        let outcome = compress_work(
             &paths,
             &input,
+            &out_dir,
             false,
             &CancelToken::new(),
             &mut watch,
@@ -694,9 +754,10 @@ mod tests {
 
         let input = small_mkv(&paths, dir.path(), "cancel.mkv");
         let cancel = CancelToken::new();
-        let outcome = compress_in(
+        let outcome = compress_work(
             &paths,
             &input,
+            &out_dir,
             false,
             &cancel,
             &mut |_| cancel.cancel(),

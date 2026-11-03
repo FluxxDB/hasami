@@ -27,7 +27,9 @@ pub struct JobProgress {
 /// How a job ended when it didn't fail.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JobOutcome {
-    Done { output: PathBuf, bytes: u64 },
+    /// `note` says something went partly wrong although `output` was saved, e.g. the editor's
+    /// extra 20 MB copy couldn't be made. Plain language, shown as is.
+    Done { output: PathBuf, bytes: u64, note: Option<String> },
     Unchanged { reason: String },
     NeedsConfirm { plan: CompressPlan },
 }
