@@ -95,10 +95,37 @@ describe('reduce', () => {
   });
 
   it('Drained after success asks to close', () => {
-    const s = run([started(), progress(), { type: 'Done', id: 1, output: 'C:\\clips\\Replay 01 [20MB].mp4', bytes: 19_400_000 }, { type: 'Drained' }]);
+    const s = run([started(), progress(), { type: 'Done', id: 1, output: 'C:\\Users\\me\\Videos\\[20MB] Replay 01.mp4', bytes: 19_400_000 }, { type: 'Drained' }]);
     expect(s.phase).toBe('done');
     expect(s.outputBytes).toBe(19_400_000);
+    expect(s.note).toBeNull();
     expect(s.shouldClose).toBe(true);
+  });
+
+  it('a Done with a note stays open as a notice, not a failure', () => {
+    const note = 'Saved "[CLIPPED] clip.mp4", but couldn\'t make the 20 MB copy: Couldn\'t find your Videos folder.';
+    const s = run([
+      { type: 'Started', id: 7, input: 'C:\\clips\\clip.mp4', input_bytes: 0, kind: 'export' },
+      { type: 'Done', id: 7, output: 'C:\\clips\\[CLIPPED] clip.mp4', bytes: 2, note },
+      { type: 'Drained' },
+    ]);
+    expect(s.phase).toBe('noted');
+    expect(s.kind).toBe('export');
+    expect(s.note).toEqual({ fileName: 'clip.mp4', message: note });
+    expect(s.failure).toBeNull();
+    expect(s.failedCount).toBe(0);
+    expect(s.doneCount).toBe(1);
+    expect(s.shouldClose).toBe(false);
+  });
+
+  it('a note outlasts later jobs, and a failure still comes first', () => {
+    const noted: JobEvent = { type: 'Done', id: 1, output: 'C:\\a2.mp4', bytes: 1, note: 'n' };
+    const later = run([started(1, 'C:\\a.mp4'), noted, started(2, 'C:\\b.mp4'), { type: 'Done', id: 2, output: 'C:\\b2.mp4', bytes: 1 }, { type: 'Drained' }]);
+    expect(later.phase).toBe('noted');
+    expect(later.note).toEqual({ fileName: 'a.mp4', message: 'n' });
+
+    const failed = run([started(1, 'C:\\a.mp4'), noted, started(2, 'C:\\b.mp4'), { type: 'Failed', id: 2, message: 'x', original_intact: true }, { type: 'Drained' }]);
+    expect(failed.phase).toBe('failed');
   });
 
   it('Drained after a failure does not close and shows the failure', () => {

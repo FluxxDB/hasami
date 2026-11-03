@@ -17,7 +17,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::compress::{encode_to_limit, RemoveOnDrop};
+use super::compress::{claim_new_file, commit_claimed, encode_to_limit, RemoveOnDrop, VideosDirFn};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, SIZE_LIMIT_BYTES};
 use crate::editor::request::{
@@ -26,7 +26,6 @@ use crate::editor::request::{
 };
 use crate::fsops::{
     clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir,
-    FsError, NO_VIDEOS_FOLDER,
 };
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
@@ -46,9 +45,6 @@ const COPY_FAILED: &str = "Couldn't copy the file into your Videos folder.";
 const COPY_CANCELLED: &str = "it was cancelled.";
 /// An export with the 20 MB copy: the `[CLIPPED]` render, then the copy's two Compress passes.
 const COPY_PASSES: u8 = 3;
-
-/// Finds the folder the 20 MB copy goes into.
-type VideosDirFn<'a> = &'a dyn Fn() -> Result<PathBuf, FsError>;
 
 /// Render `req` and save it as `[CLIPPED] <name>` per its mode, plus the 20 MB copy in the
 /// Windows Videos folder when asked (see the module docs).
@@ -138,13 +134,9 @@ fn save_20mb_copy(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<PathBuf, JobError> {
-    let videos = videos_dir()?;
-    if !videos.is_dir() {
-        return Err(JobError::Message(NO_VIDEOS_FOLDER.to_owned()));
-    }
     let info = probe(paths, clipped).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
-    let final_path = compressed_path(clipped, &videos);
-    let mut temp = RemoveOnDrop::file(temp_path_for(&final_path));
+    let final_path = compressed_path(clipped, &videos_dir()?);
+    let mut temp = claim_new_file(&final_path)?;
 
     match plan_compress(&info)? {
         CompressDecision::AlreadySmall => {
@@ -158,16 +150,7 @@ fn save_20mb_copy(
         }
     }
 
-    if cancel.is_cancelled() {
-        return Err(JobError::Cancelled);
-    }
-    if let Err(e) = commit_new(temp.path(), &final_path) {
-        if e.kept_new_file.is_some() {
-            // The rename may have happened after all; keep what may be the only copy.
-            temp.keep();
-        }
-        return Err(e.into());
-    }
+    commit_claimed(&mut temp, &final_path, cancel)?;
     Ok(final_path)
 }
 
@@ -270,7 +253,8 @@ impl Job<'_> {
             ExportMode::SaveRaw => {
                 commit_new(self.temp, final_path)?;
                 // The new file is saved either way; only the original's move can still fail.
-                move_to_raw(input).map_err(|_| JobError::Message(raw_move_failed(final_path)))?;
+                move_to_raw(input)
+                    .map_err(|_| JobError::Message(raw_move_failed(final_path, self.req.fit_20mb)))?;
             }
             ExportMode::Audio => commit_new(self.temp, final_path)?,
         }
@@ -285,10 +269,12 @@ impl Job<'_> {
     }
 }
 
-/// `Saved "<name>", but couldn't move the original into the Raw folder.`
-fn raw_move_failed(final_path: &Path) -> String {
+/// `Saved "<name>", but couldn't move the original into the Raw folder.`, plus that the 20 MB
+/// copy wasn't made when one was asked for (it is only made once the original is dealt with).
+fn raw_move_failed(final_path: &Path, copy_asked: bool) -> String {
     let name = final_path.file_name().unwrap_or_default().to_string_lossy();
-    format!("Saved \"{name}\", but couldn't move the original into the Raw folder.")
+    let copy = if copy_asked { " The 20 MB copy wasn't made." } else { "" };
+    format!("Saved \"{name}\", but couldn't move the original into the Raw folder.{copy}")
 }
 
 /// Replace a verification failure's technical text with plain language for the user.
@@ -353,6 +339,7 @@ fn mp3_args(input: &Path, graph: &Graph, out: &Path) -> Vec<OsString> {
 mod tests {
     use super::*;
     use crate::editor::request::{AudioPiece, AudioTrackRequest, VideoPiece};
+    use crate::fsops::{FsError, NO_VIDEOS_FOLDER};
     use crate::media::hidden_command;
 
     fn text(args: &[OsString]) -> String {
@@ -436,8 +423,13 @@ mod tests {
         let big = VerifyError::TooLarge { size_bytes: 21_000_000, max_bytes: SIZE_LIMIT_BYTES };
         assert_eq!(plain_verify_error(big).to_string(), OVER_LIMIT);
         assert_eq!(
-            raw_move_failed(Path::new(r"C:\d\[CLIPPED] clip.mp4")),
+            raw_move_failed(Path::new(r"C:\d\[CLIPPED] clip.mp4"), false),
             "Saved \"[CLIPPED] clip.mp4\", but couldn't move the original into the Raw folder."
+        );
+        assert_eq!(
+            raw_move_failed(Path::new(r"C:\d\[CLIPPED] clip.mp4"), true),
+            "Saved \"[CLIPPED] clip.mp4\", but couldn't move the original into the Raw folder. \
+             The 20 MB copy wasn't made."
         );
         let saved = Path::new(r"C:\d\[CLIPPED] clip.mp4");
         assert_eq!(
@@ -570,6 +562,23 @@ mod tests {
             note.as_deref(),
             Some("Saved \"[CLIPPED] clip.mkv\", but couldn't make the 20 MB copy: Couldn't find your Videos folder.")
         );
+    }
+
+    #[test]
+    fn an_audio_export_ignores_the_20mb_copy_toggle() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = small_clip(&paths, dir.path());
+        let req = ExportRequest { mode: ExportMode::Audio, ..fit_request(&input) };
+        let lookup = || -> Result<PathBuf, FsError> { panic!("an audio export makes no 20 MB copy") };
+
+        let mut passes = Vec::new();
+        let outcome =
+            export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |p| passes.push(p.passes), dir.path());
+        let Ok(JobOutcome::Done { output, note: None, .. }) = outcome else { panic!("{outcome:?}") };
+        assert_eq!(output, dir.path().join("[CLIPPED] clip.mp3"));
+        assert!(passes.iter().all(|&of| of == 1), "{passes:?}");
+        assert_eq!(names(dir.path()), ["[CLIPPED] clip.mp3", "clip.mkv"]);
     }
 
     #[test]

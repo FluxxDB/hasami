@@ -322,6 +322,27 @@ fn compress_low_res_needs_confirm() {
 }
 
 #[test]
+fn compress_into_a_missing_folder_fails_before_encoding() {
+    let d = dirs();
+    let big = common::fixture_big_h264(d.src(), 4);
+    let input = common::remux(&big, &d.src().join("a.mkv"));
+    fs::remove_file(&big).unwrap();
+    let original = fs::read(&input).unwrap();
+    let missing = d.videos().join("gone");
+
+    let mut progress = Vec::new();
+    let result = compress_in(&paths(), &input, &missing, false, &CancelToken::new(), &mut |p| progress.push(p));
+
+    match result {
+        Err(e) => assert_eq!(e.to_string(), "Couldn't find your Videos folder."),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(progress.is_empty(), "nothing is encoded: {progress:?}");
+    assert_original_kept(&d, &input, &original);
+    assert!(names(d.videos()).is_empty());
+}
+
+#[test]
 fn compress_native_360p_does_not_ask() {
     let d = dirs();
     let small = common::fixture_small_h264_mp4(d.src());

@@ -1,6 +1,6 @@
 // Dev-only: feeds scripted job events to the progress window when the Tauri API is absent.
 // Usage: http://localhost:5181/progress.html?mock=running  (also: confirm, failed, unchanged,
-// done, batch, convert). Imported dynamically from main.ts behind `import.meta.env.DEV`.
+// done, noted, batch, convert). Imported dynamically from main.ts behind `import.meta.env.DEV`.
 import type { JobEvent } from '../lib/jobs';
 
 const file = 'C:\\Users\\ledan\\Videos\\[CLIPPED] Replay 2026-10-09 23-40-17.mp4';
@@ -59,7 +59,19 @@ export const scripts: Record<string, JobEvent[]> = {
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started(plan),
     progress(1, 2, 0),
-    { type: 'Done', id: 1, output: 'C:\\Users\\ledan\\Videos\\[CLIPPED] Replay [20MB].mp4', bytes: 19_400_000 },
+    { type: 'Done', id: 1, output: 'C:\\Users\\ledan\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4', bytes: 19_400_000 },
+    { type: 'Drained' },
+  ],
+  // An editor export saved after its window closed, whose 20 MB copy wasn't made.
+  noted: [
+    started({ kind: 'export', input: 'C:\\clips\\Replay 2026-10-09 23-40-17.mp4', input_bytes: 0 }),
+    {
+      type: 'Done',
+      id: 1,
+      output: 'C:\\clips\\[CLIPPED] Replay 2026-10-09 23-40-17.mp4',
+      bytes: 190_000_000,
+      note: 'Saved "[CLIPPED] Replay 2026-10-09 23-40-17.mp4", but couldn\'t make the 20 MB copy: Couldn\'t find your Videos folder.',
+    },
     { type: 'Drained' },
   ],
 };

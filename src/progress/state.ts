@@ -10,6 +10,7 @@ export type Phase =
   | 'done'
   | 'cancelled'
   | 'unchanged'
+  | 'noted' // a job was saved, but its Done carries a note (e.g. no 20 MB copy)
   | 'failed';
 
 export interface Target {
@@ -41,6 +42,8 @@ export interface ViewState {
   failedCount: number;
   notice: { fileName: string; reason: string } | null;
   noticeCount: number;
+  /** A saved job's note. Not a failure: its file was saved, but something else wasn't. */
+  note: { fileName: string; message: string } | null;
   doneCount: number;
   drained: boolean;
   /** True once the queue drained with nothing needing attention: close after 1.5 s. */
@@ -70,6 +73,7 @@ export function initialState(kind: Kind, ext: string | null = null): ViewState {
     failedCount: 0,
     notice: null,
     noticeCount: 0,
+    note: null,
     doneCount: 0,
     drained: false,
     shouldClose: false,
@@ -142,11 +146,12 @@ export function reduce(s: ViewState, e: JobEvent): ViewState {
       if (e.id !== s.id) return s;
       return {
         ...s,
-        phase: 'done',
+        phase: e.note ? 'noted' : 'done',
         fraction: 1,
         etaS: null,
         outputBytes: e.bytes,
         doneCount: s.doneCount + 1,
+        note: e.note ? { fileName: s.fileName, message: e.note } : s.note,
       };
 
     case 'Unchanged':
@@ -177,6 +182,7 @@ export function reduce(s: ViewState, e: JobEvent): ViewState {
       const drained = { ...s, drained: true };
       // Anything that went wrong stays on screen until the user closes it.
       if (s.failedCount > 0) return { ...drained, phase: 'failed', shouldClose: false };
+      if (s.note !== null) return { ...drained, phase: 'noted', shouldClose: false };
       // "Unchanged" with nothing produced would otherwise flash and vanish unexplained.
       if (s.noticeCount > 0 && s.doneCount === 0) {
         return { ...drained, phase: 'unchanged', shouldClose: false };
