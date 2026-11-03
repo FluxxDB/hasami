@@ -121,6 +121,20 @@ pub fn fixture_big_h264(dir: &Path, secs: u32) -> PathBuf {
     out
 }
 
+/// 2 s of a 5120x1440 (32:9 super-ultrawide) test pattern in H.264 with one AAC track: too wide
+/// for AMD's hardware H.264 encoder.
+pub fn fixture_superwide(dir: &Path) -> PathBuf {
+    let out = out_path(dir, "superwide.mp4");
+    ffmpeg(&[
+        "-f", "lavfi", "-i", "testsrc2=size=5120x1440:rate=30:duration=2",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ac", "2",
+        s(&out),
+    ]);
+    out
+}
+
 /// 3 s of 640x360 H.264 with no audio stream.
 pub fn fixture_video_only(dir: &Path) -> PathBuf {
     let out = out_path(dir, "video_only.mp4");

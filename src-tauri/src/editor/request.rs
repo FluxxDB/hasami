@@ -79,7 +79,8 @@ fn num(n: f64) -> String {
 }
 
 /// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`, then,
-/// with a crop, cut to it (see [`crop_filter`]; `source_size` is the source's width and height); each
+/// with a crop, cut to it (see [`crop_filter`]; `source_size` is the source's width and height),
+/// or without one, cut to even if the source is an odd size; each
 /// audio track's pieces trimmed, delayed to their place on the timeline, mixed and gained into
 /// `[t<k>]`; all tracks mixed, given the master gain, padded with silence and cut to exactly the
 /// output length (kept audio may end before the video does), and made stereo into `[aout]`.
@@ -103,6 +104,10 @@ pub fn build_graph(req: &ExportRequest, source_size: (u32, u32)) -> Graph {
         }
         if let Some(crop) = req.crop {
             chain.push(crop_filter(crop, source_size));
+        } else if source_size != output_size(None, source_size) {
+            // 4:2:0 H.264 can't be an odd size: drop the last row or column.
+            let (w, h) = output_size(None, source_size);
+            chain.push(format!("crop={w}:{h}:0:0"));
         }
         if chain.is_empty() {
             chain.push("null".to_owned());
@@ -176,13 +181,25 @@ pub fn crop_filter(crop: Crop, source_size: (u32, u32)) -> String {
     let Crop { x, y, w, h } = crop;
     let (sw, sh) = source_size;
     let (w, h) = (even(w), even(h));
-    let same_aspect = h > 0
-        && sh > 0
-        && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE;
-    if same_aspect {
+    if same_aspect((w, h), source_size) {
         format!("crop={w}:{h}:{x}:{y},scale={}:{}:flags=lanczos,setsar=1", even(sw), even(sh))
     } else {
         format!("crop={w}:{h}:{x}:{y}")
+    }
+}
+
+/// Whether a `size` picture has the `source_size` frame's aspect ratio, within 1%.
+fn same_aspect((w, h): (u32, u32), (sw, sh): (u32, u32)) -> bool {
+    h > 0 && sh > 0 && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE
+}
+
+/// The width and height a video export comes out at: the source's, or with a crop of another
+/// aspect ratio the crop's own (see [`crop_filter`]); always rounded down to even.
+pub fn output_size(crop: Option<Crop>, source_size: (u32, u32)) -> (u32, u32) {
+    let (sw, sh) = source_size;
+    match crop {
+        Some(Crop { w, h, .. }) if !same_aspect((even(w), even(h)), source_size) => (even(w), even(h)),
+        _ => (even(sw), even(sh)),
     }
 }
 
@@ -216,27 +233,47 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// The H.264 encoder for a video export at `bitrate` bits/s (average; peak 1.5×): AMD AMF when
-/// `hw("h264_amf")` says it works here (normally [`encoder_available`]), else libx264. Always
-/// 8-bit 4:2:0, which every Discord client plays.
-pub fn h264_encoder(bitrate: u64, hw: &dyn Fn(&str) -> bool) -> VideoEncoder {
-    let b = bitrate;
-    let rate = args(&["-b:v", &b.to_string(), "-maxrate", &(b + b / 2).to_string()]);
-    let pix_fmt = args(&["-pix_fmt", "yuv420p"]);
-    if hw("h264_amf") {
-        VideoEncoder { codec: "h264_amf", args: [args(&["-rc", "vbr_peak"]), rate, pix_fmt].concat() }
+/// The largest picture AMD AMF encodes as H.264 (wider than 4096 or taller than 2304 fails, e.g.
+/// a 5120×1440 super-ultrawide canvas); bigger exports go to libx264.
+pub const AMF_H264_MAX: (u32, u32) = (4096, 2304);
+
+/// The H.264 encoder for a video export of a `size` (width, height) picture at `bitrate` bits/s
+/// (average; peak 1.5×): AMD AMF when `hw("h264_amf")` says it works here (normally
+/// [`encoder_available`]) and the picture is no bigger than [`AMF_H264_MAX`], else
+/// [`software_h264`]. Always 8-bit 4:2:0, which every Discord client plays.
+pub fn h264_encoder(bitrate: u64, size: (u32, u32), hw: &dyn Fn(&str) -> bool) -> VideoEncoder {
+    let (w, h) = size;
+    let fits_amf = w <= AMF_H264_MAX.0 && h <= AMF_H264_MAX.1;
+    if fits_amf && hw("h264_amf") {
+        let b = bitrate;
+        let rate = args(&["-b:v", &b.to_string(), "-maxrate", &(b + b / 2).to_string()]);
+        VideoEncoder { codec: "h264_amf", args: [args(&["-rc", "vbr_peak"]), rate, args(&["-pix_fmt", "yuv420p"])].concat() }
     } else {
-        VideoEncoder {
-            codec: "libx264",
-            args: [args(&["-preset", "medium"]), rate, args(&["-bufsize", &(b * 2).to_string()]), pix_fmt].concat(),
-        }
+        software_h264(bitrate)
+    }
+}
+
+/// libx264 at `bitrate` bits/s (average; peak 1.5×), 8-bit 4:2:0: the encoder that works
+/// everywhere, and what a failed hardware render is retried with.
+pub fn software_h264(bitrate: u64) -> VideoEncoder {
+    let b = bitrate;
+    VideoEncoder {
+        codec: "libx264",
+        args: args(&[
+            "-preset", "medium",
+            "-b:v", &b.to_string(),
+            "-maxrate", &(b + b / 2).to_string(),
+            "-bufsize", &(b * 2).to_string(),
+            "-pix_fmt", "yuv420p",
+        ]),
     }
 }
 
 /// Source codecs that pack more picture into each bit than H.264 does; re-encoding them as H.264
 /// at the same bitrate would lose quality.
 const DENSER_CODECS: [&str; 3] = ["hevc", "av1", "vp9"];
-/// How much more bitrate H.264 gets than a [`DENSER_CODECS`] source had.
+/// How much more bitrate H.264 gets than a [`DENSER_CODECS`] source had. The editor's size
+/// estimate (`exportBitrateFactor` in `src/editor/store.svelte.ts`) mirrors this and the list.
 const DENSER_CODEC_FACTOR: f64 = 1.3;
 
 /// The bitrate a video export encodes at: [`source_video_bitrate`], ×1.3 for HEVC, AV1 and VP9.
@@ -421,14 +458,49 @@ mod tests {
 
     #[test]
     fn h264_on_amf_when_it_works() {
-        let e = h264_encoder(10_000_000, &|n| n == "h264_amf");
+        let e = h264_encoder(10_000_000, FRAME, &|n| n == "h264_amf");
         assert_eq!(e.codec, "h264_amf");
         assert_eq!(e.args, ["-rc", "vbr_peak", "-b:v", "10000000", "-maxrate", "15000000", "-pix_fmt", "yuv420p"]);
     }
 
     #[test]
+    fn h264_bigger_than_amf_can_take_goes_to_libx264() {
+        let codec = |size| h264_encoder(10_000_000, size, &|_| true).codec;
+        for size in [(1920, 1080), (2560, 1440), (3840, 2160), (4096, 2304), (1080, 1920)] {
+            assert_eq!(codec(size), "h264_amf", "{size:?}");
+        }
+        // Super-ultrawide, 8K, one pixel over in either direction, and portrait 4K.
+        for size in [(5120, 1440), (7680, 2160), (4098, 2160), (3840, 2306), (2160, 3840)] {
+            assert_eq!(codec(size), "libx264", "{size:?}");
+        }
+        assert_eq!(h264_encoder(10_000_000, (5120, 1440), &|_| true), software_h264(10_000_000));
+    }
+
+    #[test]
+    fn output_size_follows_the_crop() {
+        assert_eq!(output_size(None, FRAME), FRAME);
+        assert_eq!(output_size(None, (5121, 1441)), (5120, 1440), "rounded down to even");
+        // Same aspect: scaled back up to the source's size.
+        assert_eq!(output_size(Some(Crop { x: 0, y: 0, w: 1440, h: 810 }), FRAME), FRAME);
+        assert_eq!(output_size(Some(Crop { x: 0, y: 0, w: 3840, h: 1080 }), (5120, 1440)), (5120, 1440));
+        // Another aspect: the crop's own size, so a crop can bring a big canvas within AMF's reach.
+        assert_eq!(output_size(Some(Crop { x: 1280, y: 0, w: 2560, h: 1440 }), (5120, 1440)), (2560, 1440));
+        assert_eq!(output_size(Some(Crop { x: 241, y: 1, w: 1441, h: 1079 }), FRAME), (1440, 1078));
+    }
+
+    #[test]
+    fn graph_without_a_crop_makes_an_odd_source_even() {
+        let f = build_graph(&req(vec![vp(0.0, 1.0)], vec![], 1.0), (1281, 721)).filter;
+        assert!(f.ends_with("[v0]crop=1280:720:0:0[vout]"), "{f}");
+        let f = build_graph(&req(vec![vp(0.0, 1.0)], vec![], 1.0), (1280, 721)).filter;
+        assert!(f.ends_with("[v0]crop=1280:720:0:0[vout]"), "{f}");
+        let f = build_graph(&req(vec![vp(0.0, 1.0)], vec![], 1.0), (1280, 720)).filter;
+        assert!(f.ends_with("[v0]null[vout]"), "{f}");
+    }
+
+    #[test]
     fn h264_falls_back_to_libx264() {
-        let e = h264_encoder(10_000_000, &|_| false);
+        let e = h264_encoder(10_000_000, FRAME, &|_| false);
         assert_eq!(e.codec, "libx264");
         assert_eq!(
             e.args,
