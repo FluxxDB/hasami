@@ -58,6 +58,8 @@ const EXPORT_WONT_START: &str = "Couldn't start the export.";
 const NEXT_FAILED: &str = "Couldn't look for the next video in this folder.";
 const PREV_FAILED: &str = "Couldn't look for the previous video in this folder.";
 const DISCARD_FAILED: &str = "Couldn't move this clip to the Recycle Bin.";
+const DISCARD_IN_USE: &str =
+    "Couldn't move this clip to the Recycle Bin because another program is using it. Close it there, then try Discard again.";
 const DISCARD_WONT_WAIT: &str = "Couldn't set this clip aside for the Recycle Bin.";
 const COMMAND_FAILED: &str = "Something went wrong.";
 
@@ -559,10 +561,19 @@ async fn editor_discard(app: AppHandle, path: String, after: Vec<u64>) -> Result
 }
 
 fn recycle(path: &str) -> Result<(), String> {
-    fsops::recycle(Path::new(path)).map_err(|e| {
+    fsops::recycle_when_free(Path::new(path)).map_err(|e| {
         eprintln!("hasami: {DISCARD_FAILED} {e:?}");
-        DISCARD_FAILED.to_owned()
+        discard_failure(&e).to_owned()
     })
+}
+
+/// What the editor says when a discarded clip couldn't be recycled.
+fn discard_failure(e: &fsops::FsError) -> &'static str {
+    if e.message == fsops::RECYCLE_IN_USE {
+        DISCARD_IN_USE
+    } else {
+        DISCARD_FAILED
+    }
 }
 
 /// The editor is done with a clip: stop its work and delete its work folder.
@@ -1313,6 +1324,14 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_discard_that_failed_because_the_clip_was_in_use_says_so() {
+        let in_use = fsops::FsError::new(fsops::RECYCLE_IN_USE);
+        assert_eq!(discard_failure(&in_use), DISCARD_IN_USE);
+        let other = fsops::FsError::new("Couldn't move the original to the Recycle Bin.");
+        assert_eq!(discard_failure(&other), DISCARD_FAILED);
     }
 
     #[test]
