@@ -17,7 +17,7 @@ export interface EditorMedia {
   size_bytes: number;
   duration_s: number;
   bit_rate: number | null;
-  /** The file's modified time (ms since the Unix epoch), read on open; Next video finds the next one from it. */
+  /** The file's modified time (ms since the Unix epoch), read on open; Prev / Next find their neighbours from it. */
   modified_ms: number;
   video: { width: number; height: number; fps: number; codec: string } | null;
   tracks: { index: number; empty: boolean; file: string | null }[];
@@ -40,7 +40,8 @@ export type EditorEvent =
   | { type: 'Files'; paths: string[] }
   | { type: 'ExportStarted'; id: number; input: string }
   | { type: 'ExportProgress'; id: number; fraction: number }
-  | { type: 'ExportDone'; id: number; input: string; output: string; bytes: number }
+  /** `note`: something to say about a saved export, e.g. that its 20 MB copy couldn't be made. */
+  | { type: 'ExportDone'; id: number; input: string; output: string; bytes: number; note?: string }
   | { type: 'ExportFailed'; id: number; input: string; message: string; original_intact: boolean }
   | { type: 'ProxyProgress'; session: number; fraction: number }
   /** A deferred discard (`discard` with `after`) sent the clip to the Recycle Bin. */
@@ -61,10 +62,13 @@ export interface EditorApi {
    */
   discard(path: string, after: number[]): Promise<void>;
   /**
-   * The next older video in `path`'s folder, in Explorer's date-descending order (null: none).
-   * `path` may be gone already (recycled or moved): `modifiedMs` is its remembered modified time.
+   * The video in `path`'s folder next to it by date: the next newer one when `newer`, else the
+   * next older one (null: none). `path` may be gone already (recycled or moved): `modifiedMs` is
+   * its remembered modified time.
    */
-  nextFile(path: string, modifiedMs: number): Promise<string | null>;
+  adjacentFile(path: string, modifiedMs: number, newer: boolean): Promise<string | null>;
+  /** `paths` oldest first, by modified time then name; unreadable ones last, in their given order. */
+  orderFiles(paths: string[]): Promise<string[]>;
   close(session: number): Promise<void>;
   ready(): Promise<void>;
   onEvent(cb: (e: EditorEvent) => void): Promise<() => void>;
@@ -81,7 +85,8 @@ const tauriApi: EditorApi = {
   exportClip: (request) => invoke('editor_export', { request }),
   discard: (path, after) => invoke('editor_discard', { path, after }),
   // Tauri maps camelCase arguments to the command's snake_case parameters (`modified_ms`).
-  nextFile: (path, modifiedMs) => invoke('editor_next_file', { path, modifiedMs }),
+  adjacentFile: (path, modifiedMs, newer) => invoke('editor_adjacent_file', { path, modifiedMs, newer }),
+  orderFiles: (paths) => invoke('editor_order_files', { paths }),
   close: (session) => invoke('editor_close', { session }),
   ready: () => invoke('editor_ready'),
   onEvent: (cb) => listen<EditorEvent>(EDITOR_EVENT, (e) => cb(e.payload)),
@@ -103,7 +108,8 @@ export const api: EditorApi = {
   proxy: (session) => backend.then((b) => b.proxy(session)),
   exportClip: (request) => backend.then((b) => b.exportClip(request)),
   discard: (path, after) => backend.then((b) => b.discard(path, after)),
-  nextFile: (path, modifiedMs) => backend.then((b) => b.nextFile(path, modifiedMs)),
+  adjacentFile: (path, modifiedMs, newer) => backend.then((b) => b.adjacentFile(path, modifiedMs, newer)),
+  orderFiles: (paths) => backend.then((b) => b.orderFiles(paths)),
   close: (session) => backend.then((b) => b.close(session)),
   ready: () => backend.then((b) => b.ready()),
   onEvent: (cb) => backend.then((b) => b.onEvent(cb)),

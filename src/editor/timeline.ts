@@ -24,10 +24,16 @@ export interface Timeline {
   video: Seg[];
   audio: AudioTrack[];
   nextId: number;
+  // TASK 16 STAND-IN (Task 18 branch): Task 16 owns `masterDb`; its version wins at merge.
+  /** Gain on the final mix, dB; −60 or lower is −∞. */
+  masterDb: number;
 }
 
 export const MIN_GAIN_DB = -60; // shown as −∞
 export const MAX_GAIN_DB = 6;
+// TASK 16 STAND-IN (Task 18 branch): Task 16 owns these; its versions win at merge.
+export const MASTER_MAX_DB = 12;
+export const MASTER_STEP_DB = 3;
 
 /**
  * A track nobody hears: muted, or its fader at the bottom (−∞). The preview plays it at gain 0,
@@ -45,7 +51,7 @@ export function createTimeline(sourceDuration: number, fps: number, audioIndexes
   const mk = (): Seg => ({ id: `S${n++}`, link: 'L0', src: [0, sourceDuration], at: 0 });
   const video = [mk()];
   const audio = audioIndexes.map((index) => ({ index, segs: [mk()], gainDb: 0, muted: false }));
-  return { sourceDuration, fps, video, audio, nextId: n };
+  return { sourceDuration, fps, video, audio, nextId: n, masterDb: 0 };
 }
 
 export function quantize(t: number, fps: number): number {
@@ -350,6 +356,12 @@ export function setGain(tl: Timeline, index: number, gainDb: number): Timeline {
   const track = tl.audio.find((a) => a.index === index);
   if (!track || track.gainDb === g) return tl;
   return { ...tl, audio: tl.audio.map((a) => (a.index === index ? { ...a, gainDb: g } : a)) };
+}
+
+// TASK 16 STAND-IN (Task 18 branch): Task 16 owns `setMaster`; its version wins at merge.
+export function setMaster(tl: Timeline, db: number): Timeline {
+  const g = clamp(db, MIN_GAIN_DB, MASTER_MAX_DB);
+  return tl.masterDb === g ? tl : { ...tl, masterDb: g };
 }
 
 export function setMuted(tl: Timeline, index: number, muted: boolean): Timeline {

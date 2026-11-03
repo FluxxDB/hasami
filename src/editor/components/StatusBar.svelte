@@ -25,10 +25,10 @@
   {/if}
   {#if store.media}
     <span>{cuts} {cuts === 1 ? 'cut' : 'cuts'} · {selectedCount} selected</span>
-    <!-- The size the export buttons will make now is in bone; the other one is for comparison. -->
+    <!-- A video export is always at source quality; the 20 MB copy is in bone only when it's on. -->
     <span>
-      Quick export ≈ <b class:off={store.fit20}>{formatBytes(store.estimateBytes)}</b> at source quality · Fit to
-      20 MB: <b class:off={!store.fit20}>≤ 20 MB</b>
+      Quick export ≈ <b>{formatBytes(store.estimateBytes)}</b> at source quality · 20 MB copy:
+      <b class:off={!store.fit20}>≤ 20 MB</b>
     </span>
   {/if}
   <span class="spacer"></span>

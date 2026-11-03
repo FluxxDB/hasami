@@ -1,14 +1,20 @@
 <script lang="ts">
-  import { formatClock } from '../display';
-  import { zoomFromPos, zoomPos } from '../geometry';
+  import { formatClock, formatDb } from '../display';
+  import { faderDb, faderPos, zoomFromPos, zoomPos } from '../geometry';
   import type { EditorStore } from '../store.svelte';
   import Slider from './Slider.svelte';
-  import { videoEnd } from '../timeline';
+  import { MASTER_MAX_DB, MASTER_STEP_DB, MIN_GAIN_DB, videoEnd } from '../timeline';
 
   let { store }: { store: EditorStore } = $props();
 
   const media = $derived(store.media);
   const zoom = $derived(zoomPos(store.pxPerSecond));
+
+  // Master volume (spec 5.4): −∞ to +12 dB on the same fader curve as the tracks' volume.
+  const master = $derived(store.timeline.masterDb);
+  const masterPos = (db: number) => faderPos(db, MIN_GAIN_DB, MASTER_MAX_DB);
+  const masterAt = (pos: number) => faderDb(pos, MIN_GAIN_DB, MASTER_MAX_DB);
+  const editable = $derived(!!media && !store.locked);
 
   /** The slider zooms around the playhead while it's in view, otherwise around the left edge. */
   function onZoom(pos: number) {
@@ -50,6 +56,52 @@
   </button>
   <button type="button" class="tool" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled={store.locked || store.history.future.length === 0} onclick={() => store.command('redo')}>
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></svg>
+  </button>
+  <div class="vsep"></div>
+
+  <!-- The master section: one gain on the final mix (exported), and Dim (listening only). -->
+  <span class="mlabel cap" aria-hidden="true">Master</span>
+  <div class="mrail">
+    <Slider
+      value={masterPos(master)}
+      label="Master volume"
+      valuetext={formatDb(master)}
+      disabled={!editable}
+      oninput={(p) => store.setMaster(masterAt(p), false)}
+      onchange={(p) => store.setMaster(masterAt(p), true)}
+    />
+  </div>
+  <span class="db" class:off={!media}>{formatDb(master)}</span>
+  <button
+    type="button"
+    class="tool step"
+    aria-label="Master down {MASTER_STEP_DB} dB"
+    title="Master −{MASTER_STEP_DB} dB"
+    disabled={!editable || master <= MIN_GAIN_DB}
+    onclick={() => store.nudgeMaster(-1)}
+  >
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14" /></svg>
+  </button>
+  <button
+    type="button"
+    class="tool step"
+    aria-label="Master up {MASTER_STEP_DB} dB"
+    title="Master +{MASTER_STEP_DB} dB"
+    disabled={!editable || master >= MASTER_MAX_DB}
+    onclick={() => store.nudgeMaster(1)}
+  >
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M12 5v14" /></svg>
+  </button>
+  <!-- Not an edit: it works on a locked clip too, and stays on from clip to clip. -->
+  <button
+    type="button"
+    class="tool cap dim"
+    class:on={store.dim}
+    aria-pressed={store.dim}
+    title="Dim: hear everything 11 dB quieter (never exported)"
+    onclick={() => (store.dim = !store.dim)}
+  >
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5Z" /><path d="M15.5 10a3 3 0 0 1 0 4" /></svg>Dim
   </button>
 
   <div class="spacer"></div>
@@ -116,6 +168,35 @@
   .spacer {
     flex: 1;
   }
+
+  .mlabel {
+    color: var(--pebble);
+    margin-right: 6px;
+  }
+  .mrail {
+    width: 84px;
+    display: flex;
+  }
+  .db {
+    width: 56px;
+    flex: none;
+    margin-right: 2px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--bone);
+    white-space: nowrap;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .db.off {
+    color: var(--pebble);
+  }
+  .tool.step {
+    padding: 0 7px;
+  }
+  .dim {
+    margin-left: 4px;
+  }
   .kept {
     font-variant-numeric: tabular-nums;
     color: var(--pebble);
@@ -136,6 +217,13 @@
   .zoomrail {
     width: 90px;
     display: flex;
+  }
+
+  /* Near the 960px minimum the master section needs the Cut hint's room (the tooltip keeps it). */
+  @media (max-width: 1100px) {
+    .k {
+      display: none;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {

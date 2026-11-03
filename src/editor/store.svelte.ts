@@ -5,9 +5,10 @@
 //
 // It also runs the trim queue (spec 5.7, 5.8): which file is open, the exports handed to the Rust
 // job queue and how they're going, and the results list. The window never closes by itself: a
-// clip stays open while it exports (a Quick / Save raw export locks it), and Next video moves on,
-// through the queued files first and then the folder's older videos. Leaving a clip (Next,
-// Discard) closes its editor session on the Rust side.
+// clip stays open while it exports (a Quick / Save raw export locks it), and Prev / Next move on.
+// The queue is ordered by date, oldest first, and opens on the oldest: Next goes to the next newer
+// clip and Prev to the next older one, through the queued files and then on into the folder past
+// either end. Leaving a clip (Prev, Next, Discard) closes its editor session on the Rust side.
 
 import { api, type EditorEvent, type EditorMedia, type Peaks, type Thumb } from './api';
 import { SNAP_PX, zoomAround } from './geometry';
@@ -15,6 +16,7 @@ import { initHistory, isEdited, push, redo, undo, type History } from './history
 import type { Command } from './keys';
 import { STOPPED, nextCut, prevCut, shuttle, stepFrames, type Shuttle } from './playbackModel';
 import {
+  MASTER_STEP_DB,
   createTimeline,
   cutAt,
   deleteSegs,
@@ -23,6 +25,7 @@ import {
   quantize,
   segLen,
   setGain,
+  setMaster,
   setMuted,
   snap,
   snapCandidates,
@@ -43,8 +46,10 @@ type LogEntry =
    * file) is carried out by the Rust side once they're done; `Discard*` events report it.
    */
   | { action: 'discard'; input: string; state: 'waiting' | 'done' | 'kept'; message?: string };
-/** What the unsaved-edits dialog is asking about. */
-export type ConfirmKind = 'close' | 'next' | 'discard';
+/** What the unsaved-edits dialog is asking about: closing, moving on (Prev / Next), or Discard. */
+export type ConfirmKind = 'close' | 'move' | 'discard';
+/** Next video goes to the next newer clip, Prev to the next older one. */
+export type Direction = 'next' | 'prev';
 
 /** One line of the results list: something done to a file, and how it stands. */
 export interface Result {
@@ -58,21 +63,30 @@ export interface Result {
   fraction: number;
   output?: string;
   bytes?: number;
+  /** Said about a saved export, e.g. that its 20 MB copy couldn't be made. */
+  note?: string;
   message?: string;
   originalIntact?: boolean;
 }
 
-/** The file that's open (or opening, or failed to open); `at` is its place in the queue, null for one from the folder. */
+/**
+ * The file that's open (or opening, or failed to open). `at` is its place in the queue, null for
+ * one from the folder; `side` says which end of the queue such a folder clip lies past.
+ */
 export interface Current {
   path: string;
   at: number | null;
+  side?: 'older' | 'newer';
 }
 
 // Shown when a command fails without a message of its own.
 const OPEN_FAILED = "Couldn't open this clip.";
 const EXPORT_FAILED = "Couldn't start the export.";
 const DISCARD_FAILED = "Couldn't send this clip to the Recycle Bin.";
-const NEXT_FAILED = "Couldn't look for the next video in this folder.";
+const LOOK_FAILED: Record<Direction, string> = {
+  next: "Couldn't look for the next video in this folder.",
+  prev: "Couldn't look for the previous video in this folder.",
+};
 
 /** The Rust commands answer failures with a plain-language string. */
 const plain = (err: unknown, fallback: string): string => (typeof err === 'string' && err ? err : fallback);
@@ -115,8 +129,14 @@ export class EditorStore {
 
   linked = $state(true);
   snapping = $state(true);
+  /** The 20 MB copy toggle: video exports also save a ≤ 20 MB copy to Videos. */
   fit20 = $state(false);
   showEmpty = $state(false);
+  /**
+   * Dim: everything you hear 11 dB quieter while editing. Never exported and not an undo step;
+   * it stays on across clips until turned off (spec 5.4).
+   */
+  dim = $state(false);
 
   peaks = $state.raw<Record<number, Peaks>>({});
   thumbs = $state.raw<Thumb[]>([]);
@@ -127,27 +147,30 @@ export class EditorStore {
   /** Progress (0..1) of the H.264 preview proxy while it's being made; null otherwise. */
   proxyFraction = $state<number | null>(null);
 
-  /** The files Hasami was asked to trim, in order; `next` is the first not opened yet. */
+  /**
+   * The files Hasami was asked to trim, oldest first. `next` is the first not opened yet; the
+   * files from there on are re-sorted when more arrive.
+   */
   queue = $state<{ files: string[]; next: number }>({ files: [], next: 0 });
   /** The file on screen; null before the first and after the last (nothing left to trim). */
   current = $state<Current | null>(null);
   /** Counts the stays on a clip: each open of one is a new visit, and its exports belong to it. */
   visit = $state(0);
   /**
-   * The folder's next older video after the open clip, checked ahead of time so Next video's
-   * disabled state is honest: undefined while checking (or when the queue has a next anyway, or
-   * when the check failed: see `nextUnknown`).
+   * Where Prev / Next go through the folder from the open clip, checked ahead of time so their
+   * disabled states are honest: undefined while checking (or when the queue has a step that way
+   * anyway, or when the check failed: see `aheadUnknown`), null for nothing that way.
    */
-  folderNext = $state<string | null | undefined>(undefined);
+  ahead = $state.raw<Record<Direction, Current | null | undefined>>({ next: undefined, prev: undefined });
   /**
-   * The look-ahead couldn't read the folder. Next stays enabled: pressing it looks again, and says
-   * why if it still can't (a failed check must not pass for "no older video").
+   * The look-ahead couldn't read the folder. The button stays enabled: pressing it looks again, and
+   * says why if it still can't (a failed check must not pass for "nothing that way").
    */
-  nextUnknown = $state(false);
+  aheadUnknown = $state.raw<Record<Direction, boolean>>({ next: false, prev: false });
   exports = $state<{
     /** Job ids handed to the queue and not yet finished. */
     running: number[];
-    done: { id: number; input: string; output: string; bytes: number }[];
+    done: { id: number; input: string; output: string; bytes: number; note?: string }[];
     failed: { id: number; input: string; message: string; originalIntact: boolean }[];
     /** Latest progress (0..1) of each export the queue has started (absent: still queued). */
     progress: Record<number, number>;
@@ -182,6 +205,13 @@ export class EditorStore {
   private modified = new Map<string, number>();
   /** Bumped by each open, so an answer for a clip no longer wanted is dropped. */
   private openSeq = 0;
+  /**
+   * Files recycled or moved by a finished Quick / Save raw export or discard: Prev / Next pass over
+   * them in the queue. A new trim of one (it was restored) takes it off.
+   */
+  private gone = $state.raw<ReadonlySet<string>>(new Set());
+  /** `Files` batches merge one at a time (each waits for its ordering). */
+  private merging: Promise<void> = Promise.resolve();
 
   get timeline(): Timeline {
     return this.preview ?? this.history.present;
@@ -206,9 +236,24 @@ export class EditorStore {
     return this.visit > 0 && this.current === null;
   }
 
-  /** Next video has somewhere to go: a queued file, or an older video in the folder. */
+  /** Next video has somewhere to go: a newer queued file, or a newer video in the folder. */
   get canNext(): boolean {
-    return this.queue.next < this.queue.files.length || typeof this.folderNext === 'string' || this.nextUnknown;
+    return this.canGo('next');
+  }
+
+  /** Prev has somewhere to go: an older queued file, or an older video in the folder. */
+  get canPrev(): boolean {
+    return this.canGo('prev');
+  }
+
+  /** Where Next goes, for its tooltip: undefined while that's being checked. */
+  get nextTarget(): Current | null | undefined {
+    return this.target('next');
+  }
+
+  /** Where Prev goes, for its tooltip: undefined while that's being checked. */
+  get prevTarget(): Current | null | undefined {
+    return this.target('prev');
   }
 
   get canExportAudio(): boolean {
@@ -278,22 +323,46 @@ export class EditorStore {
   // --- queue -------------------------------------------------------------------------------
 
   /**
-   * Adds files to the end of the queue, once per path among those not dealt with yet (a file
-   * already exported, moved on from, kept or failed can be trimmed again; one waiting to be
-   * recycled, or to be replaced or moved by a Quick / Save raw export still to finish, can't).
-   * With nothing open (the first batch, or after the last video), the first of them opens.
+   * Merges files into the part of the queue not opened yet and sorts that part by date, oldest
+   * first; the files already opened keep their places. Each path goes in once among those not
+   * dealt with yet (a file already exported, moved on from, kept or failed can be trimmed again;
+   * one waiting to be recycled, or to be replaced or moved by a Quick / Save raw export still to
+   * finish, can't). With nothing open (the first batch, or after the last video), the first of the
+   * part not opened yet opens: for the first batch, the oldest file.
    */
   addFiles(paths: string[]): Promise<void> {
+    const run = this.merging.then(() => this.merge(paths));
+    this.merging = run.catch(() => {});
+    return run;
+  }
+
+  private async merge(paths: string[]): Promise<void> {
     const q = this.queue;
     const ahead = q.files.slice(q.next);
     const pending = new Set([...ahead, ...(this.current ? [this.current.path] : []), ...this.leaving()]);
+    const fresh: string[] = [];
     for (const p of paths) {
       if (pending.has(p)) continue;
       pending.add(p);
-      q.files.push(p);
+      fresh.push(p);
     }
-    if (this.current === null && q.next < q.files.length) return this.show({ path: q.files[q.next], at: q.next });
-    return Promise.resolve();
+    if (fresh.length > 0) {
+      // Asked for again, so it's back (restored from the Recycle Bin, say).
+      if (fresh.some((p) => this.gone.has(p))) this.gone = new Set([...this.gone].filter((p) => !fresh.includes(p)));
+      let order: string[];
+      try {
+        order = await api.orderFiles([...ahead, ...fresh]);
+      } catch (err) {
+        console.error('editor_order_files failed', err);
+        order = [...ahead, ...fresh];
+      }
+      // Next may have opened some of them while they were being ordered: those keep their places.
+      // Anything the ordering left out goes last, as it came.
+      const wanted = new Set([...q.files.slice(q.next), ...fresh.filter((p) => p !== this.current?.path)]);
+      const sorted = [...new Set([...order, ...wanted])].filter((p) => wanted.has(p));
+      q.files = [...q.files.slice(0, q.next), ...sorted];
+    }
+    if (this.current === null && q.next < q.files.length) await this.show({ path: q.files[q.next], at: q.next });
   }
 
   /** Hands the edit to the job queue; the clip stays open (a Quick / Save raw export locks it). */
@@ -327,37 +396,50 @@ export class EditorStore {
     }
   }
 
+  /** Next video: the next newer clip (see `go`). */
+  nextVideo(): Promise<void> {
+    return this.go('next');
+  }
+
+  /** Prev: the next older clip (see `go`). */
+  prevVideo(): Promise<void> {
+    return this.go('prev');
+  }
+
   /**
-   * Next video: the next queued file, else the folder's next older video. It asks first when
-   * the clip has edits no export was made from; a running export carries on by itself.
+   * Moves to the next clip `dir`'s way: through the queue, then the folder past its end. It asks
+   * first when the clip has edits no export was made from; a running export carries on by itself.
    */
-  async nextVideo(): Promise<void> {
+  private async go(dir: Direction): Promise<void> {
     const from = this.current;
-    if (!from || this.busy || !this.canNext) return;
+    if (!from || this.busy || !this.canGo(dir)) return;
     this.busy = true;
     try {
-      if (this.unsaved && !(await this.ask('next'))) return;
-      let next: Current | null;
+      if (this.unsaved && !(await this.ask('move'))) return;
+      let to: Current | null;
       try {
-        next = await this.after(from.path);
+        to = await this.step(from, dir);
       } catch (err) {
-        this.notice = plain(err, NEXT_FAILED);
+        this.notice = plain(err, LOOK_FAILED[dir]);
         return;
       }
-      // The folder changed since it was checked: there's nothing after all.
-      if (!next) {
-        this.folderNext = null;
-        this.nextUnknown = false;
+      // The folder changed since it was checked: there's nothing that way after all.
+      if (!to) {
+        this.ahead = { ...this.ahead, [dir]: null };
+        this.aheadUnknown = { ...this.aheadUnknown, [dir]: false };
         return;
       }
       void this.leave();
-      await this.show(next);
+      await this.show(to);
     } finally {
       this.busy = false;
     }
   }
 
-  /** Sends the file to the Recycle Bin and moves on as Next would; an edited clip asks first. */
+  /**
+   * Sends the file to the Recycle Bin and moves on as Next would, or as Prev would when there's
+   * nothing newer; an edited clip asks first.
+   */
   async discard(): Promise<void> {
     const from = this.current;
     if (!from || this.busy || this.locked) return;
@@ -381,20 +463,24 @@ export class EditorStore {
         this.notice = plain(err, DISCARD_FAILED);
         return;
       }
-      let next: Current | null = null;
-      try {
-        next = await this.after(path);
-      } catch (err) {
-        this.notice = plain(err, NEXT_FAILED);
+      if (after.length === 0) this.markGone(path);
+      let to: Current | null = null;
+      for (const dir of ['next', 'prev'] as const) {
+        try {
+          to = await this.step(from, dir);
+        } catch (err) {
+          this.notice = plain(err, LOOK_FAILED[dir]);
+        }
+        if (to) break;
       }
-      if (next) {
-        await this.show(next);
+      if (to) {
+        await this.show(to);
       } else {
         // Nothing left to trim: the window stays, with the results list.
         this.current = null;
         this.visit += 1;
-        this.folderNext = undefined;
-        this.nextUnknown = false;
+        this.ahead = { next: undefined, prev: undefined };
+        this.aheadUnknown = { next: false, prev: false };
       }
     } finally {
       this.busy = false;
@@ -429,10 +515,14 @@ export class EditorStore {
       case 'ExportProgress':
         if (x.running.includes(e.id)) x.progress[e.id] = e.fraction;
         return;
-      case 'ExportDone':
+      case 'ExportDone': {
         this.finish(e.id);
-        x.done.push({ id: e.id, input: e.input, output: e.output, bytes: e.bytes });
+        x.done.push({ id: e.id, input: e.input, output: e.output, bytes: e.bytes, note: e.note });
+        // A Quick / Save raw export has recycled or moved its original by now.
+        const entry = this.log.find((l) => 'id' in l && l.id === e.id);
+        if (entry && (entry.action === 'quick' || entry.action === 'save_raw')) this.markGone(entry.input);
         return;
+      }
       case 'ExportFailed':
         this.finish(e.id);
         x.failed.push({ id: e.id, input: e.input, message: e.message, originalIntact: e.original_intact });
@@ -446,6 +536,7 @@ export class EditorStore {
         if (entry?.action !== 'discard') return;
         entry.state = e.type === 'DiscardDone' ? 'done' : 'kept';
         if (e.type === 'DiscardKept') entry.message = e.message;
+        else this.markGone(e.path);
         return;
       }
     }
@@ -453,7 +544,7 @@ export class EditorStore {
 
   /** Puts `to` on screen as a new visit and opens it. */
   private show(to: Current): Promise<void> {
-    if (to.at !== null) this.queue.next = to.at + 1;
+    if (to.at !== null) this.queue.next = Math.max(this.queue.next, to.at + 1);
     this.current = to;
     this.visit += 1;
     return this.open(to.path);
@@ -463,15 +554,15 @@ export class EditorStore {
   private async open(path: string): Promise<void> {
     const seq = ++this.openSeq;
     this.error = null;
-    this.folderNext = undefined;
-    this.nextUnknown = false;
+    this.ahead = { next: undefined, prev: undefined };
+    this.aheadUnknown = { next: false, prev: false };
     let media: EditorMedia;
     try {
       media = await api.open(path);
     } catch (err) {
       if (seq !== this.openSeq) return;
       this.error = plain(err, OPEN_FAILED);
-      await this.checkNext(seq);
+      await this.lookAhead(seq);
       return;
     }
     if (seq !== this.openSeq || this.currentPath !== path) {
@@ -495,41 +586,101 @@ export class EditorStore {
         .then((p) => current() && (this.peaks = { ...this.peaks, [t.index]: p }))
         .catch((err) => console.error('editor_peaks failed', err));
     }
-    await this.checkNext(seq);
-  }
-
-  /** Looks ahead for Next video's disabled state: only needed once the queue has no next file. */
-  private async checkNext(seq: number): Promise<void> {
-    const path = this.currentPath;
-    if (!path || this.queue.next < this.queue.files.length) return;
-    try {
-      const next = (await this.after(path))?.path ?? null;
-      if (seq === this.openSeq) this.folderNext = next;
-    } catch (err) {
-      console.error('editor_next_file failed', err);
-      if (seq === this.openSeq) this.nextUnknown = true;
-    }
+    await this.lookAhead(seq);
   }
 
   /**
-   * Where Next goes from `path`: the next queued file, else the folder's next older video,
-   * passing over clips on their way out (a Quick / Save raw export or a discard still to finish).
-   * Null when there's nothing after it, or nothing known about it (it never opened).
+   * Looks ahead for Prev's and Next's disabled states: only needed for a way the queue has no
+   * step of its own (the queue's steps are known without asking).
    */
-  private async after(path: string): Promise<Current | null> {
+  private async lookAhead(seq: number): Promise<void> {
+    const from = this.current;
+    if (!from) return;
+    const look = async (dir: Direction) => {
+      if (this.queueStep(from, dir)) return;
+      try {
+        const to = await this.folderStep(from, dir);
+        if (seq === this.openSeq) this.ahead = { ...this.ahead, [dir]: to };
+      } catch (err) {
+        console.error('editor_adjacent_file failed', err);
+        if (seq === this.openSeq) this.aheadUnknown = { ...this.aheadUnknown, [dir]: true };
+      }
+    };
+    await Promise.all([look('next'), look('prev')]);
+  }
+
+  private canGo(dir: Direction): boolean {
+    const from = this.current;
+    if (!from) return false;
+    return this.queueStep(from, dir) !== null || !!this.ahead[dir] || this.aheadUnknown[dir];
+  }
+
+  private target(dir: Direction): Current | null | undefined {
+    const from = this.current;
+    if (!from) return null;
+    return this.queueStep(from, dir) ?? this.ahead[dir];
+  }
+
+  /** Where Prev / Next go from `from`: a queued file, else the folder's neighbour that way. */
+  private async step(from: Current, dir: Direction): Promise<Current | null> {
+    return this.queueStep(from, dir) ?? (await this.folderStep(from, dir));
+  }
+
+  /**
+   * The queued file Prev / Next go to from `from`, passing over files on their way out or gone;
+   * null when that way leads into the folder. From a queued file the step is to its neighbour.
+   * From a folder clip past the newer end, Next goes to the first queued file not opened yet
+   * (more arrived meanwhile); every other folder step is the folder's.
+   */
+  private queueStep(from: Current, dir: Direction): Current | null {
     const q = this.queue;
-    if (q.next < q.files.length) return { path: q.files[q.next], at: q.next };
-    const leaving = this.leaving();
-    let from = path;
-    for (let i = 0; i < MAX_PASSED; i++) {
-      const ms = this.modified.get(from);
-      if (ms === undefined) return null;
-      const next = await api.nextFile(from, ms);
-      if (next === null) return null;
-      if (!leaving.has(next)) return { path: next, at: null };
-      from = next;
+    let at: number;
+    if (from.at !== null) at = from.at;
+    else if (dir === 'next' && from.side === 'newer') at = q.next - 1;
+    else return null;
+    const skip = this.unavailable();
+    const by = dir === 'next' ? 1 : -1;
+    for (let i = at + by; i >= 0 && i < q.files.length; i += by) {
+      const p = q.files[i];
+      if (p !== from.path && !skip.has(p)) return { path: p, at: i };
     }
     return null;
+  }
+
+  /**
+   * The folder's next newer (Next) or older (Prev) video from `from`, passing over clips on their
+   * way out (a Quick / Save raw export or a discard still to finish). One that's queued takes its
+   * place in the queue, so walking back from the folder carries on through the queue. Null when
+   * there's nothing that way, or nothing known about `from` (it never opened).
+   */
+  private async folderStep(from: Current, dir: Direction): Promise<Current | null> {
+    const newer = dir === 'next';
+    const leaving = this.leaving();
+    let path = from.path;
+    for (let i = 0; i < MAX_PASSED; i++) {
+      const ms = this.modified.get(path);
+      if (ms === undefined) return null;
+      const found = await api.adjacentFile(path, ms, newer);
+      if (found === null) return null;
+      if (!leaving.has(found)) {
+        const files = this.queue.files;
+        const at = newer ? files.indexOf(found) : files.lastIndexOf(found);
+        if (at >= 0) return { path: found, at };
+        // Past the queue's newer or older end; a folder clip stays on the side it was on.
+        return { path: found, at: null, side: from.at === null ? from.side : newer ? 'newer' : 'older' };
+      }
+      path = found;
+    }
+    return null;
+  }
+
+  /** Files Prev / Next pass over in the queue: on their way out, or gone. */
+  private unavailable(): Set<string> {
+    return new Set([...this.leaving(), ...this.gone]);
+  }
+
+  private markGone(path: string): void {
+    if (!this.gone.has(path)) this.gone = new Set([...this.gone, path]);
   }
 
   /** Files waiting to be recycled or moved: as good as gone, so they're never opened again. */
@@ -575,7 +726,7 @@ export class EditorStore {
     }
     const { id, input, action } = entry;
     const done = e.done.find((d) => d.id === id);
-    if (done) return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes };
+    if (done) return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes, note: done.note };
     const failed = e.failed.find((f) => f.id === id);
     if (failed) {
       const { message, originalIntact } = failed;
@@ -821,6 +972,25 @@ export class EditorStore {
       this.drag = null;
       this.preview = setGain(this.preview ?? this.history.present, index, db);
     }
+  }
+
+  // TASK 16 STAND-IN (Task 18 branch): Task 16 owns `setMaster` and `nudgeMaster`; its versions
+  // win at merge.
+  /** Sets the master volume. While the slider moves (`commit` false) it's live only; release records it. */
+  setMaster(db: number, commit: boolean): void {
+    if (commit) {
+      this.edit(setMaster(this.history.present, db));
+    } else if (!this.locked) {
+      this.drag = null;
+      this.preview = setMaster(this.preview ?? this.history.present, db);
+    }
+  }
+
+  /** Moves the master volume one step (3 dB) down or up, clamped; each press is one undo step. */
+  nudgeMaster(dir: 1 | -1): void {
+    this.commitLive();
+    const tl = this.history.present;
+    this.edit(setMaster(tl, tl.masterDb + dir * MASTER_STEP_DB));
   }
 
   toggleMute(index: number): void {

@@ -1,14 +1,15 @@
 // Plays the edited timeline: a muted <video> for the picture and one <audio> element per source
 // audio track for the sound, kept in sync with it (spec 5.2, 6). Each <audio> goes through a Web
-// Audio GainNode so per-track volume and mute apply live, above 0 dB too. Audio is streamed by
-// its element, never decoded whole into memory.
+// Audio GainNode so per-track volume and mute apply live, above 0 dB too, and then through one
+// master GainNode (master volume, and Dim) before the speakers. Audio is streamed by its element,
+// never decoded whole into memory.
 //
 // The clock is the video while it has a playable source. With no source (an audio-only file, the
 // browser mock, a preview that's still being prepared) the clock is the wall clock, so the
 // playhead, the transport and the audio still run.
 
 import { STOPPED, audioSourceAt, videoSourceAt, type Shuttle } from './playbackModel';
-import { isSilent, segLen, videoEnd, type Timeline } from './timeline';
+import { MIN_GAIN_DB, isSilent, segLen, videoEnd, type Timeline } from './timeline';
 
 /** How far an <audio> element may drift from where it should be before it's re-seeked. */
 export const DRIFT_TOLERANCE_S = 0.04;
@@ -31,6 +32,14 @@ export function trackGain(db: number, muted: boolean): number {
   return isSilent(db, muted) ? 0 : 10 ** (db / 20);
 }
 
+/** How much Dim takes off everything you hear while editing (spec 5.4). */
+export const DIM_DB = 11;
+
+/** The master's linear gain: 10^((master − Dim)/20), or 0 at the bottom of the fader (−∞). */
+export function masterGain(masterDb: number, dim: boolean): number {
+  return masterDb <= MIN_GAIN_DB ? 0 : 10 ** ((masterDb - (dim ? DIM_DB : 0)) / 20);
+}
+
 /**
  * The video segment on screen at timeline time `t` and the source time to show. `videoSourceAt`
  * is half-open, so a playhead parked at the end shows the last frame of the last segment.
@@ -48,7 +57,10 @@ interface Track {
   index: number;
   src: string;
   el: HTMLAudioElement;
-  /** Null when the element plays on its own (the fallback): then volume is capped at 0 dB. */
+  /**
+   * Null when the element plays on its own (the fallback): then its volume stands in for the
+   * track's gain times the master's, capped at 0 dB.
+   */
   graph: { node: MediaElementAudioSourceNode; gain: GainNode } | null;
   /** The segment this element is playing, so entering the next one re-seeks it. */
   segId: string | null;
@@ -67,6 +79,9 @@ export class PlaybackEngine {
   private readonly makeAudio: () => HTMLAudioElement;
   private tl: Timeline | null = null;
   private tracks: Track[] = [];
+  /** The mix's last stage before the speakers: master volume and Dim. Null without Web Audio. */
+  private readonly master: GainNode | null;
+  private dim = false;
   private videoSrc = '';
 
   /** Timeline time of the picture, seconds. */
@@ -94,6 +109,8 @@ export class PlaybackEngine {
     this.ctx = ctx;
     this.makeAudio = makeAudio;
     video.muted = true;
+    this.master = ctx?.createGain() ?? null;
+    if (ctx && this.master) this.master.connect(ctx.destination);
   }
 
   /** Points the engine at a clip: the picture's URL ('' for none) and each audio track's URL. */
@@ -137,6 +154,12 @@ export class PlaybackEngine {
       this.showFrame(true);
     }
     for (const tr of this.tracks) tr.segId = null; // re-check every track against the new segments
+  }
+
+  /** Dim: everything you hear 11 dB quieter. It's for listening only: nothing in the timeline changes. */
+  setDim(on: boolean): void {
+    this.dim = on;
+    this.applyGains();
   }
 
   play(): void {
@@ -186,6 +209,7 @@ export class PlaybackEngine {
     this.video.pause();
     for (const tr of this.tracks) this.dropElement(tr);
     this.tracks = [];
+    this.master?.disconnect();
     this.timeCbs.clear();
     this.endedCbs.clear();
   }
@@ -230,7 +254,7 @@ export class PlaybackEngine {
         const gain = this.ctx.createGain();
         // Start at the track's level: a ramp from the default 1.0 would blip a muted track.
         gain.gain.value = this.gainFor(tr);
-        node.connect(gain).connect(this.ctx.destination);
+        node.connect(gain).connect(this.master ?? this.ctx.destination);
         tr.graph = { node, gain };
       } catch (err) {
         console.warn('Web Audio routing failed; playing the track on its own', err);
@@ -274,7 +298,12 @@ export class PlaybackEngine {
   }
 
   private applyGains(): void {
+    if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.masterLevel(), this.ctx.currentTime, 0.015);
     for (const tr of this.tracks) this.applyGain(tr);
+  }
+
+  private masterLevel(): number {
+    return masterGain(this.tl?.masterDb ?? 0, this.dim);
   }
 
   private gainFor(tr: Track): number {
@@ -288,8 +317,10 @@ export class PlaybackEngine {
       // A short ramp, so moving the fader doesn't click.
       tr.graph.gain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.015);
     } else {
-      tr.el.volume = Math.min(1, g);
-      tr.el.muted = g === 0;
+      // A plain element skips the master node, so the master is applied here.
+      const v = g * this.masterLevel();
+      tr.el.volume = Math.min(1, v);
+      tr.el.muted = v === 0;
     }
   }
 

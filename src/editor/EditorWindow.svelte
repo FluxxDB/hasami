@@ -99,6 +99,13 @@
     if (sy) untrack(() => sy.shuttle(s));
   });
 
+  // Dim is the engine's alone: it never reaches the timeline or an export.
+  $effect(() => {
+    const on = store.dim;
+    const e = engine;
+    if (e) untrack(() => e.setDim(on));
+  });
+
   /**
    * Loads the clip's picture and tracks. The original plays directly whenever this webview may
    * decode it; it goes to the proxy up front only when the webview can't play its codec at all,
