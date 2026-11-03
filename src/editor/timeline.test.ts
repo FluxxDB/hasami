@@ -3,14 +3,18 @@ import {
   createTimeline,
   cutAt,
   cutCount,
+  deleteJoin,
   deleteSegs,
   hasAudibleAudio,
   linkedIds,
+  MASTER_MAX_DB,
+  MASTER_STEP_DB,
   MIN_GAIN_DB,
   moveEdge,
   quantize,
   segLen,
   setGain,
+  setMaster,
   setMuted,
   snap,
   snapCandidates,
@@ -669,5 +673,74 @@ describe('export request', () => {
     let tl = deleteSegs(tl2, [tl2.video[1].id, tl2.video[2].id], false); // video ends at 12
     tl = deleteSegs(tl, [tl.audio[0].segs[0].id, tl.audio[1].segs[0].id], false);
     expect(hasAudibleAudio(tl)).toBe(false);
+  });
+});
+
+describe('master volume', () => {
+  it('starts at 0 dB with a +12 dB ceiling and 3 dB steps', () => {
+    expect(tl0.masterDb).toBe(0);
+    expect(MASTER_MAX_DB).toBe(12);
+    expect(MASTER_STEP_DB).toBe(3);
+  });
+
+  it('setMaster clamps to [-60, 12] and returns the same object when unchanged', () => {
+    expect(setMaster(tl0, 5).masterDb).toBe(5);
+    expect(setMaster(tl0, 40).masterDb).toBe(12);
+    expect(setMaster(tl0, -200).masterDb).toBe(MIN_GAIN_DB);
+    expect(setMaster(tl0, 0)).toBe(tl0);
+    const top = setMaster(tl0, 12);
+    expect(setMaster(top, 30)).toBe(top);
+  });
+
+  it('toExportRequest carries master_db', () => {
+    const req = toExportRequest(setMaster(tl2, -4.5), 1, 'x.mp4', 'quick', false);
+    expect(req.master_db).toBe(-4.5);
+    expect(req.audio).toHaveLength(2);
+    expect(toExportRequest(tl2, 1, 'x.mp4', 'quick', false).master_db).toBe(0);
+  });
+
+  it('master at -inf exports no audio in any mode and counts as silent', () => {
+    const off = setMaster(tl2, MIN_GAIN_DB);
+    expect(toExportRequest(off, 1, 'x.mp4', 'quick', false).audio).toEqual([]);
+    expect(toExportRequest(off, 1, 'x.mp4', 'audio', false).audio).toEqual([]);
+    expect(hasAudibleAudio(off)).toBe(false);
+    expect(hasAudibleAudio(setMaster(tl2, MIN_GAIN_DB + 0.5))).toBe(true);
+  });
+});
+
+describe('deleteJoin', () => {
+  it('right half deleted: the end of what is left', () => {
+    const tl = cutAt(tl0, 12);
+    expect(deleteJoin(tl, [tl.video[1].id], true)).toBe(12);
+  });
+
+  it('left half deleted: 0', () => {
+    const tl = cutAt(tl0, 12);
+    expect(deleteJoin(tl, [tl.video[0].id], true)).toBe(0);
+  });
+
+  it('a middle piece: where its neighbours meet', () => {
+    expect(deleteJoin(tl2, [tl2.video[1].id], true)).toBe(12);
+    expect(deleteJoin(tl2, [tl2.video[1].id], false)).toBe(12);
+  });
+
+  it('several ranges: the leftmost join', () => {
+    expect(deleteJoin(tl2, [tl2.video[2].id, tl2.video[1].id], true)).toBe(12);
+    expect(deleteJoin(tl2, [tl2.video[2].id, tl2.video[0].id], true)).toBe(0);
+  });
+
+  it('is the start the ripple leaves the next piece at', () => {
+    const after = deleteSegs(tl2, [tl2.video[1].id], true);
+    expect(after.video[1].at).toBe(deleteJoin(tl2, [tl2.video[1].id], true));
+  });
+
+  it('null when no video is removed', () => {
+    expect(deleteJoin(tl2, [tl2.audio[0].segs[1].id], false)).toBeNull();
+    expect(deleteJoin(tl2, [], true)).toBeNull();
+    expect(deleteJoin(tl2, ['nope'], true)).toBeNull();
+  });
+
+  it('null when the delete is refused (the last video piece)', () => {
+    expect(deleteJoin(tl0, [tl0.video[0].id], true)).toBeNull();
   });
 });

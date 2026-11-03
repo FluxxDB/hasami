@@ -234,6 +234,61 @@ describe('EditorStore commands', () => {
     expect(videoEnd(s.timeline)).toBe(90);
   });
 
+  describe('playhead after a delete lands at the join', () => {
+    const cutAtTimes = (s: EditorStore, ...ts: number[]) => {
+      for (const t of ts) {
+        s.seek(t);
+        s.command('cut');
+      }
+    };
+
+    it('deleting the right half puts it at the end of what is left', () => {
+      const s = loaded();
+      cutAtTimes(s, 12);
+      s.seek(50);
+      s.selectAt(s.timeline.video[1].id);
+      s.command('delete');
+      expect(s.playhead).toBe(12);
+    });
+
+    it('deleting the left half puts it at 0', () => {
+      const s = loaded();
+      cutAtTimes(s, 12);
+      s.seek(8);
+      s.selectAt(s.timeline.video[0].id);
+      s.command('delete');
+      expect(s.playhead).toBe(0);
+    });
+
+    it('deleting a middle piece puts it where the neighbours meet, even from the end', () => {
+      const s = loaded();
+      cutAtTimes(s, 12, 31);
+      s.seek(90);
+      s.selectAt(s.timeline.video[1].id);
+      s.command('delete');
+      expect(s.playhead).toBe(12);
+    });
+
+    it('an audio-only delete leaves the playhead alone', () => {
+      const s = loaded();
+      cutAtTimes(s, 12);
+      s.command('toggleLinked');
+      s.seek(40);
+      s.selectAt(s.timeline.audio[0].segs[1].id);
+      s.command('delete');
+      expect(s.playhead).toBe(40);
+    });
+
+    it('asks the player to seek there', () => {
+      const s = loaded();
+      cutAtTimes(s, 12);
+      s.selectAt(s.timeline.video[1].id);
+      const before = s.seekSeq;
+      s.command('delete');
+      expect(s.seekSeq).toBeGreaterThan(before);
+    });
+  });
+
   it('toggleSnap and toggleLinked flip the flags', () => {
     const s = loaded();
     expect(s.snapping).toBe(true);
@@ -354,6 +409,43 @@ describe('EditorStore commands', () => {
     s.setGain(0, 0, false);
     s.setGain(0, 0, true);
     expect(s.history.past).toHaveLength(0);
+  });
+
+  it('setMaster previews without history until it commits, then is one undo step', () => {
+    const s = loaded();
+    s.setMaster(-6, false);
+    expect(s.timeline.masterDb).toBe(-6);
+    expect(s.history.past).toHaveLength(0);
+    s.setMaster(-6, true);
+    expect(s.history.past).toHaveLength(1);
+    s.command('undo');
+    expect(s.timeline.masterDb).toBe(0);
+  });
+
+  it('a master slider that returns to where it started records nothing', () => {
+    const s = loaded();
+    s.setMaster(-12, false);
+    s.setMaster(0, false);
+    s.setMaster(0, true);
+    expect(s.history.past).toHaveLength(0);
+  });
+
+  it('nudgeMaster steps by 3 dB, clamps, and makes one undo entry per press', () => {
+    const s = loaded();
+    s.nudgeMaster(1);
+    s.nudgeMaster(1);
+    expect(s.timeline.masterDb).toBe(6);
+    expect(s.history.past).toHaveLength(2);
+    s.nudgeMaster(-1);
+    expect(s.timeline.masterDb).toBe(3);
+    expect(s.history.past).toHaveLength(3);
+    s.command('undo');
+    expect(s.timeline.masterDb).toBe(6);
+    for (let i = 0; i < 10; i++) s.nudgeMaster(1);
+    expect(s.timeline.masterDb).toBe(12);
+    const steps = s.history.past.length;
+    s.nudgeMaster(1); // already at the ceiling: no-op, no entry
+    expect(s.history.past).toHaveLength(steps);
   });
 
   it('toggleMute is an undo step', () => {
