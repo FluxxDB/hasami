@@ -52,6 +52,59 @@ pub fn fixture_multitrack_hevc(dir: &Path) -> PathBuf {
     out
 }
 
+/// 5 s of a `picture`-sized test pattern placed in a black 1920x1080 frame by `pad`, with one
+/// AAC track, as `name` in `dir`. `video` is the video encoder's arguments.
+fn boxed(dir: &Path, name: &str, picture: &str, pad: &str, video: &[&str]) -> PathBuf {
+    let out = out_path(dir, name);
+    let source = format!("testsrc2=size={picture}:rate=30:duration=5");
+    let mut args = vec![
+        "-f", "lavfi", "-i", &source,
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=5",
+        "-vf", pad,
+    ];
+    args.extend(video);
+    args.extend(["-c:a", "aac", "-ac", "2", "-t", "5", s(&out)]);
+    ffmpeg(&args);
+    out
+}
+
+const H264_8BIT: [&str; 8] = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p"];
+
+/// 5 s of a 1440x810 picture in the top-left corner of a black 1920x1080 frame, as some OBS
+/// setups record a game, in H.264 with one AAC track.
+pub fn fixture_bordered(dir: &Path) -> PathBuf {
+    boxed(dir, "bordered.mp4", "1440x810", "pad=1920:1080:0:0", &H264_8BIT)
+}
+
+/// [`fixture_bordered`] as 10-bit HEVC (Main 10), whose black is 64 rather than 16.
+pub fn fixture_bordered_10bit(dir: &Path) -> PathBuf {
+    boxed(dir, "bordered_10bit.mp4", "1440x810", "pad=1920:1080:0:0", &[
+        "-c:v", "libx265", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p10le",
+        "-tag:v", "hvc1", "-x265-params", "log-level=error",
+    ])
+}
+
+/// 5 s of a 4:3 1440x1080 picture pillarboxed in the middle of a black 1920x1080 frame, in H.264
+/// with one AAC track.
+pub fn fixture_pillarboxed(dir: &Path) -> PathBuf {
+    boxed(dir, "pillarboxed.mp4", "1440x1080", "pad=1920:1080:240:0", &H264_8BIT)
+}
+
+/// The RGB colour of the pixel at (`x`, `y`) in the first frame of `file`.
+pub fn pixel(file: &Path, x: u32, y: u32) -> [u8; 3] {
+    let paths = FfmpegPaths::resolve().expect("bundled ffmpeg not found");
+    // 2x2, since 4:2:0 video can't be cropped to a single pixel.
+    let crop = format!("crop=2:2:{x}:{y}");
+    let output = hidden_command(&paths.ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(file)
+        .args(["-vf", &crop, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .expect("failed to spawn ffmpeg");
+    assert!(output.status.success(), "pixel read failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    [output.stdout[0], output.stdout[1], output.stdout[2]]
+}
+
 /// `secs` seconds of noisy 1080p30 H.264 at 60 Mbit/s plus one AAC track. A 4 s clip is over 20 MB.
 pub fn fixture_big_h264(dir: &Path, secs: u32) -> PathBuf {
     let out = out_path(dir, "big_h264.mp4");

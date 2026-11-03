@@ -2,7 +2,7 @@ mod common;
 
 use std::path::Path;
 
-use hasami_lib::editor::media::{make_proxy, peaks, prepare, thumbnails};
+use hasami_lib::editor::media::{detect_border, make_proxy, peaks, prepare, thumbnails, Crop};
 use hasami_lib::jobs::JobError;
 use hasami_lib::media::run::CancelToken;
 use hasami_lib::media::{hidden_command, probe, FfmpegPaths};
@@ -51,6 +51,74 @@ fn prepare_marks_silent_tracks_empty() {
         }
     }
     assert_eq!(prepared.info.audio.len(), 3);
+    assert_eq!(prepared.border, None, "the test pattern fills the frame");
+}
+
+#[test]
+fn detect_border_finds_the_picture_inside_black() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_bordered(dir.path());
+
+    let border = detect_border(&paths(), &input, 5.0, &CancelToken::new()).unwrap();
+    assert_eq!(border, Some(Crop { x: 0, y: 0, w: 1440, h: 810 }));
+
+    let prepared = prepare(&paths(), &input, &dir.path().join("work"), &CancelToken::new()).unwrap();
+    assert_eq!(prepared.border, border);
+}
+
+#[test]
+fn detect_border_without_a_border_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_multitrack_hevc(dir.path());
+
+    assert_eq!(detect_border(&paths(), &input, 5.0, &CancelToken::new()).unwrap(), None);
+}
+
+#[test]
+fn detect_border_finds_a_border_in_10_bit_video() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_bordered_10bit(dir.path());
+
+    let border = detect_border(&paths(), &input, 5.0, &CancelToken::new()).unwrap();
+    assert_eq!(border, Some(Crop { x: 0, y: 0, w: 1440, h: 810 }));
+}
+
+#[test]
+fn detect_border_finds_a_pillarbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_pillarboxed(dir.path());
+
+    let border = detect_border(&paths(), &input, 5.0, &CancelToken::new()).unwrap();
+    assert_eq!(border, Some(Crop { x: 240, y: 0, w: 1440, h: 1080 }));
+}
+
+#[test]
+fn cancelling_mid_detection_kills_ffmpeg_promptly() {
+    let dir = tempfile::tempdir().unwrap();
+    // Ten 1080p60 HEVC decoders take far longer than 100 ms to start and sample.
+    let input = common::fixture_multitrack_hevc(dir.path());
+    let cancel = CancelToken::new();
+    let later = cancel.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        later.cancel();
+        std::time::Instant::now()
+    });
+    let result = detect_border(&paths(), &input, 5.0, &cancel);
+    let returned = std::time::Instant::now();
+    let cancelled_at = canceller.join().unwrap();
+    assert!(matches!(result, Err(JobError::Cancelled)), "{result:?}");
+    assert!(returned.duration_since(cancelled_at) < std::time::Duration::from_millis(500));
+}
+
+#[test]
+fn detect_border_stops_when_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_bordered(dir.path());
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    assert!(matches!(detect_border(&paths(), &input, 5.0, &cancel), Err(JobError::Cancelled)));
 }
 
 #[test]
