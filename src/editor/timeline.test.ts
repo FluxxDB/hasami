@@ -703,6 +703,8 @@ describe('master volume', () => {
     const off = setMaster(tl2, MIN_GAIN_DB);
     expect(toExportRequest(off, 1, 'x.mp4', 'quick', false).audio).toEqual([]);
     expect(toExportRequest(off, 1, 'x.mp4', 'audio', false).audio).toEqual([]);
+    expect(toExportRequest(off, 1, 'x.mp4', 'quick', false).master_db).toBe(0);
+    expect(toExportRequest(off, 1, 'x.mp4', 'audio', false).master_db).toBe(0);
     expect(hasAudibleAudio(off)).toBe(false);
     expect(hasAudibleAudio(setMaster(tl2, MIN_GAIN_DB + 0.5))).toBe(true);
   });

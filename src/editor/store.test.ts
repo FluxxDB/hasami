@@ -446,6 +446,8 @@ describe('EditorStore commands', () => {
     const steps = s.history.past.length;
     s.nudgeMaster(1); // already at the ceiling: no-op, no entry
     expect(s.history.past).toHaveLength(steps);
+    for (let i = 0; i < 30; i++) s.nudgeMaster(-1);
+    expect(s.timeline.masterDb).toBe(-60);
   });
 
   it('toggleMute is an undo step', () => {

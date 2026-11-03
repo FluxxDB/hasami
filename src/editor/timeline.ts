@@ -40,6 +40,9 @@ export function isSilent(gainDb: number, muted: boolean): boolean {
   return muted || gainDb <= MIN_GAIN_DB;
 }
 
+/** The master fader at the bottom (−∞): the whole mix is silent. */
+const masterOff = (tl: Timeline): boolean => tl.masterDb <= MIN_GAIN_DB;
+
 // Comparison slack for times that went through float arithmetic.
 const EPS = 1e-9;
 
@@ -441,7 +444,7 @@ export interface ExportRequest {
   duration_s: number;
   video: { src_start: number; src_end: number }[];
   audio: { index: number; gain_db: number; pieces: { at: number; src_start: number; src_end: number }[] }[];
-  master_db: number; // never -60 or lower: at −∞ `audio` is empty instead
+  master_db: number; // never -60 or lower: at −∞ `audio` is empty and this is 0
 }
 
 export function toExportRequest(
@@ -470,11 +473,10 @@ export function toExportRequest(
     duration_s: end,
     video: mode === 'audio' ? [] : tl.video.map((s) => ({ src_start: s.src[0], src_end: s.src[1] })),
     audio,
-    master_db: tl.masterDb,
+    // At −∞ no audio is sent, so the gain is moot; 0 keeps -60 or lower from reaching Rust.
+    master_db: masterOff(tl) ? 0 : tl.masterDb,
   };
 }
-
-const masterOff = (tl: Timeline): boolean => tl.masterDb <= MIN_GAIN_DB;
 
 /** True when some track that isn't silent (muted or at −∞, or the master at −∞) has material before the end of the video. */
 export function hasAudibleAudio(tl: Timeline): boolean {
