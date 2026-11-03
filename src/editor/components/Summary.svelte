@@ -83,6 +83,8 @@
             </p>
           {:else if detail(r)}
             <span class="detail">{detail(r)}</span>
+            <!-- Said about a saved export, e.g. that its 20 MB copy couldn't be made. -->
+            {#if r.note}<p class="message">{r.note}</p>{/if}
           {/if}
         </li>
       {/each}

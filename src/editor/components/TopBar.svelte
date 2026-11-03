@@ -1,7 +1,7 @@
 <script lang="ts">
   import { formatPercent } from '../../progress/format';
   import { fileName, metaLine } from '../display';
-  import type { EditorStore, Result } from '../store.svelte';
+  import type { Current, Direction, EditorStore, Result } from '../store.svelte';
   import { RESULTS_ID } from './Summary.svelte';
 
   interface Props {
@@ -29,16 +29,19 @@
   const VIDEO_LABEL: Record<string, string> = { quick: 'Quick export', save_raw: 'Export + save raw' };
 
   // The row under the bar: an outcome that needs words (why an export failed, and that the
-  // original is untouched; or Export audio's saved file). It stays until dismissed, the next
-  // export of the clip, or the next clip.
+  // original is untouched; a saved export's note, e.g. that its 20 MB copy couldn't be made; or
+  // Export audio's saved file). It stays until dismissed, the next export of the clip, or the
+  // next clip.
   const KEPT = 'The original was not changed.';
   const outcome = $derived.by((): Result | null => {
     if (!media) return null;
-    if (video?.state === 'failed') return video;
+    if (video?.state === 'failed' || (video?.state === 'done' && video.note)) return video;
     if (audio?.state === 'failed' || audio?.state === 'done') return audio;
     return null;
   });
-  const outcomeKey = $derived(outcome ? `${store.visit}:${outcome.action}:${outcome.state}:${outcome.output ?? outcome.message}` : '');
+  const outcomeKey = $derived(
+    outcome ? `${store.visit}:${outcome.action}:${outcome.state}:${outcome.output ?? outcome.message}:${outcome.note ?? ''}` : '',
+  );
   let dismissed = $state('');
   const showOutcome = $derived(!!outcome && outcomeKey !== dismissed);
   /** Read out once per change: queued, saved or failed (not every percent). */
@@ -46,22 +49,27 @@
     const r = showVideo ? video : (outcome ?? (audioBusy ? audio : null));
     if (!r) return '';
     const what = r.action === 'audio' ? 'Export audio' : VIDEO_LABEL[r.action];
-    if (r.state === 'done') return `Saved ${fileName(r.output ?? '')}`;
+    if (r.state === 'done') return r.note ?? `Saved ${fileName(r.output ?? '')}`;
     if (r.state === 'failed') return `${r.message ?? ''} ${r.originalIntact ? KEPT : ''}`;
     return `${what} ${r.state === 'queued' ? 'queued' : 'running'}`;
   });
 
   const pct = (r: Result) => (r.state === 'queued' ? 'Queued' : formatPercent(r.fraction));
 
-  // Next video: always here; where it goes is said in its tooltip.
-  const nextName = $derived.by(() => {
-    const q = store.queue;
-    if (q.next < q.files.length) return fileName(q.files[q.next]);
-    return typeof store.folderNext === 'string' ? fileName(store.folderNext) : null;
-  });
+  // Prev / Next video: always here; where each goes is said in its tooltip. Next is newer, Prev older.
+  const NOTHING: Record<Direction, string> = {
+    next: 'No newer video in this folder',
+    prev: 'No older video in this folder',
+  };
+  /** No tooltip while that way is still being checked (or the check failed: pressing it says why). */
+  function stepTitle(dir: Direction, to: Current | null | undefined): string | undefined {
+    if (to) return `${dir === 'next' ? 'Next' : 'Previous'}: ${fileName(to.path)}`;
+    return to === undefined && path ? undefined : NOTHING[dir];
+  }
   const nextOk = $derived(!store.busy && store.canNext);
-  const NO_NEXT = 'No older video in this folder';
-  const nextTitle = $derived(nextName ? `Next: ${nextName}` : store.folderNext === undefined && path ? undefined : NO_NEXT);
+  const prevOk = $derived(!store.busy && store.canPrev);
+  const nextTitle = $derived(stepTitle('next', store.nextTarget));
+  const prevTitle = $derived(stepTitle('prev', store.prevTarget));
 
   // The export strip opens the results list; it stays once there's anything to list.
   const results = $derived(store.results);
@@ -86,6 +94,12 @@
 {#snippet forward()}
   <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
     <path d="M1.5 6h9M7 2.5 10.5 6 7 9.5" />
+  </svg>
+{/snippet}
+
+{#snippet backward()}
+  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+    <path d="M10.5 6h-9M5 2.5 1.5 6 5 9.5" />
   </svg>
 {/snippet}
 
@@ -171,9 +185,10 @@
       role="switch"
       aria-checked={store.fit20}
       disabled={!media}
+      title="Video exports also save a copy of 20 MB or less to your Videos folder"
       onclick={() => (store.fit20 = !store.fit20)}
     >
-      <span class="switch" class:on={store.fit20} aria-hidden="true"></span>Fit to 20 MB
+      <span class="switch" class:on={store.fit20} aria-hidden="true"></span>20 MB copy
     </button>
     {#if audio && audioBusy}
       <!-- Export audio's own progress, in its place; the clip stays editable meanwhile. -->
@@ -200,14 +215,24 @@
 
   <div class="vsep"></div>
   <!-- aria-disabled, so "No older video in this folder" still shows on hover and focus. -->
-  <button
-    type="button"
-    class="btn next cap"
-    aria-disabled={!nextOk}
-    aria-label="Next video"
-    title={nextTitle}
-    onclick={() => nextOk && store.nextVideo()}><span>Next<span class="word">&nbsp;video</span></span> {@render forward()}</button
-  >
+  <div class="steps">
+    <button
+      type="button"
+      class="btn prev cap"
+      aria-disabled={!prevOk}
+      aria-label="Previous video"
+      title={prevTitle}
+      onclick={() => prevOk && store.prevVideo()}>{@render backward()} <span class="word">Prev</span></button
+    >
+    <button
+      type="button"
+      class="btn next cap"
+      aria-disabled={!nextOk}
+      aria-label="Next video"
+      title={nextTitle}
+      onclick={() => nextOk && store.nextVideo()}><span class="word">Next<span class="more">&nbsp;video</span></span> {@render forward()}</button
+    >
+  </div>
 
   <div class="winctl">
     <button type="button" class="ctl" aria-label="Minimize" onclick={onMinimize}>
@@ -232,6 +257,10 @@
       <span class="cap plabel">{outcome.action === 'audio' ? 'Export audio failed' : `${VIDEO_LABEL[outcome.action]} failed`}</span>
       <span class="msg">{outcome.message}</span>
       {#if outcome.originalIntact}<span class="kept">{KEPT}</span>{/if}
+    {:else if outcome.note}
+      <!-- The note names the saved file itself ("Saved …, but couldn't make the 20 MB copy: …"). -->
+      <span class="cap plabel">{outcome.action === 'audio' ? 'Export audio' : VIDEO_LABEL[outcome.action]}</span>
+      <span class="msg" title={outcome.note}>{outcome.note}</span>
     {:else}
       <span class="cap plabel">Saved</span><span class="out" title={outcome.output}>{fileName(outcome.output ?? '')}</span>
     {/if}
@@ -478,6 +507,11 @@
     align-items: center;
     gap: 12px;
   }
+  .steps {
+    flex: none;
+    display: flex;
+    gap: 6px;
+  }
   .pos {
     color: var(--pebble);
     font-variant-numeric: tabular-nums;
@@ -596,9 +630,11 @@
     }
   }
 
-  /* Then the file name outranks the wordmark's serif half. */
+  /* Then the file name outranks the wordmark's serif half, and Next video's second word (its
+     tooltip names where it goes). */
   @media (max-width: 1360px) {
-    .brand em {
+    .brand em,
+    .next .more {
       display: none;
     }
   }
@@ -625,8 +661,12 @@
     .btn {
       padding: 10px 10px;
     }
-    .next .word {
+    /* Prev and Next become a pair of arrows; their names stay in aria-label and the tooltip. */
+    .steps .word {
       display: none;
+    }
+    .steps .btn {
+      padding: 10px 11px;
     }
     .ctl {
       width: 28px;

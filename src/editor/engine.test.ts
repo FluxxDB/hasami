@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DRIFT_TOLERANCE_S, PlaybackEngine, trackGain, videoTarget } from './engine';
-import { createTimeline, cutAt, deleteSegs } from './timeline';
+import { DRIFT_TOLERANCE_S, PlaybackEngine, masterGain, trackGain, videoTarget } from './engine';
+import { createTimeline, cutAt, deleteSegs, setGain, setMaster } from './timeline';
 
 describe('trackGain', () => {
   it('is 10^(dB/20), and 0 when muted or at the bottom of the fader', () => {
@@ -13,6 +13,17 @@ describe('trackGain', () => {
   });
   it('keeps the drift tolerance at 40 ms', () => {
     expect(DRIFT_TOLERANCE_S).toBe(0.04);
+  });
+});
+
+describe('masterGain', () => {
+  it('is 10^(dB/20), Dim takes 11 dB off, and −∞ is 0', () => {
+    expect(masterGain(0, false)).toBe(1);
+    expect(masterGain(12, false)).toBeCloseTo(3.981, 3);
+    expect(masterGain(0, true)).toBeCloseTo(10 ** (-11 / 20), 9);
+    expect(masterGain(6, true)).toBeCloseTo(10 ** (-5 / 20), 9);
+    expect(masterGain(-60, false)).toBe(0);
+    expect(masterGain(-60, true)).toBe(0);
   });
 });
 
@@ -251,5 +262,82 @@ describe('PlaybackEngine: audio sync', () => {
     engine.setShuttle({ dir: 1, speed: 1 });
     frameAt(600);
     expect(audio.paused).toBe(false);
+  });
+});
+
+describe('PlaybackEngine: master volume and Dim', () => {
+  const tl = createTimeline(90, 60, [0]);
+
+  /** A Web Audio stand-in that records the graph and each gain's target. */
+  class FakeGain {
+    gain = { value: 1, setTargetAtTime: (v: number) => (this.gain.value = v) };
+    to: unknown = null;
+    connect<T>(node: T): T {
+      this.to = node;
+      return node;
+    }
+    disconnect() {
+      this.to = null;
+    }
+  }
+  const fakeCtx = () => {
+    const gains: FakeGain[] = [];
+    const destination = {};
+    const ctx = {
+      state: 'running',
+      currentTime: 0,
+      destination,
+      createGain: () => {
+        const g = new FakeGain();
+        gains.push(g);
+        return g;
+      },
+      createMediaElementSource: () => new FakeGain(),
+    };
+    return { ctx: ctx as unknown as AudioContext, gains, destination };
+  };
+
+  it('routes every track through one master gain before the speakers', () => {
+    const { ctx, gains, destination } = fakeCtx();
+    const engine = new PlaybackEngine(new FakeMedia() as unknown as HTMLVideoElement, ctx, () => new FakeMedia() as unknown as HTMLAudioElement);
+    engine.setTimeline(setMaster(tl, -6));
+    engine.load('', [{ index: 0, src: 'a0.m4a' }]);
+    const [master, track] = gains;
+    expect(master.to).toBe(destination);
+    expect(track.to).toBe(master);
+    expect(master.gain.value).toBeCloseTo(10 ** (-6 / 20), 9);
+    expect(track.gain.value).toBe(1);
+    engine.setDim(true);
+    expect(master.gain.value).toBeCloseTo(10 ** (-17 / 20), 9);
+    engine.setTimeline(setMaster(tl, -60));
+    expect(master.gain.value).toBe(0);
+  });
+
+  it('without Web Audio, multiplies it into each element volume, capped at 1', () => {
+    const el = new FakeMedia();
+    const { engine } = makeEngine([el]);
+    engine.setTimeline(setMaster(tl, -6));
+    engine.load('', [{ index: 0, src: 'a0.m4a' }]);
+    expect(el.volume).toBeCloseTo(10 ** (-6 / 20), 9);
+    engine.setDim(true);
+    expect(el.volume).toBeCloseTo(10 ** (-17 / 20), 9);
+    engine.setDim(false);
+    engine.setTimeline(setMaster(setGain(tl, 0, 6), 6));
+    expect(el.volume).toBe(1);
+    engine.setTimeline(setMaster(tl, -60));
+    expect(el.volume).toBe(0);
+    expect(el.muted).toBe(true);
+  });
+
+  it('without Web Audio, Dim still takes 11 dB off a boosted mix: it applies after the cap', () => {
+    const el = new FakeMedia();
+    const { engine } = makeEngine([el]);
+    engine.setTimeline(setMaster(tl, 12));
+    engine.load('', [{ index: 0, src: 'a0.m4a' }]);
+    expect(el.volume).toBe(1);
+    engine.setDim(true);
+    expect(el.volume).toBeCloseTo(10 ** (-11 / 20), 9); // ≈ 0.282
+    engine.setTimeline(setMaster(tl, 6));
+    expect(el.volume).toBeCloseTo(10 ** (-11 / 20), 9);
   });
 });

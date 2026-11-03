@@ -9,10 +9,12 @@
 //
 // `?mock=queue` opens a trim queue of three clips (as opened, no demo edits) whose exports run one
 // at a time for a few seconds each, like the job queue; `?mock=queue-fail` makes the second
-// clip's exports fail (and a Discard waiting on one keeps the clip).
+// clip's exports fail (and a Discard waiting on one keeps the clip). `?mock=note` is the single
+// clip whose video exports with 20 MB copy on finish with a note: the copy couldn't be made.
 //
-// The clips sit in a fake folder of five, newest first, so Next video walks it: the queue's three
-// (the 1st, 3rd and 4th), then on into the 5th; from the single clip (the 1st), all five.
+// The clips sit in a fake folder of five. The queue's three (the 1st, 3rd and 4th newest) open
+// oldest first, so Next walks them forward in time and Prev carries on into the oldest. The single
+// clip is the 2nd newest: Next goes to the newest, Prev to the three older ones.
 //
 // There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
 import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
@@ -30,8 +32,9 @@ const MODIFIED = new Map(
     return [p, Date.UTC(2026, 9, 9, h, m, sec)];
   }),
 );
-const PATH = FOLDER[0];
+const PATH = FOLDER[1];
 const PARAM = new URLSearchParams(location.search).get('mock') ?? '';
+// Handed over in selection order, not by date: the editor orders them (orderFiles).
 const QUEUE = PARAM.startsWith('queue') ? [FOLDER[0], FOLDER[2], FOLDER[3]] : [PATH];
 const FAILING = PARAM === 'queue-fail' ? QUEUE[1] : null;
 const EXPORT_MS = 4000;
@@ -140,7 +143,7 @@ function emit(e: EditorEvent): void {
   for (const cb of listeners) cb(e);
 }
 
-function runExport(id: number, input: string, mode: string): Promise<boolean> {
+function runExport(id: number, input: string, mode: string, fit20: boolean): Promise<boolean> {
   return new Promise((resolve) => {
     emit({ type: 'ExportStarted', id, input });
     let fraction = 0;
@@ -155,7 +158,11 @@ function runExport(id: number, input: string, mode: string): Promise<boolean> {
       } else {
         const name = fileName(input).replace(/\.[^.]+$/, mode === 'audio' ? '.mp3' : '.mp4');
         const output = input.replace(/[^\\]+$/, `[CLIPPED] ${name}`);
-        emit({ type: 'ExportDone', id, input, output, bytes: mode === 'audio' ? 1_400_000 : 18_600_000 });
+        const note =
+          PARAM === 'note' && fit20
+            ? `Saved "${fileName(output)}", but couldn't make the 20 MB copy: the Videos folder is full.`
+            : undefined;
+        emit({ type: 'ExportDone', id, input, output, bytes: mode === 'audio' ? 1_400_000 : 18_600_000, note });
       }
       resolve(ok);
     }, EXPORT_MS / 20);
@@ -172,7 +179,7 @@ export const mockApi: EditorApi = {
   exportClip: (request) => {
     console.info('[mock] editor_export', request);
     const id = ++jobs;
-    const outcome = lastExport.then(() => runExport(id, request.input, request.mode));
+    const outcome = lastExport.then(() => runExport(id, request.input, request.mode, request.fit_20mb));
     outcomes.set(id, outcome);
     lastExport = outcome.then(() => undefined);
     return later(id);
@@ -195,17 +202,21 @@ export const mockApi: EditorApi = {
     }
     return later(undefined);
   },
-  // Like the Rust side: the next entry after `path`'s place (its remembered time, then its name),
-  // whether or not `path` itself is still there.
-  nextFile: (path, modifiedMs) => {
+  // Like the Rust side: the neighbour of `path`'s place (its remembered time, then its name) in
+  // the folder by date, whether or not `path` itself is still there.
+  adjacentFile: (path, modifiedMs, newer) => {
     const name = fileName(path).toLowerCase();
-    const next = FOLDER.find((p) => {
+    const older = (p: string) => {
       const ms = MODIFIED.get(p)!;
       return ms < modifiedMs || (ms === modifiedMs && fileName(p).toLowerCase() > name);
-    });
-    console.info('[mock] editor_next_file', { path, modifiedMs }, '→', next ?? null);
-    return later(next ?? null);
+    };
+    // FOLDER is newest first.
+    const found = newer ? FOLDER.filter((p) => p !== path && !older(p)).pop() : FOLDER.find(older);
+    console.info('[mock] editor_adjacent_file', { path, modifiedMs, newer }, '→', found ?? null);
+    return later(found ?? null);
   },
+  orderFiles: (paths) =>
+    later([...paths].sort((a, b) => (MODIFIED.get(a) ?? Number.MAX_SAFE_INTEGER) - (MODIFIED.get(b) ?? Number.MAX_SAFE_INTEGER))),
   close: (session) => {
     console.info('[mock] editor_close', { session });
     return later(undefined);
