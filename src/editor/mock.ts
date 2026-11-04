@@ -1,6 +1,6 @@
-// Browser stand-in for the editor's Rust commands, used by api.ts in mock mode
-// (http://localhost:5182/editor.html?mock=1). One 90 s 1080p60 clip with three audio tracks,
-// the middle one empty, synthetic peaks and flat-colored thumbnails.
+// Browser stand-in for the editor's Rust commands, used by api.ts in mock mode (`npm run dev`,
+// then http://localhost:1420/editor.html?mock=1). One 90 s 1080p60 clip with three audio
+// tracks, the middle one empty, synthetic peaks and flat-colored thumbnails.
 //
 // `?mock=1` also applies a few edits after load (see `demoEdits`) so the page shows the approved
 // mockup's state: cuts, a linked selection, silence on A2 and audio past the end of the video.
@@ -26,7 +26,7 @@ import { fileName } from './display';
 import type { ClipEditor } from './clipEditor.svelte';
 import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
-const DIR = 'C:\\Users\\ledan\\Videos\\';
+const DIR = 'C:\\Videos\\';
 /** The fake folder, newest first, as Explorer sorts it by date, descending. */
 const FOLDER = ['23-40-17', '23-21-50', '23-05-33', '22-48-09', '22-31-44'].map(
   (t) => `${DIR}Replay 2026-10-09 ${t}.mp4`,

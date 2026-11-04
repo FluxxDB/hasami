@@ -111,7 +111,7 @@ describe('reduce', () => {
     const s = run([
       started(),
       progress(),
-      { type: 'Done', id: 1, output: 'C:\\Users\\me\\Videos\\[20MB] Replay 01.mp4', bytes: 19_400_000 },
+      { type: 'Done', id: 1, output: 'C:\\Videos\\[20MB] Replay 01.mp4', bytes: 19_400_000 },
       { type: 'Drained' },
     ]);
     expect(s.phase).toBe('done');

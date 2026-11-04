@@ -1,9 +1,11 @@
 // Dev-only: feeds scripted job events to the progress window when the Tauri API is absent.
-// Usage: http://localhost:5181/progress.html?mock=running  (also: confirm, failed, unchanged,
-// done, noted, batch, convert). Imported dynamically from main.ts behind `import.meta.env.DEV`.
+// Usage: `npm run dev`, then http://localhost:1420/progress.html?mock=running (also: confirm,
+// failed, unchanged, done, noted, batch, convert). Imported dynamically from main.ts behind
+// `import.meta.env.DEV`.
+
 import type { JobEvent } from '../lib/jobs';
 
-const file = 'C:\\Users\\ledan\\Videos\\[CLIPPED] Replay 2026-10-09 23-40-17.mp4';
+const file = 'C:\\Videos\\[CLIPPED] Replay 2026-10-09 23-40-17.mp4';
 const started = (extra: Partial<Extract<JobEvent, { type: 'Started' }>> = {}): JobEvent => ({
   type: 'Started',
   id: 1,
@@ -54,7 +56,7 @@ export const scripts: Record<string, JobEvent[]> = {
     {
       type: 'Done',
       id: 1,
-      output: 'C:\\Users\\ledan\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4',
+      output: 'C:\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4',
       bytes: 19_400_000,
     },
     { type: 'Drained' },

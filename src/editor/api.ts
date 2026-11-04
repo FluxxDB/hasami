@@ -1,4 +1,4 @@
-// TypeScript mirror of the editor's Rust commands and event (src-tauri/src/app.rs, Task 8).
+// TypeScript mirror of the editor's Rust commands and event (src-tauri/src/app.rs).
 // Field names stay snake_case, exactly as the Rust structs serialise them. `EditorEvent` is serde
 // `#[serde(tag = "type")]`, so it's a union discriminated on `type`.
 //

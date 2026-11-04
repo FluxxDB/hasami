@@ -78,7 +78,7 @@ describe('metaLine', () => {
 
 describe('fileName', () => {
   it('keeps the last part of a Windows or POSIX path', () => {
-    expect(fileName('C:\\Users\\ledan\\Videos\\Replay 1.mp4')).toBe('Replay 1.mp4');
+    expect(fileName('C:\\Videos\\Replay 1.mp4')).toBe('Replay 1.mp4');
     expect(fileName('/tmp/a.mkv')).toBe('a.mkv');
     expect(fileName('a.mp4')).toBe('a.mp4');
   });
