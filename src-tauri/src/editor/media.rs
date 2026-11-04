@@ -109,10 +109,16 @@ fn wait_or_cancel(child: &mut Child, cancel: &CancelToken) -> Result<ExitStatus,
             let _ = child.wait();
             return Err(JobError::Cancelled);
         }
-        if let Some(status) = child.try_wait().map_err(MediaError::Io)? {
-            return Ok(status);
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => thread::sleep(POLL_INTERVAL),
+            // Can't tell how it's doing: stop it rather than leave it running unwatched.
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(MediaError::Io(e).into());
+            }
         }
-        thread::sleep(POLL_INTERVAL);
     }
 }
 
