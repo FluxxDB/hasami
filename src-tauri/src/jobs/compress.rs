@@ -101,8 +101,9 @@ fn compress_work(
 
 /// Two-pass encode of `input` per `plan` into `output`, retried smaller until it verifies at
 /// ≤ [`SIZE_LIMIT_BYTES`]. Creates and removes its own pass-log folder under `work_root`.
-/// Errors are already plain-language (`UNREADABLE` / `DIDNT_CHECK_OUT` / `NEVER_FIT` / encode).
-#[allow(clippy::too_many_arguments)] // the shape the editor export is specified against
+/// Errors are already plain language (`DIDNT_CHECK_OUT`, `NEVER_FIT`, or ffmpeg's). On failure
+/// `output` may be left half-written: the caller owns it and deletes it.
+#[allow(clippy::too_many_arguments)] // Compress and the editor's 20 MB copy both call it with all of these
 pub(crate) fn encode_to_limit(
     paths: &FfmpegPaths,
     input: &Path,
