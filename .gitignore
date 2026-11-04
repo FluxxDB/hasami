@@ -1,6 +1,8 @@
-# Brainstorming / tooling scratch
+# Agent and design tooling scratch (never commit these)
 .superpowers/
 .gstack/
+.impeccable/
+.claude/
 graphify-out/
 **/graphify-out/
 
