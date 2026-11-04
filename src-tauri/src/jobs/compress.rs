@@ -53,7 +53,7 @@ pub fn compress(
 /// - The plan drops the video below 480p (and below the source's own height) and
 ///   `confirmed_low_res` is false: [`JobOutcome::NeedsConfirm`], nothing is written.
 /// - Otherwise a two-pass libx264 encode (one AAC pass for audio-only input), retried at a
-///   lower bitrate up to [`MAX_RETRIES`] times if it comes out too big.
+///   lower bitrate up to three times if it comes out too big.
 pub fn compress_in(
     paths: &FfmpegPaths,
     input: &Path,

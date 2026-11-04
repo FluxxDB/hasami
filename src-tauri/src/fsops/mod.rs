@@ -5,10 +5,10 @@
 //! (in the one case where neither is possible) keeps the new file and says exactly where both
 //! files are.
 //!
-//! - [`naming`]: where each output goes (`[CLIPPED] `, `[20MB] `, `Raw\`, the hidden temp name).
-//! - [`commit`]: giving a verified temp file its name, replacing or moving the original.
-//! - [`presence`]: looking at a path without being fooled by a file that is being deleted.
-//! - [`recycle`]: sending a file to the Recycle Bin without any Windows dialog.
+//! - `naming`: where each output goes (`[CLIPPED] `, `[20MB] `, `Raw\`, the hidden temp name).
+//! - `commit`: giving a verified temp file its name, replacing or moving the original.
+//! - `presence`: looking at a path without being fooled by a file that is being deleted.
+//! - `recycle`: sending a file to the Recycle Bin without any Windows dialog.
 
 mod commit;
 mod naming;

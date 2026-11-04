@@ -7,17 +7,17 @@
 //!
 //! A single dispatcher thread owns the moving parts. Its decisions (batching, when to open the
 //! progress and editor windows, where each job event goes, buffering events until a window
-//! listens, when to exit) live in the pure [`Flow`](flow::Flow) struct, which turns inputs into
-//! [`Effect`](flow::Effect)s; the dispatcher only carries them out.
+//! listens, when to exit) live in the pure `Flow` struct (in `flow`), which turns inputs into
+//! `Effect`s; the dispatcher only carries them out.
 //!
-//! - [`collector`]: groups launches that arrive close together into one batch.
-//! - [`flow`]: the dispatcher's decisions, free of Tauri and threads.
-//! - [`replay`]: what a newly opened progress window needs to catch up.
-//! - [`dispatcher`]: the thread that carries out those decisions.
-//! - [`commands`]: the Tauri commands the progress and editor windows call.
-//! - [`events`]: the events and data the windows are sent (the UI contract).
-//! - [`runner`]: what runs each job.
-//! - [`windows`]: opening the progress and editor windows.
+//! - `collector`: groups launches that arrive close together into one batch.
+//! - `flow`: the dispatcher's decisions, free of Tauri and threads.
+//! - `replay`: what a newly opened progress window needs to catch up.
+//! - `dispatcher`: the thread that carries out those decisions.
+//! - `commands`: the Tauri commands the progress and editor windows call.
+//! - `events`: the events and data the windows are sent (the UI contract).
+//! - `runner`: what runs each job.
+//! - `windows`: opening the progress and editor windows.
 
 mod collector;
 mod commands;

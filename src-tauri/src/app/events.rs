@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::editor::media::{Crop, PreparedMedia};
 
-/// Tauri event that carries every [`JobEvent`] to the progress window.
+/// Tauri event that carries every [`JobEvent`](crate::jobs::queue::JobEvent) to the progress window.
 pub const JOB_EVENT: &str = "hasami://job";
 /// Tauri event that carries every [`EditorEvent`] to the editor window.
 pub const EDITOR_EVENT: &str = "hasami://editor";

@@ -35,7 +35,7 @@ pub struct Crop {
 }
 
 /// The picture area of `input` when it sits inside a fixed black border: `cropdetect` runs on
-/// [`BORDER_WINDOWS`] short stretches spread across the clip, and the area counts only when every
+/// ten short stretches spread across the clip, and the area counts only when every
 /// stretch agrees on it, it is smaller than the frame, and it covers at least a quarter of it.
 /// `None` for no border (or no video). Stops (killing ffmpeg) when `cancel` is set.
 pub fn detect_border(

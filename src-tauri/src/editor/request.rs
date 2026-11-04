@@ -227,7 +227,7 @@ pub struct VideoEncoder {
 const ENCODER_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Whether the bundled ffmpeg can encode with `name` on this machine: a one-frame test encode
-/// (given up after [`ENCODER_TEST_TIMEOUT`]), remembered per encoder name for the life of the
+/// (given up after 15 s), remembered per encoder name for the life of the
 /// process.
 pub fn encoder_available(paths: &FfmpegPaths, name: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();

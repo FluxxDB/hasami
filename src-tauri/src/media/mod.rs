@@ -1,5 +1,5 @@
 //! The bundled ffmpeg and ffprobe: finding them ([`ffmpeg`]), reading a file's streams
-//! ([`probe`]) and running an encode with progress and cancel ([`run`]).
+//! ([`probe`](mod@probe)) and running an encode with progress and cancel ([`run`]).
 
 pub mod ffmpeg;
 pub mod probe;

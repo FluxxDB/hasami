@@ -1,7 +1,7 @@
 //! Command-line argument parsing into actions.
 //!
 //! Explorer launches `hasami.exe <verb> <files…>`. [`parse_args`] turns the arguments
-//! (without argv[0]) into an [`Action`].
+//! (without `argv[0]`) into an [`Action`].
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -51,7 +51,7 @@ pub enum CliError {
     UnexpectedFiles(String),
 }
 
-/// Parse the arguments that follow the program name. `args` excludes argv[0]. File names are taken
+/// Parse the arguments that follow the program name. `args` excludes `argv[0]`. File names are taken
 /// as given, so a name that isn't valid Unicode (Windows allows that) still reaches the job.
 pub fn parse_args<S: AsRef<OsStr>>(args: &[S]) -> Result<Action, CliError> {
     let (verb, rest) = args.split_first().ok_or(CliError::MissingVerb)?;
