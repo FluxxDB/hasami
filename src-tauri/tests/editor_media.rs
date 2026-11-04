@@ -205,7 +205,7 @@ fn prepare_unreadable_is_plain() {
     let input = dir.path().join("not_a_video.mp4");
     std::fs::write(&input, "this is just text").unwrap();
 
-    let err = prepare(&paths(), &input, &dir.path().join("work"), &CancelToken::new()).err().expect("should fail");
+    let err = prepare(&paths(), &input, &dir.path().join("work"), &CancelToken::new()).expect_err("should fail");
 
     assert!(matches!(err, JobError::Message(_)));
     assert_eq!(err.to_string(), "Hasami couldn't read this video.");

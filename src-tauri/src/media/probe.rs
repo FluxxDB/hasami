@@ -137,7 +137,8 @@ fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
         let codec = s.codec_name.clone().unwrap_or_default();
         let bit_rate = s.bit_rate.as_deref().and_then(|b| b.parse().ok());
         match s.codec_type.as_deref() {
-            Some("video") if video.is_none() && !s.disposition.as_ref().is_some_and(|d| d.attached_pic == 1) => {
+            // Cover art shows up as a one-picture "video" stream; skip it.
+            Some("video") if video.is_none() && s.disposition.as_ref().is_none_or(|d| d.attached_pic != 1) => {
                 let (mut width, mut height) = (s.width.unwrap_or(0), s.height.unwrap_or(0));
                 if s.quarter_turned() {
                     std::mem::swap(&mut width, &mut height);

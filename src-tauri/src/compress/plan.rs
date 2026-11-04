@@ -58,7 +58,7 @@ pub fn plan_compress(info: &MediaInfo) -> Result<CompressDecision, CompressError
 
     if within_limit
         && info.container == "mp4"
-        && info.video.as_ref().map_or(true, |v| v.codec == "h264")
+        && info.video.as_ref().is_none_or(|v| v.codec == "h264")
         && info.audio.len() <= 1
         && info.audio.iter().all(|a| a.codec == "aac")
     {

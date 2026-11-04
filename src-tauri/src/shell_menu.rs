@@ -226,7 +226,7 @@ mod tests {
         assert!(!has_verb("mkv", "02compress"));
 
         // Failure to locate the exe is a nonzero exit, not a panic.
-        let err = Err(io::Error::new(io::ErrorKind::Other, "no exe"));
+        let err = Err(io::Error::other("no exe"));
         assert_eq!(handle_action(&Action::Register, err, TEST_CLASSES_ROOT), Some(1));
 
         // Anything else is not a menu action; the caller starts the app.

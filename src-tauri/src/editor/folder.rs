@@ -39,7 +39,7 @@ pub fn adjacent_video(current: &Path, current_modified_ms: u64, newer: bool) -> 
             continue;
         }
         // The nearest one on that side: the smallest key going newer, the largest going older.
-        let nearer = nearest.as_ref().map_or(true, |(best, _)| if newer { key < *best } else { key > *best });
+        let nearer = nearest.as_ref().is_none_or(|(best, _)| if newer { key < *best } else { key > *best });
         if nearer {
             nearest = Some((key, path));
         }

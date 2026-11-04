@@ -30,7 +30,9 @@ pub fn verify_output(
 ) -> Result<MediaInfo, VerifyError> {
     let info = probe(paths, file)?;
     let tolerance = (expected_duration_s * 0.01).max(0.25);
-    if !((info.duration_s - expected_duration_s).abs() <= tolerance) {
+    let off_by = (info.duration_s - expected_duration_s).abs();
+    // A NaN duration on either side never passes.
+    if off_by.is_nan() || off_by > tolerance {
         return Err(VerifyError::WrongDuration { expected_s: expected_duration_s, actual_s: info.duration_s });
     }
     if let Some(max_bytes) = max_bytes {
