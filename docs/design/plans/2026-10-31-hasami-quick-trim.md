@@ -1,6 +1,6 @@
 # Hasami Plan 2: Quick Trim Editor Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Implementation plan, executed task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Right-click → **Hasami ▸ Quick Trim** opens a DaVinci-like trim editor. You cut the clip, set per-track volume and mute, and export as `[CLIPPED] <name>` (replacing the raw, keeping it in `Raw\`, or as an audio-only `.mp3`). Several selected clips form a trim queue with Skip and Discard.
 
@@ -16,12 +16,12 @@
 
 **Tech Stack:** Rust (Tauri 2.11, the Plan 1 modules), the bundled ffmpeg/ffprobe, Svelte 5 runes + TypeScript, Vitest, the Tauri asset protocol.
 
-**Spec:** `docs/superpowers/specs/2026-10-30-hasami-design.md`. Read §5 (whole), §6, §7, §8 and §9 first. Plan 1 (`docs/superpowers/plans/2026-10-30-hasami-foundation-compress-convert.md`) built the modules reused here.
+**Spec:** [`docs/design/specs/2026-10-30-hasami-design.md`](../specs/2026-10-30-hasami-design.md). Read §5 (whole), §6, §7, §8 and §9 first. Plan 1 ([`docs/design/plans/2026-10-30-hasami-foundation-compress-convert.md`](2026-10-30-hasami-foundation-compress-convert.md)) built the modules reused here.
 
 ## Global Constraints
 
-- Windows only. Build and test with the **Windows** toolchain from `C:\Users\ledan\Documents\Projects\hasami`. From WSL:
-  - Rust: `CARGO_TARGET_DIR='C:\Users\ledan\.cache\hasami-target' WSLENV=CARGO_TARGET_DIR cargo.exe …` in `src-tauri/`.
+- Windows only. Build and test with the **Windows** toolchain, with the repo on a Windows drive. From WSL:
+  - Rust: `CARGO_TARGET_DIR='C:\path\to\hasami-target' WSLENV=CARGO_TARGET_DIR cargo.exe …` in `src-tauri/`.
   - Node: `cmd.exe /c npm …` at the repo root.
 - Toolchain pins from Plan 1:
   - rustc 1.89 with `src-tauri/.cargo/config.toml` (`incompatible-rust-versions = "fallback"`). Never run `cargo update`.
@@ -38,7 +38,7 @@
   - If the source is in a folder named `Raw` (case-insensitive), outputs go to that folder's parent, and Save raw leaves the original where it is.
 - **Video exports (spec §5.7):**
   - Same video codec, resolution and fps as the source, at the source's average video bitrate.
-  - Hardware encoder when available (AMF on this machine), otherwise software.
+  - Hardware encoder when available (AMF on AMD GPUs), otherwise software.
   - Source container kept.
   - Every unmuted audio track mixed at its volume into **one** stereo track: `amix=inputs=N:normalize=0`.
   - Everything after the video's end is dropped, including in **Export audio**.
@@ -55,7 +55,7 @@
   - **Undo/redo** covers every edit, including volume and mute.
 - Keyboard (spec §5.5, DaVinci): Space; J/K/L (taps go 1× → 2× → 4× → 8×); ←/→ one frame; Shift+←/→ one second; ↑/↓ previous/next cut; Home/End; Ctrl+B; Delete/Backspace; Ctrl+Z / Ctrl+Shift+Z; N (snapping); Ctrl+Shift+L (linked); Ctrl+scroll (zoom).
 - **Visual (spec §9):**
-  - **Look:** `docs/superpowers/specs/assets/quick-trim-mockup.html` is the approved look.
+  - **Look:** [`docs/design/specs/assets/quick-trim-mockup.html`](../specs/assets/quick-trim-mockup.html) is the approved look.
   - **Red** `#d43545` appears ONLY on the playhead, the Quick export border and the edited dot.
   - **Selection:** a bone-white 1.5px outline.
   - **Track colors:** A1 `#7fa58c`, A2 `#c9a063`, A3 `#7f9cc4`, A4 `#b08bb3`, A5 `#4fa8a2`, A6 `#d89a3e`. Clip fill is about 15% over near-black with a border at about 38%.
@@ -600,7 +600,7 @@ src-tauri/tests/{editor_media,export}.rs
     edit(next: Timeline): void          // push onto history
   }
   ```
-- Layout and look follow the approved mockup exactly. That is `docs/superpowers/specs/assets/quick-trim-mockup.html`: open it and match the regions, sizes, labels, colors and type.
+- Layout and look follow the approved mockup exactly. That is [`docs/design/specs/assets/quick-trim-mockup.html`](../specs/assets/quick-trim-mockup.html): open it and match the regions, sizes, labels, colors and type.
   - **Top bar:**
     - the wordmark "HASAMI *quick trim*";
     - the filename and an "EDITED" red dot when `edited`;
@@ -631,7 +631,7 @@ src-tauri/tests/{editor_media,export}.rs
 - [ ] **Step 3:** Implement the shell rendering read-only from the store, with no interactions yet beyond the toggles' visual state.
 - [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All succeed.
 - [ ] **Step 5: Visual check.**
-  - Serve `cmd.exe /c npx vite --port 5182` and screenshot `editor.html?mock=1` at 1380×900 with the gstack browse tool (`~/.claude/skills/gstack/browse/dist/browse`).
+  - Serve `cmd.exe /c npx vite --port 5182` and screenshot `editor.html?mock=1` at 1380×900 with a headless browser.
   - Compare it against a screenshot of the mockup file. Fix the visible differences, then put both screenshot paths in the report.
   - Run the impeccable detector on the changed UI files and fix or justify every finding in the report.
 - [ ] **Step 6: Commit.** `git commit -m "feat: trim editor window shell matching the approved mockup"`
@@ -697,7 +697,7 @@ src-tauri/tests/{editor_media,export}.rs
 - [ ] **Step 2:** Run `cmd.exe /c npm test -- src/editor` and confirm they fail.
 - [ ] **Step 3:** Implement the store commands, the engine, and the component wiring.
 - [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass.
-- [ ] **Step 5: Manual check** with `cmd.exe /c npm run tauri -- dev -- -- trim "<copy of a real clip>"`, on copies only (never touch `C:\Users\ledan\Videos\Clips` itself). Verify and report:
+- [ ] **Step 5: Manual check** with `cmd.exe /c npm run tauri -- dev -- -- trim "<copy of a real clip>"`, on copies only (never touch the real clips folder). Verify and report:
   - playback with per-track volume and mute heard;
   - cut, delete (linked and unlinked) and audio-only delete leaving silence;
   - edge drag restoring material, with snapping;
@@ -778,7 +778,7 @@ src-tauri/tests/{editor_media,export}.rs
 
 ---
 
-## Follow-ups after Dang's hands-on test (2026-11-01)
+## Follow-ups after the owner's hands-on test (2026-11-01)
 
 Spec §5.1, §5.3, §5.5, §5.7, §5.8 and §12 items 7 and 15 were amended on 2026-11-01. Read those sections first; they are the authority for Tasks 13–15. Tasks 13, 14 and 15 are independent and can run in parallel. Task 15 consumes Task 14's command through `api.ts`, which Task 15 writes.
 
@@ -876,7 +876,7 @@ Spec §5.1, §5.3, §5.5, §5.7, §5.8 and §12 items 7 and 15 were amended on 2
   - Discard moves on through Next.
 - [ ] **Step 2:** Run `cmd.exe /c npm test -- src/editor` and confirm the new tests fail.
 - [ ] **Step 3:** Implement. Run the impeccable craft floor and detector on the changed UI.
-- [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass. Check the browser mock with gstack browse and save screenshots.
+- [ ] **Step 4:** Run `cmd.exe /c npm test`, `npm run check` and `npm run build`. All pass. Check the browser mock in a headless browser and save screenshots.
 - [ ] **Step 5: Commit.** `git commit -m "feat: editor stays open with export progress, Next video and a results list"`
 
 ---

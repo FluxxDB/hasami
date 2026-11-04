@@ -1,6 +1,6 @@
 # Hasami Plan 1: Foundation, Compress & Convert Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Implementation plan, executed task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A per-user-installed Windows app whose Explorer right-click menu offers **Hasami ▸ Compress / Convert to .mp4 / .mov / .mp3**. It runs those jobs one at a time in a small progress window and never loses an original.
 
@@ -14,11 +14,11 @@
 - Svelte 5 + TypeScript + Vite, Vitest
 - Bundled ffmpeg/ffprobe (GPL build), NSIS installer
 
-**Spec:** `docs/superpowers/specs/2026-10-30-hasami-design.md`. Read §4, §7, §8, §9, and §10 before starting. **Plan 2** (Quick Trim editor and trim queue) follows this plan and reuses its media, fsops, verify, and queue modules.
+**Spec:** [`docs/design/specs/2026-10-30-hasami-design.md`](../specs/2026-10-30-hasami-design.md). Read §4, §7, §8, §9, and §10 before starting. **Plan 2** (Quick Trim editor and trim queue) follows this plan and reuses its media, fsops, verify, and queue modules.
 
 ## Global Constraints
 
-- Windows only. Build and test with the **Windows** toolchain from the repo at `C:\Users\ledan\Documents\Projects\hasami`. From WSL, run `cargo.exe …` inside `src-tauri/` and `cmd.exe /c npm …` at the repo root. Never use WSL's own ffmpeg, cargo, or node.
+- Windows only. Build and test with the **Windows** toolchain, with the repo on a Windows drive. From WSL, run `cargo.exe …` inside `src-tauri/` and `cmd.exe /c npm …` at the repo root. Never use WSL's own ffmpeg, cargo, or node.
 - Size limit: output is **≤ 20,000,000 bytes**, always. Compress output is **H.264 + AAC in `.mp4`** with **one** mixed audio track.
 - The resolution ladder never upscales and never raises fps. **Warn before encoding if the chosen height is < 480.** The floor is ~240p/15 fps with 32 kbps mono audio. Below that, fail with a message.
 - **Never invoke HandBrake. No console or other window from ffmpeg** (`CREATE_NO_WINDOW`, `0x08000000`, on every child process).
@@ -381,7 +381,7 @@ src-tauri/tests/*.rs                        integration tests named per task
   - The single-instance plugin forwards argv to the running instance. `app.rs` collects actions that arrive within **400 ms** of each other into one `enqueue` call per kind.
   - `Trim` actions show the message "Quick Trim arrives in the next version" (temporary, until Plan 2).
   - The process exits when the queue emits `Drained` and no window is open.
-- Progress window: label `progress`, 440×190, not resizable, created on the first job and reused. Matches the mockup at `docs/superpowers/specs/assets/quick-trim-mockup.html` (".mini" block):
+- Progress window: label `progress`, 440×190, not resizable, created on the first job and reused. Matches the mockup at [`docs/design/specs/assets/quick-trim-mockup.html`](../specs/assets/quick-trim-mockup.html) (".mini" block):
   - Title "HASAMI *compress*" or "HASAMI *convert*".
   - The filename.
   - `<input size> → ≤ 20 MB · <W>×<H> · <fps> fps` (compress) or `→ .mov` (convert).
