@@ -1,7 +1,7 @@
 // Text and color helpers for the editor's labels. Pure, so they're unit-tested.
 
 import { formatBytes, formatFps } from '../progress/format';
-import type { EditorMedia } from './api';
+import type { EditorMedia, Thumb } from './api';
 import { MIN_GAIN_DB, type Crop } from './timeline';
 
 /** Audio track colors, A1 first (spec 9). Track n uses TRACK_COLORS[n % 6]. */
@@ -12,6 +12,9 @@ export const MUTED_COLOR = '#525252';
 
 /** Lane background the clip fills mix over. */
 export const LANE_BG = '#0b0b0b';
+
+/** The bone token, for drawing on a canvas (a selected clip's waveform mixes towards it). */
+export const BONE = '#fcfcfc';
 
 export function trackColor(n: number): string {
   return TRACK_COLORS[n % TRACK_COLORS.length];
@@ -55,6 +58,13 @@ export function metaLine(m: EditorMedia): string {
   const n = m.tracks.filter((t) => !t.empty).length;
   parts.push(`${n} audio ${n === 1 ? 'track' : 'tracks'}`, formatClock(m.duration_s), formatBytes(m.size_bytes));
   return parts.join(' · ');
+}
+
+/** The thumbnail taken nearest source time `t`; null when there are none. */
+export function nearestThumb(thumbs: readonly Thumb[], t: number): Thumb | null {
+  let best: Thumb | null = null;
+  for (const th of thumbs) if (!best || Math.abs(th.t - t) < Math.abs(best.t - t)) best = th;
+  return best;
 }
 
 /** The last part of a Windows or POSIX path: "C:\\clips\\a.mp4" → "a.mp4". */

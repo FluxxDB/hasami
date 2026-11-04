@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EditorMedia } from './api';
 import { STOPPED, type Shuttle } from './playbackModel';
-import { EditorStore } from './store.svelte';
+import { ClipEditor } from './clipEditor.svelte';
 import { EngineSync, type EngineLike } from './sync';
 import { videoEnd, type Timeline } from './timeline';
 
@@ -62,7 +62,7 @@ class FakeEngine implements EngineLike {
  * Stands in for the window's three effects: each calls the sync when its piece of the store
  * changed. `shuttleFirst` runs them in the other order, which must give the same result.
  */
-function effects(store: EditorStore, sync: EngineSync, shuttleFirst: boolean) {
+function effects(store: ClipEditor, sync: EngineSync, shuttleFirst: boolean) {
   let tl: Timeline | null = null;
   let seq = -1;
   let shuttle: Shuttle | null = null;
@@ -94,7 +94,7 @@ function effects(store: EditorStore, sync: EngineSync, shuttleFirst: boolean) {
 }
 
 function setup(shuttleFirst = false) {
-  const store = new EditorStore();
+  const store = new ClipEditor();
   store.load(media);
   const engine = new FakeEngine();
   const sync = new EngineSync(store, engine);

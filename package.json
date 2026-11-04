@@ -15,7 +15,9 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "format": "prettier --write \"src/**/*.{ts,svelte,css}\" \"*.html\" vite.config.ts svelte.config.js",
+    "format:check": "prettier --check \"src/**/*.{ts,svelte,css}\" \"*.html\" vite.config.ts svelte.config.js"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.11.1"
@@ -25,10 +27,27 @@
     "@tauri-apps/cli": "~2.11.5",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^20.19.43",
+    "prettier": "^3.9.10",
+    "prettier-plugin-svelte": "^3.5.2",
     "svelte": "^5.57.3",
     "svelte-check": "^4.7.7",
     "typescript": "~6.0.3",
     "vite": "^6.4.5",
     "vitest": "^3.2.7"
+  },
+  "prettier": {
+    "singleQuote": true,
+    "printWidth": 120,
+    "plugins": [
+      "prettier-plugin-svelte"
+    ],
+    "overrides": [
+      {
+        "files": "*.svelte",
+        "options": {
+          "parser": "svelte"
+        }
+      }
+    ]
   }
 }

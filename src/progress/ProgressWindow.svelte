@@ -1,4 +1,8 @@
 <script lang="ts">
+  // The small progress window for right-click Compress / Convert jobs (and editor exports whose
+  // window has closed): one job at a time, from its job events (state.ts), with Cancel, the
+  // low-resolution question, and what went wrong. It closes itself 1.5 s after a clean finish.
+
   import { untrack } from 'svelte';
   import type { JobEvent } from '../lib/jobs';
   import { doneLine, formatBytes, formatFps, progressLine } from './format';
@@ -17,17 +21,24 @@
 
   let { kind, ext = null, listen, onCancel, onConfirm, onClose, onMinimize }: Props = $props();
 
-  let view = $state(initialState(untrack(() => kind), untrack(() => ext)));
+  let view = $state(
+    initialState(
+      untrack(() => kind),
+      untrack(() => ext),
+    ),
+  );
 
   $effect(() => {
     let off: (() => void) | undefined;
     let disposed = false;
     listen((event) => {
       view = reduce(view, event);
-    }).then((fn) => {
-      if (disposed) fn();
-      else off = fn;
-    });
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else off = fn;
+      })
+      .catch((err) => console.error('Listening for job events failed', err));
     return () => {
       disposed = true;
       off?.();
@@ -44,7 +55,10 @@
   const percent = $derived(Math.floor(Math.min(1, Math.max(0, view.fraction)) * 100));
   const planText = $derived(
     view.kind === 'compress'
-      ? ['≤ 20 MB', ...(view.target ? [`${view.target.width}×${view.target.height}`, `${formatFps(view.target.fps)} fps`] : [])].join(' · ')
+      ? [
+          '≤ 20 MB',
+          ...(view.target ? [`${view.target.width}×${view.target.height}`, `${formatFps(view.target.fps)} fps`] : []),
+        ].join(' · ')
       : view.ext
         ? `.${view.ext}`
         : '',
@@ -69,10 +83,14 @@
     <div class="spacer" data-tauri-drag-region></div>
     <div class="winctl">
       <button type="button" class="ctl" aria-label="Minimize" onclick={onMinimize}>
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" fill="none" /></svg>
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
+          ><path d="M1 6h10" stroke="currentColor" fill="none" /></svg
+        >
       </button>
       <button type="button" class="ctl" aria-label="Close" onclick={onClose}>
-        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg>
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
+          ><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg
+        >
       </button>
     </div>
   </header>
@@ -90,7 +108,9 @@
     {#if view.phase === 'failed'}
       <p class="message">{view.failure?.message}</p>
       <div class="foot">
-        <span class="sub">{#if view.failure?.originalIntact !== false}The original file was not changed.{/if}</span>
+        <span class="sub"
+          >{#if view.failure?.originalIntact !== false}The original file was not changed.{/if}</span
+        >
         <button type="button" class="btn cap" onclick={onClose}>Close</button>
       </div>
     {:else if view.phase === 'unchanged'}
@@ -136,7 +156,9 @@
       </div>
       <div class="foot cap">
         <span class="status">
-          {#if view.phase === 'done'}{doneLine(view.kind)}{:else if view.phase === 'cancelled'}Cancelled{:else if view.phase === 'waiting'}Starting…{:else}{progressLine(
+          {#if view.phase === 'done'}{doneLine(
+              view.kind,
+            )}{:else if view.phase === 'cancelled'}Cancelled{:else if view.phase === 'waiting'}Starting…{:else}{progressLine(
               { pass: view.pass, passes: view.passes, fraction: view.fraction, etaS: view.etaS },
             )}{/if}
         </span>
@@ -207,7 +229,9 @@
     border: 0;
     border-radius: 3px;
     cursor: default;
-    transition: background-color 0.12s ease-out, color 0.12s ease-out;
+    transition:
+      background-color 0.12s ease-out,
+      color 0.12s ease-out;
   }
   .ctl:hover {
     background: var(--charcoal);
@@ -304,7 +328,9 @@
     border-radius: 8px;
     font-family: inherit;
     cursor: pointer;
-    transition: border-color 0.12s ease-out, background-color 0.12s ease-out;
+    transition:
+      border-color 0.12s ease-out,
+      background-color 0.12s ease-out;
   }
   .btn:hover {
     border-color: var(--bone);

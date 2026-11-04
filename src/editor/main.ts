@@ -1,13 +1,14 @@
-import { mount } from 'svelte';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import '../lib/theme.css';
-import { api, isMock } from './api';
-import EditorWindow from './EditorWindow.svelte';
-import { EditorStore } from './store.svelte';
-
 // The Rust side opens this window as `editor.html` once a Quick Trim batch starts; the files to
 // trim come from `editor_files`, and later batches arrive as `Files` events. The store runs the
 // queue (store.svelte.ts); this file wires it to the window.
+
+import { mount } from 'svelte';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import '../lib/theme.css';
+import { isMock } from './api';
+import EditorWindow from './EditorWindow.svelte';
+import { EditorStore } from './store.svelte';
+
 const store = new EditorStore();
 const win = isMock ? null : getCurrentWindow();
 const mockParam = new URLSearchParams(location.search).get('mock');
@@ -17,13 +18,19 @@ if (isMock && (mockParam === null || mockParam === '1' || mockParam === 'proxy')
   store.afterLoad = (s) => void demo.then((m) => m.demoEdits(s));
 }
 
+/** Runs a window call; a failure (the window is already going away, say) is only logged. */
+const windowCall = (name: string, call: () => Promise<unknown>) => () =>
+  void call().catch((err) => console.error(`window.${name}() failed`, err));
+
 mount(EditorWindow, {
   target: document.getElementById('app')!,
   props: {
     store,
-    onMinimize: () => (win ? void win.minimize() : console.info('[mock] window.minimize()')),
-    onToggleMaximize: () => (win ? void win.toggleMaximize() : console.info('[mock] window.toggleMaximize()')),
-    onClose: () => (win ? void win.close() : void mockClose()),
+    onMinimize: win ? windowCall('minimize', () => win.minimize()) : () => console.info('[mock] window.minimize()'),
+    onToggleMaximize: win
+      ? windowCall('toggleMaximize', () => win.toggleMaximize())
+      : () => console.info('[mock] window.toggleMaximize()'),
+    onClose: win ? windowCall('close', () => win.close()) : () => void mockClose(),
     forceProxy: isMock && mockParam === 'proxy',
   },
 });
@@ -37,19 +44,12 @@ async function mockClose() {
 // A close request (the close button or Alt+F4) with edits no export was made from asks first, in
 // the window. The window never closes by itself; exports already handed over keep running after
 // it closes, so they're no reason to ask.
-win?.onCloseRequested(async (event) => {
-  if (!store.unsaved) return;
-  event.preventDefault();
-  if (await store.ask('close')) await win.destroy();
-});
+win
+  ?.onCloseRequested(async (event) => {
+    if (!store.unsaved) return;
+    event.preventDefault();
+    if (await store.ask('close')) await win.destroy();
+  })
+  .catch((err) => console.error('Listening for the close request failed', err));
 
-async function boot() {
-  await api.onEvent((e) => store.applyEvent(e));
-  // The first file opens; later batches (`Files`) queue up behind it.
-  const opening = store.addFiles(await api.files());
-  // Rust holds editor events until the listener is attached.
-  api.ready().catch((err) => console.error('editor_ready failed', err));
-  await opening;
-}
-
-boot().catch((err) => console.error('The editor could not start', err));
+void store.start();

@@ -1,9 +1,11 @@
 // Dev-only: feeds scripted job events to the progress window when the Tauri API is absent.
-// Usage: http://localhost:5181/progress.html?mock=running  (also: confirm, failed, unchanged,
-// done, noted, batch, convert). Imported dynamically from main.ts behind `import.meta.env.DEV`.
+// Usage: `npm run dev`, then http://localhost:1420/progress.html?mock=running (also: confirm,
+// failed, unchanged, done, noted, batch, convert). Imported dynamically from main.ts behind
+// `import.meta.env.DEV`.
+
 import type { JobEvent } from '../lib/jobs';
 
-const file = 'C:\\Users\\ledan\\Videos\\[CLIPPED] Replay 2026-10-09 23-40-17.mp4';
+const file = 'C:\\Videos\\[CLIPPED] Replay 2026-10-09 23-40-17.mp4';
 const started = (extra: Partial<Extract<JobEvent, { type: 'Started' }>> = {}): JobEvent => ({
   type: 'Started',
   id: 1,
@@ -22,16 +24,8 @@ const progress = (fraction: number, pass = 1, eta_s: number | null = 24): JobEve
 const plan = { width: 1280, height: 720, fps: 60 };
 
 export const scripts: Record<string, JobEvent[]> = {
-  running: [
-    { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
-    started(plan),
-    progress(0.384),
-  ],
-  batch: [
-    { type: 'Queued', snapshot: { current_index: 3, total: 12 } },
-    started(plan),
-    progress(0.384),
-  ],
+  running: [{ type: 'Queued', snapshot: { current_index: 1, total: 1 } }, started(plan), progress(0.384)],
+  batch: [{ type: 'Queued', snapshot: { current_index: 3, total: 12 } }, started(plan), progress(0.384)],
   convert: [
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started({ kind: 'convert', ext: 'mov' }),
@@ -46,7 +40,7 @@ export const scripts: Record<string, JobEvent[]> = {
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started(plan),
     progress(0.2),
-    { type: 'Failed', id: 1, message: 'Couldn\'t process this video.', original_intact: true },
+    { type: 'Failed', id: 1, message: "Couldn't process this video.", original_intact: true },
     { type: 'Drained' },
   ],
   unchanged: [
@@ -59,7 +53,12 @@ export const scripts: Record<string, JobEvent[]> = {
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started(plan),
     progress(1, 2, 0),
-    { type: 'Done', id: 1, output: 'C:\\Users\\ledan\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4', bytes: 19_400_000 },
+    {
+      type: 'Done',
+      id: 1,
+      output: 'C:\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4',
+      bytes: 19_400_000,
+    },
     { type: 'Drained' },
   ],
   // An editor export saved after its window closed, whose 20 MB copy wasn't made.

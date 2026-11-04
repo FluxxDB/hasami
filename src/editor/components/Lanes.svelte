@@ -1,13 +1,16 @@
 <script lang="ts">
-  import { api, type Peaks, type Thumb } from '../api';
-  import { LANE_BG, MUTED_COLOR, formatClock, mixHex, trackColor } from '../display';
+  // The timeline lanes: the ruler, V1 with its thumbnail tiles, one lane per audio track with its
+  // waveform, silences and audio past the end of the video, and the playhead. Pointer input here
+  // selects, scrubs, drags edges, pans and zooms; every action also has a key (spec 5.5).
+
+  import { api, type Peaks } from '../api';
+  import { BONE, LANE_BG, MUTED_COLOR, formatClock, mixHex, nearestThumb, trackColor } from '../display';
   import { edgeAt, rulerStep, timeToX, xToTime } from '../geometry';
   import type { EditorStore } from '../store.svelte';
   import { segLen, videoEnd, type Seg } from '../timeline';
 
   let { store, width = $bindable(0) }: { store: EditorStore; width?: number } = $props();
 
-  const BONE = '#fcfcfc';
   const TILE_PX = 72; // thumbnail tile width in a video clip
   const BAR_PX = 3; // waveform bar pitch
   const EPS = 1e-6;
@@ -17,7 +20,7 @@
   const sx = $derived(store.scrollX);
   const vEnd = $derived(videoEnd(tl));
   const selected = $derived(new Set(store.selection));
-  const empties = $derived(store.media?.tracks.filter((t) => t.empty) ?? []);
+  const empties = $derived(store.emptyTracks);
   const fileName = $derived(store.media?.file_name ?? '');
 
   const x = (t: number) => timeToX(t, pps, sx);
@@ -167,12 +170,6 @@
     }
     return out;
   });
-
-  function nearestThumb(thumbs: Thumb[], t: number): Thumb | null {
-    let best: Thumb | null = null;
-    for (const th of thumbs) if (!best || Math.abs(th.t - t) < Math.abs(best.t - t)) best = th;
-    return best;
-  }
 
   /** The thumbnail tiles of a video clip that are on screen. */
   function tiles(seg: Seg, b: ReturnType<typeof box>) {

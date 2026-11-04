@@ -1,10 +1,10 @@
 <script lang="ts">
-  import type { ConfirmKind, EditorStore } from '../store.svelte';
-
   // The unsaved-edits question (close, Prev or Next video with edits not exported, Discard of an
   // edited clip), asked in the window.
   // A modal <dialog>: the editor behind it is inert, Tab stays inside, Esc keeps editing, and
   // focus starts on Keep editing so a stray Enter or Space never loses work.
+
+  import type { ConfirmKind, EditorStore } from '../store.svelte';
 
   let { store }: { store: EditorStore } = $props();
 

@@ -46,7 +46,16 @@ describe('reduce', () => {
   });
 
   it('lets Started override kind, extension and target when it carries them', () => {
-    const s = run([{ ...(started() as Extract<JobEvent, { type: 'Started' }>), kind: 'convert', ext: 'mp4', width: 1280, height: 720, fps: 60 }]);
+    const s = run([
+      {
+        ...(started() as Extract<JobEvent, { type: 'Started' }>),
+        kind: 'convert',
+        ext: 'mp4',
+        width: 1280,
+        height: 720,
+        fps: 60,
+      },
+    ]);
     expect(s.kind).toBe('convert');
     expect(s.ext).toBe('mp4');
     expect(s.target).toEqual({ width: 1280, height: 720, fps: 60 });
@@ -90,12 +99,21 @@ describe('reduce', () => {
   it('keeps the window open on Failed and shows the message', () => {
     const s = run([started(), { type: 'Failed', id: 1, message: 'ffmpeg exited with code 1', original_intact: true }]);
     expect(s.phase).toBe('failed');
-    expect(s.failure).toEqual({ fileName: 'Replay 01.mp4', message: 'ffmpeg exited with code 1', originalIntact: true });
+    expect(s.failure).toEqual({
+      fileName: 'Replay 01.mp4',
+      message: 'ffmpeg exited with code 1',
+      originalIntact: true,
+    });
     expect(s.shouldClose).toBe(false);
   });
 
   it('Drained after success asks to close', () => {
-    const s = run([started(), progress(), { type: 'Done', id: 1, output: 'C:\\Users\\me\\Videos\\[20MB] Replay 01.mp4', bytes: 19_400_000 }, { type: 'Drained' }]);
+    const s = run([
+      started(),
+      progress(),
+      { type: 'Done', id: 1, output: 'C:\\Videos\\[20MB] Replay 01.mp4', bytes: 19_400_000 },
+      { type: 'Drained' },
+    ]);
     expect(s.phase).toBe('done');
     expect(s.outputBytes).toBe(19_400_000);
     expect(s.note).toBeNull();
@@ -120,11 +138,23 @@ describe('reduce', () => {
 
   it('a note outlasts later jobs, and a failure still comes first', () => {
     const noted: JobEvent = { type: 'Done', id: 1, output: 'C:\\a2.mp4', bytes: 1, note: 'n' };
-    const later = run([started(1, 'C:\\a.mp4'), noted, started(2, 'C:\\b.mp4'), { type: 'Done', id: 2, output: 'C:\\b2.mp4', bytes: 1 }, { type: 'Drained' }]);
+    const later = run([
+      started(1, 'C:\\a.mp4'),
+      noted,
+      started(2, 'C:\\b.mp4'),
+      { type: 'Done', id: 2, output: 'C:\\b2.mp4', bytes: 1 },
+      { type: 'Drained' },
+    ]);
     expect(later.phase).toBe('noted');
     expect(later.note).toEqual({ fileName: 'a.mp4', message: 'n' });
 
-    const failed = run([started(1, 'C:\\a.mp4'), noted, started(2, 'C:\\b.mp4'), { type: 'Failed', id: 2, message: 'x', original_intact: true }, { type: 'Drained' }]);
+    const failed = run([
+      started(1, 'C:\\a.mp4'),
+      noted,
+      started(2, 'C:\\b.mp4'),
+      { type: 'Failed', id: 2, message: 'x', original_intact: true },
+      { type: 'Drained' },
+    ]);
     expect(failed.phase).toBe('failed');
   });
 
@@ -143,7 +173,8 @@ describe('reduce', () => {
   });
 
   it('carries original_intact so the window can leave out "not changed"', () => {
-    const msg = 'Couldn\'t finish saving the new file. It\'s saved as "C:\\a\\.a.mp4.hasami-tmp", and the original is in the Recycle Bin.';
+    const msg =
+      'Couldn\'t finish saving the new file. It\'s saved as "C:\\a\\.a.mp4.hasami-tmp", and the original is in the Recycle Bin.';
     const s = run([started(), { type: 'Failed', id: 1, message: msg, original_intact: false }, { type: 'Drained' }]);
     expect(s.phase).toBe('failed');
     expect(s.failure).toEqual({ fileName: 'Replay 01.mp4', message: msg, originalIntact: false });
@@ -175,7 +206,11 @@ describe('reduce', () => {
     const mid = run([started(1), { type: 'Failed', id: 1, message: 'Cancelled', original_intact: true }]);
     expect(mid.phase).toBe('cancelled');
     expect(mid.failedCount).toBe(0);
-    const end = [started(2), { type: 'Done', id: 2, output: 'x', bytes: 1 } as JobEvent, { type: 'Drained' } as JobEvent].reduce(reduce, mid);
+    const end = [
+      started(2),
+      { type: 'Done', id: 2, output: 'x', bytes: 1 } as JobEvent,
+      { type: 'Drained' } as JobEvent,
+    ].reduce(reduce, mid);
     expect(end.shouldClose).toBe(true);
   });
 
@@ -198,7 +233,12 @@ describe('reduce', () => {
   });
 
   it('a new batch after Drained starts clean', () => {
-    const s = run([started(1), { type: 'Failed', id: 1, message: 'boom', original_intact: true }, { type: 'Drained' }, started(2)]);
+    const s = run([
+      started(1),
+      { type: 'Failed', id: 1, message: 'boom', original_intact: true },
+      { type: 'Drained' },
+      started(2),
+    ]);
     expect(s.phase).toBe('running');
     expect(s.failedCount).toBe(0);
     expect(s.failure).toBeNull();
@@ -208,7 +248,7 @@ describe('reduce', () => {
   it('export_kind_title: an export failure shown here reads "HASAMI export"', () => {
     const s = run([
       { type: 'Started', id: 7, input: 'C:\\clips\\Replay 01.mp4', input_bytes: 0, kind: 'export' },
-      { type: 'Failed', id: 7, message: 'Couldn\'t process this video.', original_intact: true },
+      { type: 'Failed', id: 7, message: "Couldn't process this video.", original_intact: true },
     ]);
     expect(s.kind).toBe('export');
     expect(s.phase).toBe('failed');

@@ -4,13 +4,14 @@
 </script>
 
 <script lang="ts">
-  import { formatBytes, formatPercent } from '../../progress/format';
-  import { fileName } from '../display';
-  import type { EditorStore, Result } from '../store.svelte';
-
   // The results list (spec 5.8): each export and discard and how it went, opened from the top
   // bar's export strip. A popover over the editor: it never replaces the editor and never closes
   // the window. Esc, a click outside, or its close button put it away.
+
+  import { formatBytes, formatPercent } from '../../progress/format';
+  import { fileName } from '../display';
+  import type { Result } from '../exportLog.svelte';
+  import type { EditorStore } from '../store.svelte';
 
   let { store }: { store: EditorStore } = $props();
 
@@ -39,7 +40,8 @@
 
   function detail(r: Result): string {
     if (r.state === 'done' && r.output) return `${fileName(r.output)} · ${formatBytes(r.bytes ?? 0)}`;
-    if (r.action === 'discard') return r.state === 'running' ? 'Goes to the Recycle Bin once its export finishes' : 'Sent to the Recycle Bin';
+    if (r.action === 'discard')
+      return r.state === 'running' ? 'Goes to the Recycle Bin once its export finishes' : 'Sent to the Recycle Bin';
     return '';
   }
 
@@ -58,8 +60,16 @@
   <header>
     <!-- Polite: "Finishing 2 exports" turning into "All done" is the news here. -->
     <h2 id="results-heading" aria-live="polite">{heading}</h2>
-    <button type="button" class="ctl" aria-label="Close the results" popovertarget={RESULTS_ID} popovertargetaction="hide">
-      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg>
+    <button
+      type="button"
+      class="ctl"
+      aria-label="Close the results"
+      popovertarget={RESULTS_ID}
+      popovertargetaction="hide"
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
+        ><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg
+      >
     </button>
   </header>
   {#if running > 0}<p class="note">Closing the window is fine: exports keep running.</p>{/if}
@@ -67,7 +77,7 @@
   {#if results.length > 0}
     <ol class="results">
       {#each results as r, i (i)}
-        <li class:failed={r.state === 'failed'}>
+        <li>
           <div class="what">
             <span class="name" title={r.input}>{fileName(r.input)}</span>
             <span class="action cap">{ACTION[r.action]}</span>

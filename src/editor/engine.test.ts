@@ -234,6 +234,28 @@ describe('PlaybackEngine: audio sync', () => {
     expect(audio.seekTargets[1]).toBeCloseTo(10.8 + 0.15, 6);
   });
 
+  it('a slow first seek does not make later seeks overshoot: no sample counts for more than the lead cap', () => {
+    const audio = new FakeMedia();
+    audio.instantSeeks = false;
+    const { engine } = makeEngine([audio]);
+    engine.load('', [{ index: 0, src: 'a0.m4a' }]);
+    engine.setTimeline(tl);
+    engine.seek(10);
+    engine.setShuttle({ dir: 1, speed: 1 });
+    frameAt(0);
+    frameAt(2000);
+    audio.finishSeek(); // a cold first seek: 2 s
+    frameAt(2500); // drift: re-seeked, aimed ahead by the most a lead may be
+    expect(audio.seekTargets).toHaveLength(2);
+    expect(audio.seekTargets[1]).toBeCloseTo(12.5 + 0.25, 6);
+    frameAt(2550);
+    audio.finishSeek(); // a warm seek: 50 ms
+    frameAt(3000);
+    expect(audio.seekTargets).toHaveLength(3);
+    // The average of 0.25 (the 2 s sample, capped) and 0.05, not of 2 and 0.05.
+    expect(audio.seekTargets[2]).toBeCloseTo(13 + 0.15, 6);
+  });
+
   it('does not re-seek audio that is within the tolerance', () => {
     const audio = new FakeMedia();
     const { engine } = makeEngine([audio]);
@@ -299,7 +321,11 @@ describe('PlaybackEngine: master volume and Dim', () => {
 
   it('routes every track through one master gain before the speakers', () => {
     const { ctx, gains, destination } = fakeCtx();
-    const engine = new PlaybackEngine(new FakeMedia() as unknown as HTMLVideoElement, ctx, () => new FakeMedia() as unknown as HTMLAudioElement);
+    const engine = new PlaybackEngine(
+      new FakeMedia() as unknown as HTMLVideoElement,
+      ctx,
+      () => new FakeMedia() as unknown as HTMLAudioElement,
+    );
     engine.setTimeline(setMaster(tl, -6));
     engine.load('', [{ index: 0, src: 'a0.m4a' }]);
     const [master, track] = gains;

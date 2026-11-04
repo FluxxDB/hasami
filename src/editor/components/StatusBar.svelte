@@ -1,4 +1,7 @@
 <script lang="ts">
+  // The status bar: cuts and selection, the Quick export size estimate (estimate.ts), the key hints,
+  // and a notice when an export couldn't start or Prev / Next couldn't look in the folder.
+
   import { formatBytes } from '../../progress/format';
   import type { EditorStore } from '../store.svelte';
   import { cutCount } from '../timeline';

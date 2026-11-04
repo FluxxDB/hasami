@@ -1,6 +1,6 @@
-// Browser stand-in for the editor's Rust commands, used by api.ts in mock mode
-// (http://localhost:5182/editor.html?mock=1). One 90 s 1080p60 clip with three audio tracks,
-// the middle one empty, synthetic peaks and flat-colored thumbnails.
+// Browser stand-in for the editor's Rust commands, used by api.ts in mock mode (`npm run dev`,
+// then http://localhost:1420/editor.html?mock=1). One 90 s 1080p60 clip with three audio
+// tracks, the middle one empty, synthetic peaks and flat-colored thumbnails.
 //
 // `?mock=1` also applies a few edits after load (see `demoEdits`) so the page shows the approved
 // mockup's state: cuts, a linked selection, silence on A2 and audio past the end of the video.
@@ -23,12 +23,14 @@
 // There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
 import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
 import { fileName } from './display';
-import type { EditorStore } from './store.svelte';
+import type { ClipEditor } from './clipEditor.svelte';
 import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
-const DIR = 'C:\\Users\\ledan\\Videos\\';
+const DIR = 'C:\\Videos\\';
 /** The fake folder, newest first, as Explorer sorts it by date, descending. */
-const FOLDER = ['23-40-17', '23-21-50', '23-05-33', '22-48-09', '22-31-44'].map((t) => `${DIR}Replay 2026-10-09 ${t}.mp4`);
+const FOLDER = ['23-40-17', '23-21-50', '23-05-33', '22-48-09', '22-31-44'].map(
+  (t) => `${DIR}Replay 2026-10-09 ${t}.mp4`,
+);
 /** Each clip's modified time, from the time in its name. */
 const MODIFIED = new Map(
   FOLDER.map((p) => {
@@ -169,7 +171,13 @@ function runExport(id: number, input: string, mode: string, fit20: boolean): Pro
       clearInterval(timer);
       const ok = input !== FAILING;
       if (!ok) {
-        emit({ type: 'ExportFailed', id, input, message: "Couldn't export this clip: the result didn't check out.", original_intact: true });
+        emit({
+          type: 'ExportFailed',
+          id,
+          input,
+          message: "Couldn't export this clip: the result didn't check out.",
+          original_intact: true,
+        });
       } else {
         const name = fileName(input).replace(/\.[^.]+$/, mode === 'audio' ? '.mp3' : '.mp4');
         const output = input.replace(/[^\\]+$/, `[CLIPPED] ${name}`);
@@ -235,7 +243,11 @@ export const mockApi: EditorApi = {
     return later(found ?? null);
   },
   orderFiles: (paths) =>
-    later([...paths].sort((a, b) => (MODIFIED.get(a) ?? Number.MAX_SAFE_INTEGER) - (MODIFIED.get(b) ?? Number.MAX_SAFE_INTEGER))),
+    later(
+      [...paths].sort(
+        (a, b) => (MODIFIED.get(a) ?? Number.MAX_SAFE_INTEGER) - (MODIFIED.get(b) ?? Number.MAX_SAFE_INTEGER),
+      ),
+    ),
   close: (session) => {
     console.info('[mock] editor_close', { session });
     return later(undefined);
@@ -249,7 +261,7 @@ export const mockApi: EditorApi = {
 };
 
 /** The approved mockup's state, rebuilt with the real timeline functions. */
-export function demoEdits(store: EditorStore): void {
+export function demoEdits(store: ClipEditor): void {
   let tl = store.timeline;
   tl = cutAt(tl, 12);
   tl = cutAt(tl, 31);

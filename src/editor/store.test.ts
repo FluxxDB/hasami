@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, type EditorMedia } from './api';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api } from './api';
+import { media } from './fixtures';
 import { EditorStore } from './store.svelte';
-import { cutAt, cutCount, deleteSegs, segLen, setMuted, videoEnd } from './timeline';
+import { setMuted } from './timeline';
 
 // The store talks to the Rust side through `api`; these tests answer for it.
 vi.mock('./api', () => ({
@@ -23,618 +24,6 @@ vi.mock('./api', () => ({
   },
 }));
 
-const media = (over: Partial<EditorMedia> = {}): EditorMedia => ({
-  session: 7,
-  path: 'C:\\clips\\Replay.mp4',
-  file_name: 'Replay.mp4',
-  size_bytes: 412e6,
-  duration_s: 90,
-  bit_rate: null,
-  modified_ms: 1_000,
-  video: { width: 1920, height: 1080, fps: 60, codec: 'hevc' },
-  border: null,
-  tracks: [
-    { index: 0, empty: false, file: 'a0.m4a' },
-    { index: 1, empty: true, file: null },
-    { index: 2, empty: false, file: 'a2.m4a' },
-  ],
-  ...over,
-});
-
-describe('EditorStore', () => {
-  it('load builds a timeline with one audio track per non-empty source track', () => {
-    const s = new EditorStore();
-    s.load(media());
-    expect(s.timeline.audio.map((a) => a.index)).toEqual([0, 2]);
-    expect(s.timeline.sourceDuration).toBe(90);
-    expect(s.timeline.fps).toBe(60);
-    expect(videoEnd(s.timeline)).toBe(90);
-  });
-
-  it('is not edited after load and is after one edit', () => {
-    const s = new EditorStore();
-    s.load(media());
-    expect(s.edited).toBe(false);
-    s.edit(cutAt(s.timeline, 12));
-    expect(s.edited).toBe(true);
-    expect(s.timeline.video).toHaveLength(2);
-  });
-
-  it('load resets edits, selection, playhead and per-clip data', () => {
-    const s = new EditorStore();
-    s.load(media());
-    s.edit(cutAt(s.timeline, 12));
-    s.selection = ['S0'];
-    s.playhead = 30;
-    s.peaks = { 0: { rate: 10, values: [0.5] } };
-    s.thumbs = [{ t: 0, file: 'x.jpg' }];
-    s.load(media({ session: 8 }));
-    expect(s.edited).toBe(false);
-    expect(s.selection).toEqual([]);
-    expect(s.playhead).toBe(0);
-    expect(s.peaks).toEqual({});
-    expect(s.thumbs).toEqual([]);
-  });
-
-  /** Keep 0..44 s of the loaded clip: cut at 44 and delete the tail. */
-  const keep44 = (s: EditorStore) => {
-    const cut = cutAt(s.timeline, 44);
-    s.edit(deleteSegs(cut, [cut.video[1].id], true));
-    expect(videoEnd(s.timeline)).toBeCloseTo(44, 9);
-  };
-
-  it('estimates the quick export size as the export encodes it: HEVC gets 1.3x', () => {
-    const s = new EditorStore();
-    s.load(media());
-    keep44(s);
-    // 412e6 B over 90 s is 36.62 Mbit/s; less 3 audio tracks at 192k is 36.05 Mbit/s of video,
-    // ×1.3 is 46.86, plus the export's one 192k AAC track is 47.05 Mbit/s: × 44 s ≈ 258.8 MB.
-    const bps = ((412e6 * 8) / 90 - 3 * 192e3) * 1.3 + 192e3;
-    expect(Math.abs(s.estimateBytes - (bps / 8) * 44)).toBeLessThan(1e3);
-    expect(s.estimateBytes).toBeCloseTo(258.8e6, -5);
-  });
-
-  it('estimates H.264 at the source rate, with no audio when none is heard', () => {
-    const s = new EditorStore();
-    s.load(media({ video: { width: 1920, height: 1080, fps: 60, codec: 'h264' } }));
-    keep44(s);
-    const video = (412e6 * 8) / 90 - 3 * 192e3;
-    expect(Math.abs(s.estimateBytes - ((video + 192e3) / 8) * 44)).toBeLessThan(1e3);
-    for (const a of s.timeline.audio) s.edit(setMuted(s.timeline, a.index, true));
-    expect(Math.abs(s.estimateBytes - (video / 8) * 44)).toBeLessThan(1e3);
-  });
-
-  it('estimates the same size whatever the crop', () => {
-    const s = new EditorStore();
-    s.load(media({ border: { x: 0, y: 0, w: 1440, h: 810 } }));
-    keep44(s);
-    expect(s.crop).not.toBeNull();
-    const cropped = s.estimateBytes;
-    s.keepBorder = true;
-    expect(s.crop).toBeNull();
-    expect(s.estimateBytes).toBe(cropped);
-  });
-
-  it('estimates at least 1 Mbit/s of video, as the export encodes', () => {
-    const s = new EditorStore();
-    // 2 MB over 90 s is 0.18 Mbit/s, under the 3 audio tracks' share.
-    s.load(media({ size_bytes: 2e6, video: { width: 1920, height: 1080, fps: 60, codec: 'h264' } }));
-    expect(Math.abs(s.estimateBytes - ((1e6 + 192e3) / 8) * 90)).toBeLessThan(1e3);
-  });
-
-  it('estimates nothing before a clip is loaded', () => {
-    expect(new EditorStore().estimateBytes).toBe(0);
-  });
-});
-
-describe('EditorStore commands', () => {
-  const loaded = () => {
-    const s = new EditorStore();
-    s.load(media());
-    return s;
-  };
-
-  it('cut at playhead 12 adds one cut on every track', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    expect(cutCount(s.timeline)).toBe(1);
-    expect(s.timeline.video[1].at).toBe(12);
-    expect(s.timeline.audio.every((a) => a.segs.length === 2)).toBe(true);
-    expect(s.history.past).toHaveLength(1);
-  });
-
-  describe('Ctrl+B with a selection', () => {
-    const tracks = (s: EditorStore) => [s.timeline.video, ...s.timeline.audio.map((a) => a.segs)];
-
-    it('unlinked, a selected audio clip under the playhead is the only one cut', () => {
-      const s = loaded();
-      s.command('toggleLinked');
-      const a1 = s.timeline.audio[0].segs[0];
-      s.selectAt(a1.id);
-      s.seek(12);
-      s.command('cut');
-      expect(tracks(s).map((t) => t.length)).toEqual([1, 2, 1]);
-      expect(s.selection).toEqual([a1.id]); // stays on the left piece
-      expect(s.timeline.audio[0].segs[0].src).toEqual([0, 12]);
-    });
-
-    it('linked, a selected video clip cuts itself and its linked audio', () => {
-      const s = loaded();
-      s.selectAt(s.timeline.video[0].id);
-      expect(s.selection).toHaveLength(3);
-      s.seek(12);
-      s.command('cut');
-      expect(tracks(s).map((t) => t.length)).toEqual([2, 2, 2]);
-      expect(s.selection).toHaveLength(3);
-    });
-
-    it('after a video-only cut, re-linking selects no audio and Delete ripples video only', () => {
-      const s = loaded();
-      s.command('toggleLinked'); // off
-      s.selectAt(s.timeline.video[0].id);
-      s.seek(12);
-      s.command('cut');
-      expect(tracks(s).map((t) => t.length)).toEqual([2, 1, 1]);
-      s.command('toggleLinked'); // on
-      for (const v of s.timeline.video) {
-        s.selectAt(v.id);
-        expect(s.selection).toEqual([v.id]);
-      }
-      s.selectAt(s.timeline.video[0].id);
-      s.command('delete');
-      expect(videoEnd(s.timeline)).toBeCloseTo(78, 9);
-      // The audio is no longer linked, so it is not deleted wholesale: the linked-delete ripple
-      // takes out just the same 12 s range from it.
-      for (const a of s.timeline.audio) {
-        expect(a.segs.map((x) => x.src)).toEqual([[12, 90]]);
-        expect(a.segs.map((x) => x.at)).toEqual([0]);
-      }
-    });
-
-    it('with nothing selected, every track is cut', () => {
-      const s = loaded();
-      s.seek(12);
-      s.command('cut');
-      expect(tracks(s).map((t) => t.length)).toEqual([2, 2, 2]);
-    });
-
-    it('a selection that is not under the playhead leaves the cut on every track', () => {
-      const s = loaded();
-      s.seek(12);
-      s.command('cut');
-      s.command('toggleLinked');
-      s.selectAt(s.timeline.audio[0].segs[0].id); // [0, 12]
-      s.seek(40);
-      s.command('cut');
-      expect(tracks(s).map((t) => t.length)).toEqual([3, 3, 3]);
-    });
-  });
-
-  it('delete removes a linked selection and ripples', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    s.seek(31);
-    s.command('cut');
-    const mid = s.timeline.video[1];
-    s.selectAt(mid.id);
-    expect(s.selection).toHaveLength(3); // V1 + A1 + A2 pieces made by the same cuts
-    s.command('delete');
-    expect(videoEnd(s.timeline)).toBeCloseTo(90 - 19, 9);
-    expect(s.timeline.video.map((v) => v.src)).toEqual([
-      [0, 12],
-      [31, 90],
-    ]);
-    for (const a of s.timeline.audio) expect(a.segs.map((x) => x.at)).toEqual([0, 12]);
-    expect(s.selection).toEqual([]);
-  });
-
-  it('delete with Linked off removes only the clicked audio piece, leaving silence', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    s.command('toggleLinked');
-    const a1 = s.timeline.audio[0].segs[1];
-    s.selectAt(a1.id);
-    expect(s.selection).toEqual([a1.id]);
-    s.command('delete');
-    expect(videoEnd(s.timeline)).toBe(90);
-    expect(s.timeline.audio[0].segs).toHaveLength(1);
-    expect(s.timeline.audio[1].segs).toHaveLength(2);
-  });
-
-  it('undo and redo restore the timeline', () => {
-    const s = loaded();
-    const before = s.timeline;
-    s.seek(12);
-    s.command('cut');
-    const after = s.timeline;
-    s.command('undo');
-    expect(s.timeline).toBe(before);
-    expect(s.edited).toBe(false);
-    s.command('redo');
-    expect(s.timeline).toBe(after);
-  });
-
-  it('an edit that shortens the video pulls the playhead inside it', () => {
-    const s = loaded();
-    s.seek(60);
-    s.command('cut');
-    s.seek(80);
-    s.selectAt(s.timeline.video[1].id);
-    s.command('delete');
-    expect(s.playhead).toBe(60);
-    s.command('undo');
-    expect(s.playhead).toBe(60);
-    expect(videoEnd(s.timeline)).toBe(90);
-  });
-
-  describe('playhead after a delete lands at the join', () => {
-    const cutAtTimes = (s: EditorStore, ...ts: number[]) => {
-      for (const t of ts) {
-        s.seek(t);
-        s.command('cut');
-      }
-    };
-
-    it('deleting the right half puts it at the end of what is left', () => {
-      const s = loaded();
-      cutAtTimes(s, 12);
-      s.seek(50);
-      s.selectAt(s.timeline.video[1].id);
-      s.command('delete');
-      expect(s.playhead).toBe(12);
-    });
-
-    it('deleting the left half puts it at 0', () => {
-      const s = loaded();
-      cutAtTimes(s, 12);
-      s.seek(8);
-      s.selectAt(s.timeline.video[0].id);
-      s.command('delete');
-      expect(s.playhead).toBe(0);
-    });
-
-    it('deleting a middle piece puts it where the neighbours meet, even from the end', () => {
-      const s = loaded();
-      cutAtTimes(s, 12, 31);
-      s.seek(90);
-      s.selectAt(s.timeline.video[1].id);
-      s.command('delete');
-      expect(s.playhead).toBe(12);
-    });
-
-    it('an audio-only delete leaves the playhead alone', () => {
-      const s = loaded();
-      cutAtTimes(s, 12);
-      s.command('toggleLinked');
-      s.seek(40);
-      s.selectAt(s.timeline.audio[0].segs[1].id);
-      s.command('delete');
-      expect(s.playhead).toBe(40);
-    });
-
-    it('asks the player to seek there', () => {
-      const s = loaded();
-      cutAtTimes(s, 12);
-      s.selectAt(s.timeline.video[1].id);
-      const before = s.seekSeq;
-      s.command('delete');
-      expect(s.seekSeq).toBeGreaterThan(before);
-    });
-  });
-
-  it('toggleSnap and toggleLinked flip the flags', () => {
-    const s = loaded();
-    expect(s.snapping).toBe(true);
-    expect(s.linked).toBe(true);
-    s.command('toggleSnap');
-    s.command('toggleLinked');
-    expect(s.snapping).toBe(false);
-    expect(s.linked).toBe(false);
-    s.command('toggleSnap');
-    expect(s.snapping).toBe(true);
-  });
-
-  it('frame steps move by one frame and seconds by one second', () => {
-    const s = loaded();
-    s.command('frameFwd');
-    expect(s.playhead).toBeCloseTo(1 / 60, 12);
-    s.command('frameBack');
-    s.command('frameBack');
-    expect(s.playhead).toBe(0);
-    s.command('secFwd');
-    expect(s.playhead).toBeCloseTo(1, 12);
-  });
-
-  it('nextCut and prevCut jump between cut points; home and end go to the ends', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    s.seek(31);
-    s.command('cut');
-    s.command('home');
-    s.command('nextCut');
-    expect(s.playhead).toBe(12);
-    s.command('nextCut');
-    expect(s.playhead).toBe(31);
-    s.command('prevCut');
-    expect(s.playhead).toBe(12);
-    s.command('end');
-    expect(s.playhead).toBe(90);
-  });
-
-  it('seek is quantized to the frame grid and clamped to the video', () => {
-    const s = loaded();
-    s.seek(10.004);
-    expect(s.playhead).toBeCloseTo(10, 12);
-    s.seek(-3);
-    expect(s.playhead).toBe(0);
-    s.seek(500);
-    expect(s.playhead).toBe(90);
-  });
-
-  it('an edge drag previews live and records exactly one history entry', () => {
-    const s = loaded();
-    s.seek(44);
-    s.command('cut');
-    s.selectAt(s.timeline.video[1].id);
-    s.command('delete'); // keep 0–44
-    const steps = s.history.past.length;
-    const v0 = s.timeline.video[0].id;
-    s.snapping = false;
-    s.beginEdgeDrag(v0, 'end');
-    s.dragEdgeTo(50);
-    expect(videoEnd(s.timeline)).toBeCloseTo(50, 9);
-    s.dragEdgeTo(60);
-    s.dragEdgeTo(70);
-    expect(s.history.past.length).toBe(steps); // nothing recorded mid-drag
-    s.endEdgeDrag();
-    expect(s.history.past.length).toBe(steps + 1);
-    expect(videoEnd(s.timeline)).toBeCloseTo(70, 9);
-    // Linked: the audio pieces that ended with the video came back with it.
-    for (const a of s.timeline.audio) expect(Math.max(...a.segs.map((x) => x.at + segLen(x)))).toBeCloseTo(70, 9);
-    s.command('undo');
-    expect(videoEnd(s.timeline)).toBeCloseTo(44, 9);
-  });
-
-  it('an edge drag that ends where it started records nothing', () => {
-    const s = loaded();
-    s.seek(30);
-    s.command('cut');
-    const steps = s.history.past.length;
-    s.beginEdgeDrag(s.timeline.video[0].id, 'end');
-    s.dragEdgeTo(20);
-    s.dragEdgeTo(30);
-    s.endEdgeDrag();
-    expect(s.history.past.length).toBe(steps);
-  });
-
-  it('an edge drag snaps to the playhead within SNAP_PX and shows where', () => {
-    const s = loaded();
-    s.seek(44);
-    s.command('cut');
-    s.selectAt(s.timeline.video[1].id);
-    s.command('delete');
-    s.seek(20);
-    s.pxPerSecond = 20; // SNAP_PX = 8 → 0.4 s
-    s.beginEdgeDrag(s.timeline.audio[1].segs[0].id, 'end');
-    s.dragEdgeTo(20.3);
-    expect(s.snapAt).toBe(20);
-    expect(s.timeline.audio[1].segs[0].src[1]).toBe(20);
-    s.dragEdgeTo(25);
-    expect(s.snapAt).toBeNull();
-    s.endEdgeDrag();
-    expect(s.snapAt).toBeNull();
-  });
-
-  it('setGain previews without history until it commits', () => {
-    const s = loaded();
-    s.setGain(0, -6, false);
-    expect(s.timeline.audio[0].gainDb).toBe(-6);
-    expect(s.history.past).toHaveLength(0);
-    s.setGain(0, -6, true);
-    expect(s.history.past).toHaveLength(1);
-    expect(s.timeline.audio[0].gainDb).toBe(-6);
-  });
-
-  it('a slider that returns to where it started records nothing', () => {
-    const s = loaded();
-    s.setGain(0, -12, false);
-    s.setGain(0, 0, false);
-    s.setGain(0, 0, true);
-    expect(s.history.past).toHaveLength(0);
-  });
-
-  it('setMaster previews without history until it commits, then is one undo step', () => {
-    const s = loaded();
-    s.setMaster(-6, false);
-    expect(s.timeline.masterDb).toBe(-6);
-    expect(s.history.past).toHaveLength(0);
-    s.setMaster(-6, true);
-    expect(s.history.past).toHaveLength(1);
-    s.command('undo');
-    expect(s.timeline.masterDb).toBe(0);
-  });
-
-  it('a master slider that returns to where it started records nothing', () => {
-    const s = loaded();
-    s.setMaster(-12, false);
-    s.setMaster(0, false);
-    s.setMaster(0, true);
-    expect(s.history.past).toHaveLength(0);
-  });
-
-  it('nudgeMaster steps by 3 dB, clamps, and makes one undo entry per press', () => {
-    const s = loaded();
-    s.nudgeMaster(1);
-    s.nudgeMaster(1);
-    expect(s.timeline.masterDb).toBe(6);
-    expect(s.history.past).toHaveLength(2);
-    s.nudgeMaster(-1);
-    expect(s.timeline.masterDb).toBe(3);
-    expect(s.history.past).toHaveLength(3);
-    s.command('undo');
-    expect(s.timeline.masterDb).toBe(6);
-    for (let i = 0; i < 10; i++) s.nudgeMaster(1);
-    expect(s.timeline.masterDb).toBe(12);
-    const steps = s.history.past.length;
-    s.nudgeMaster(1); // already at the ceiling: no-op, no entry
-    expect(s.history.past).toHaveLength(steps);
-    for (let i = 0; i < 30; i++) s.nudgeMaster(-1);
-    expect(s.timeline.masterDb).toBe(-60);
-  });
-
-  it('toggleMute is an undo step', () => {
-    const s = loaded();
-    s.toggleMute(2);
-    expect(s.timeline.audio[1].muted).toBe(true);
-    expect(s.history.past).toHaveLength(1);
-    s.toggleMute(2);
-    expect(s.timeline.audio[1].muted).toBe(false);
-    s.command('undo');
-    expect(s.timeline.audio[1].muted).toBe(true);
-  });
-
-  it('L taps speed up, J reverses at 1x, K stops; Space plays and pauses', () => {
-    const s = loaded();
-    s.command('L');
-    expect(s.shuttle).toEqual({ dir: 1, speed: 1 });
-    s.command('L');
-    expect(s.shuttle).toEqual({ dir: 1, speed: 2 });
-    s.command('L');
-    expect(s.shuttle).toEqual({ dir: 1, speed: 4 });
-    s.command('J');
-    expect(s.shuttle).toEqual({ dir: -1, speed: 1 });
-    s.command('K');
-    expect(s.shuttle).toEqual({ dir: 0, speed: 1 });
-    s.command('playPause');
-    expect(s.shuttle).toEqual({ dir: 1, speed: 1 });
-    s.command('playPause');
-    expect(s.shuttle.dir).toBe(0);
-  });
-
-  it('Space at the end of the video plays from the start', () => {
-    const s = loaded();
-    s.command('end');
-    s.command('playPause');
-    expect(s.playhead).toBe(0);
-    expect(s.shuttle.dir).toBe(1);
-  });
-
-  it('frame steps stop shuttling', () => {
-    const s = loaded();
-    s.command('L');
-    s.command('frameFwd');
-    expect(s.shuttle.dir).toBe(0);
-  });
-
-  it('Shift+V selects the video piece under the playhead (and its linked audio); Delete ripples', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    s.seek(31);
-    s.command('cut');
-    s.seek(20);
-    s.command('selectAtPlayhead');
-    const mid = s.timeline.video[1];
-    expect(new Set(s.selection)).toEqual(new Set([mid.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]));
-    s.command('delete');
-    expect(s.timeline.video.map((v) => v.src)).toEqual([
-      [0, 12],
-      [31, 90],
-    ]);
-    expect(videoEnd(s.timeline)).toBeCloseTo(71, 9);
-  });
-
-  it('Shift+V on a cut picks the piece that starts there; with Linked off, only the video', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    s.linked = false;
-    s.command('selectAtPlayhead'); // playhead still on the cut at 12
-    expect(s.selection).toEqual([s.timeline.video[1].id]);
-  });
-
-  it('Shift+V with no video under the playhead leaves the selection as it was', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    const a = s.timeline.audio[0].segs[0].id;
-    s.linked = false;
-    s.selectAt(a);
-    s.command('end'); // the playhead at the video's end has no video piece under it
-    s.command('selectAtPlayhead');
-    expect(s.selection).toEqual([a]);
-  });
-
-  it('selectAt honours Linked', () => {
-    const s = loaded();
-    s.seek(12);
-    s.command('cut');
-    const v = s.timeline.video[1];
-    s.selectAt(v.id);
-    expect(new Set(s.selection)).toEqual(new Set([v.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]));
-    s.linked = false;
-    s.selectAt(v.id);
-    expect(s.selection).toEqual([v.id]);
-  });
-
-  it('wheel zoom keeps the time under the cursor, and pans never go before 0', () => {
-    const s = loaded();
-    s.viewWidth = 1000;
-    s.pxPerSecond = 20;
-    s.scrollX = 100;
-    const t = (300 + s.scrollX) / s.pxPerSecond;
-    s.zoomAt(2, 300);
-    expect(s.pxPerSecond).toBe(40);
-    expect((300 + s.scrollX) / s.pxPerSecond).toBeCloseTo(t, 9);
-    s.pan(-1e6);
-    expect(s.scrollX).toBe(0);
-  });
-
-  it('seeking off screen scrolls the playhead into view', () => {
-    const s = loaded();
-    s.viewWidth = 400;
-    s.pxPerSecond = 20; // 20 s visible
-    s.seek(60);
-    const x = s.playhead * s.pxPerSecond - s.scrollX;
-    expect(x).toBeGreaterThanOrEqual(0);
-    expect(x).toBeLessThanOrEqual(400);
-  });
-});
-
-describe('EditorStore seek requests', () => {
-  it('every seek is a new request, even to the time the engine last reported', () => {
-    const s = new EditorStore();
-    s.load(media());
-    s.playhead = 90; // the engine reporting that playback ran to the end
-    const before = s.seekSeq;
-    s.command('home');
-    s.command('end');
-    expect(s.playhead).toBe(90);
-    expect(s.seekSeq).toBe(before + 2);
-  });
-
-  it('a cut mid-drag records the drag and the cut as separate undo steps', () => {
-    const s = new EditorStore();
-    s.load(media());
-    s.seek(44);
-    s.command('cut');
-    s.snapping = false;
-    const steps = s.history.past.length;
-    s.beginEdgeDrag(s.timeline.video[0].id, 'end');
-    s.dragEdgeTo(40);
-    s.seek(20);
-    s.command('cut');
-    expect(s.history.past.length).toBe(steps + 2);
-    s.command('undo');
-    expect(cutCount(s.timeline)).toBe(1);
-    expect(s.timeline.video[0].src[1]).toBeCloseTo(40, 9);
-  });
-});
-
 describe('EditorStore queue and exports', () => {
   const FILES = ['C:\\clips\\a.mp4', 'C:\\clips\\b.mp4', 'C:\\clips\\c.mp4'];
   /** The folder's newer videos, after the queued ones. */
@@ -647,7 +36,8 @@ describe('EditorStore queue and exports', () => {
   let nextJob = 100;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    // Every test starts from these answers: one test's own mock implementations never leak into the next.
+    vi.resetAllMocks();
     nextJob = 100;
     vi.mocked(api.open).mockImplementation(async (path) =>
       media({ session: sessionOf(path), path, file_name: path.split('\\').pop()!, modified_ms: modifiedOf(path) }),
@@ -656,10 +46,17 @@ describe('EditorStore queue and exports', () => {
     vi.mocked(api.discard).mockResolvedValue(undefined);
     vi.mocked(api.adjacentFile).mockResolvedValue(null);
     // Like the Rust side: oldest first.
-    vi.mocked(api.orderFiles).mockImplementation(async (paths) => [...paths].sort((x, y) => modifiedOf(x) - modifiedOf(y)));
+    vi.mocked(api.orderFiles).mockImplementation(async (paths) =>
+      [...paths].sort((x, y) => modifiedOf(x) - modifiedOf(y)),
+    );
     vi.mocked(api.close).mockResolvedValue(undefined);
     vi.mocked(api.peaks).mockResolvedValue({ rate: 10, values: [] });
     vi.mocked(api.thumbs).mockResolvedValue([]);
+  });
+
+  // Puts back spies such as a silenced console.error, even when a test fails.
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   /** A store with `files` queued and the first one open. */
@@ -756,7 +153,7 @@ describe('EditorStore queue and exports', () => {
     expect(s.locked).toBe(true);
   });
 
-  it("a video export reads queued until it starts, then follows its progress, and done shows what was saved", async () => {
+  it('a video export reads queued until it starts, then follows its progress, and done shows what was saved', async () => {
     const s = await queued();
     await s.exportClip('quick');
     expect(s.videoExport).toMatchObject({ action: 'quick', state: 'queued', fraction: 0 });
@@ -778,9 +175,17 @@ describe('EditorStore queue and exports', () => {
     cut(s);
     await s.exportClip('quick');
     s.applyEvent({ type: 'ExportStarted', id: 100, input: FILES[0] });
-    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'Out of disk space.', original_intact: true });
+    s.applyEvent({
+      type: 'ExportFailed',
+      id: 100,
+      input: FILES[0],
+      message: 'Out of disk space.',
+      original_intact: true,
+    });
     expect(s.videoExport).toMatchObject({ state: 'failed', message: 'Out of disk space.', originalIntact: true });
-    expect(s.exports.failed).toEqual([{ id: 100, input: FILES[0], message: 'Out of disk space.', originalIntact: true }]);
+    expect(s.exports.failed).toEqual([
+      { id: 100, input: FILES[0], message: 'Out of disk space.', originalIntact: true },
+    ]);
     expect(s.locked).toBe(false);
     cut(s, 30);
     expect(s.timeline.video).toHaveLength(3);
@@ -790,7 +195,7 @@ describe('EditorStore queue and exports', () => {
     expect(s.videoExport).toMatchObject({ state: 'queued' });
   });
 
-  it("export audio shows its progress and leaves the clip editable", async () => {
+  it('export audio shows its progress and leaves the clip editable', async () => {
     const s = await queued();
     s.fit20 = true;
     cut(s);
@@ -1310,6 +715,49 @@ describe('EditorStore queue and exports', () => {
     expect(s.discardFailure).toBeNull();
   });
 
+  // --- starting the window -----------------------------------------------------------------
+
+  it('start listens for events before telling Rust it is ready, then opens the oldest file', async () => {
+    const order: string[] = [];
+    vi.mocked(api.onEvent).mockImplementation(async () => {
+      order.push('listen');
+      return () => {};
+    });
+    vi.mocked(api.files).mockImplementation(async () => {
+      order.push('files');
+      return [FILES[1], FILES[0]];
+    });
+    vi.mocked(api.ready).mockImplementation(async () => {
+      order.push('ready');
+    });
+    const s = new EditorStore();
+    await s.start();
+    expect(order).toEqual(['listen', 'files', 'ready']);
+    expect(s.current).toEqual({ path: FILES[0], at: 0 });
+    expect(s.error).toBeNull();
+  });
+
+  it("start says so when it can't get the files to trim", async () => {
+    vi.mocked(api.onEvent).mockResolvedValue(() => {});
+    vi.mocked(api.files).mockRejectedValue(new Error('ipc down'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const s = new EditorStore();
+    await s.start();
+    expect(s.error).toMatch(/couldn't start/i);
+    expect(api.ready).not.toHaveBeenCalled();
+    expect(logged).toHaveBeenCalledWith('The editor could not start', expect.any(Error));
+  });
+
+  it('a Files event whose merge fails is logged, not left as an unhandled rejection', async () => {
+    const s = await queued(FILES.slice(0, 1));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(s, 'addFiles').mockRejectedValueOnce(new Error('boom'));
+    s.applyEvent({ type: 'Files', paths: [FILES[1]] });
+    await settle();
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith('Adding files failed', expect.objectContaining({ message: 'boom' }));
+  });
+
   // --- more files, and the results list ----------------------------------------------------
 
   it('Files events merge into the queue, once per path, ordered by date', async () => {
@@ -1376,6 +824,19 @@ describe('EditorStore queue and exports', () => {
     expect(s.media?.path).toBe(FILES[1]); // the open clip stays
     await s.nextVideo();
     expect(s.current).toEqual({ path: E, at: 1 });
+  });
+
+  it('a file queued while Next reads the folder opens as the queued file it now is', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    vi.mocked(api.adjacentFile).mockImplementationOnce(async () => {
+      s.applyEvent({ type: 'Files', paths: [FILES[1]] }); // lands mid-walk
+      await settle();
+      return FILES[1];
+    });
+    await s.nextVideo();
+    expect(s.current).toEqual({ path: FILES[1], at: 1 });
+    expect(s.queue).toEqual({ files: [FILES[0], FILES[1]], next: 2 });
   });
 
   it('files arriving with nothing left open open the first of them', async () => {

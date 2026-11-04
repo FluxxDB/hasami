@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { TRACK_COLORS, cropPlacement, fileName, formatClock, formatDb, metaLine, mixHex, trackColor } from './display';
+import {
+  TRACK_COLORS,
+  cropPlacement,
+  fileName,
+  formatClock,
+  formatDb,
+  metaLine,
+  mixHex,
+  nearestThumb,
+  trackColor,
+} from './display';
 import type { EditorMedia } from './api';
 
 describe('formatClock', () => {
@@ -68,7 +78,7 @@ describe('metaLine', () => {
 
 describe('fileName', () => {
   it('keeps the last part of a Windows or POSIX path', () => {
-    expect(fileName('C:\\Users\\ledan\\Videos\\Replay 1.mp4')).toBe('Replay 1.mp4');
+    expect(fileName('C:\\Videos\\Replay 1.mp4')).toBe('Replay 1.mp4');
     expect(fileName('/tmp/a.mkv')).toBe('a.mkv');
     expect(fileName('a.mp4')).toBe('a.mp4');
   });
@@ -90,5 +100,19 @@ describe('cropPlacement', () => {
     expect(a.top).toBeCloseTo(0, 9);
     expect(a.width).toBeCloseTo((1920 / 1720) * 100, 9);
     expect(a.height).toBe(100);
+  });
+});
+
+describe('nearestThumb', () => {
+  const thumbs = [0, 2, 4, 6].map((t) => ({ t, file: `t${t}.jpg` }));
+
+  it('picks the thumbnail taken nearest the time, the earlier one on a tie', () => {
+    expect(nearestThumb(thumbs, 2.9)?.file).toBe('t2.jpg');
+    expect(nearestThumb(thumbs, 3)?.file).toBe('t2.jpg');
+    expect(nearestThumb(thumbs, 99)?.file).toBe('t6.jpg');
+  });
+
+  it('is null with no thumbnails', () => {
+    expect(nearestThumb([], 3)).toBeNull();
   });
 });

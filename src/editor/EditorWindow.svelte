@@ -1,4 +1,9 @@
 <script lang="ts">
+  // The Quick Trim editor window: lays out the top bar, viewer, toolbar, track headers, lanes and
+  // status bar around one EditorStore, owns the playback engine (engine.ts, kept in step by sync.ts)
+  // and the choice between the original video and its H.264 proxy (preview.ts), and turns keys
+  // into store commands (keys.ts).
+
   import { untrack } from 'svelte';
   import { api, type EditorMedia } from './api';
   import ConfirmDialog from './components/ConfirmDialog.svelte';
@@ -68,7 +73,7 @@
       stopWatch();
       sy.destroy();
       e.destroy();
-      void ctx?.close();
+      ctx?.close().catch((err) => console.warn('Closing the AudioContext failed', err));
       engine = null;
       sync = null;
     };
@@ -183,9 +188,28 @@
   // --- keyboard ------------------------------------------------------------------------------
 
   // Taps that mean "once": holding the key down shouldn't repeat them.
-  const NO_REPEAT = new Set<Command>(['playPause', 'J', 'K', 'L', 'cut', 'delete', 'toggleSnap', 'toggleLinked', 'selectAtPlayhead']);
+  const NO_REPEAT = new Set<Command>([
+    'playPause',
+    'J',
+    'K',
+    'L',
+    'cut',
+    'delete',
+    'toggleSnap',
+    'toggleLinked',
+    'selectAtPlayhead',
+  ]);
   // Keys a focused slider uses itself.
-  const SLIDER_KEYS = new Set<Command>(['frameBack', 'frameFwd', 'secBack', 'secFwd', 'prevCut', 'nextCut', 'home', 'end']);
+  const SLIDER_KEYS = new Set<Command>([
+    'frameBack',
+    'frameFwd',
+    'secBack',
+    'secFwd',
+    'prevCut',
+    'nextCut',
+    'home',
+    'end',
+  ]);
   const TEXT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
 
   function onKeydown(e: KeyboardEvent) {

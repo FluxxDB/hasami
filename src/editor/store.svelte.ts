@@ -1,87 +1,25 @@
-// The Quick Trim editor's state. Components render from it; edits go through `edit()` so every
-// one is an undo step. The timeline itself lives in `history.present`, except while an edge drag
-// or a volume slider is moving: that live state is `preview`, and it becomes one undo step when
-// the drag or the slider is released.
+// The Quick Trim editor's state: the clip being edited (clipEditor.svelte.ts), and the trim queue
+// around it (spec 5.7, 5.8). Components render from it.
 //
-// It also runs the trim queue (spec 5.7, 5.8): which file is open, the exports handed to the Rust
-// job queue and how they're going, and the results list. The window never closes by itself: a
-// clip stays open while it exports (a Quick / Save raw export locks it), and Prev / Next move on.
-// The queue is ordered by date, oldest first, and opens on the oldest: Next goes to the next newer
-// clip and Prev to the next older one, through the queued files and then on into the folder past
-// either end. Leaving a clip (Prev, Next, Discard) closes its editor session on the Rust side.
+// The queue: which file is open, the exports handed to the Rust job queue and how they're going
+// (exportLog.svelte.ts), and the results list. The window never closes by itself: a clip stays
+// open while it exports (a Quick / Save raw export locks it), and Prev / Next move on. The queue
+// is ordered by date, oldest first, and opens on the oldest: Next goes to the next newer clip and
+// Prev to the next older one, through the queued files and then on into the folder past either
+// end (navigation.ts). Leaving a clip (Prev, Next, Discard) closes its editor session on the Rust
+// side.
 
-import { api, type EditorEvent, type EditorMedia, type Peaks, type Thumb } from './api';
-import { SNAP_PX, zoomAround } from './geometry';
-import { initHistory, isEdited, push, redo, undo, type History } from './history';
-import type { Command } from './keys';
-import { STOPPED, nextCut, prevCut, shuttle, stepFrames, type Shuttle } from './playbackModel';
-import {
-  createTimeline,
-  cutAt,
-  deleteJoin,
-  deleteSegs,
-  linkedIds,
-  MASTER_STEP_DB,
-  moveEdge,
-  quantize,
-  segLen,
-  setGain,
-  setMaster,
-  setMuted,
-  snap,
-  snapCandidates,
-  hasAudibleAudio,
-  toExportRequest,
-  videoEnd,
-  type Crop,
-  type ExportRequest,
-  type Timeline,
-} from './timeline';
+import { api, type EditorEvent, type EditorMedia } from './api';
+import { ClipEditor } from './clipEditor.svelte';
+import { ExportLog, inFlight, type ExportMode, type Exports, type LogEntry, type Result } from './exportLog.svelte';
+import { folderStep, queueStep, type Current, type Direction, type Queue } from './navigation';
+import { toExportRequest } from './timeline';
 
-export type ExportMode = ExportRequest['mode'];
-
-type LogEntry =
-  /** `visit` is the stay on the clip it was started from (see `EditorStore.visit`). */
-  | { action: ExportMode; id: number; input: string; visit: number }
-  /**
-   * A discard of a clip with exports still to finish (an Export audio still queued reads the
-   * file) is carried out by the Rust side once they're done; `Discard*` events report it.
-   */
-  | { action: 'discard'; input: string; state: 'waiting' | 'done' | 'kept'; message?: string };
 /** What the unsaved-edits dialog is asking about: closing, moving on (Prev / Next), or Discard. */
 export type ConfirmKind = 'close' | 'move' | 'discard';
-/** Next video goes to the next newer clip, Prev to the next older one. */
-export type Direction = 'next' | 'prev';
-
-/** One line of the results list: something done to a file, and how it stands. */
-export interface Result {
-  input: string;
-  action: ExportMode | 'discard';
-  /**
-   * An export is `queued` until the job queue starts it. A discard is `running` while it waits
-   * for an export, `none` once done, and `failed` when it kept the clip.
-   */
-  state: 'queued' | 'running' | 'done' | 'failed' | 'none';
-  fraction: number;
-  output?: string;
-  bytes?: number;
-  /** Said about a saved export, e.g. that its 20 MB copy couldn't be made. */
-  note?: string;
-  message?: string;
-  originalIntact?: boolean;
-}
-
-/**
- * The file that's open (or opening, or failed to open). `at` is its place in the queue, null for
- * one from the folder; `side` says which end of the queue such a folder clip lies past.
- */
-export interface Current {
-  path: string;
-  at: number | null;
-  side?: 'older' | 'newer';
-}
 
 // Shown when a command fails without a message of its own.
+const START_FAILED = "The editor couldn't start. Close this window and try Quick Trim again.";
 const OPEN_FAILED = "Couldn't open this clip.";
 const EXPORT_FAILED = "Couldn't start the export.";
 const DISCARD_FAILED = "Couldn't send this clip to the Recycle Bin.";
@@ -93,83 +31,14 @@ const LOOK_FAILED: Record<Direction, string> = {
 /** The Rust commands answer failures with a plain-language string. */
 const plain = (err: unknown, fallback: string): string => (typeof err === 'string' && err ? err : fallback);
 
-// How a video export's bitrate is chosen, mirrored from `export_bitrate` and
-// `source_video_bitrate` in src-tauri/src/editor/request.rs (keep them in step) for the estimate.
-/** Source codecs that get more bitrate when re-encoded as H.264 (request.rs `DENSER_CODECS`). */
-const DENSER_CODECS = ['hevc', 'av1', 'vp9'];
-/** How much more (request.rs `DENSER_CODEC_FACTOR`). */
-const DENSER_CODEC_FACTOR = 1.3;
-/** Assumed per source audio track (request.rs `AUDIO_TRACK_BPS`); also the export's one AAC track. */
-const AUDIO_TRACK_BPS = 192_000;
-/** The lowest video bitrate an export uses (request.rs `source_video_bitrate`). */
-const MIN_VIDEO_BPS = 1_000_000;
-
-/** Keyboard commands that change the timeline, refused while the clip is locked. */
-const EDITS = new Set<Command>(['cut', 'delete', 'undo', 'redo']);
-/** How many clips on their way out the folder walk passes over before it gives up. */
-const MAX_PASSED = 50;
-
-const DEFAULT_FPS = 30; // for audio-only files, which have no frame rate of their own
-const PLAY_1X: Shuttle = { dir: 1, speed: 1 };
-/** Room kept after the end of the material when panning, so the last edge stays grabbable. */
-const PAN_MARGIN_PX = 24;
-/** How near the lanes' right edge the playhead may get while playing before the view pages. */
-const FOLLOW_MARGIN_PX = 24;
-
-const clamp = (x: number, lo: number, hi: number): number => Math.min(Math.max(x, lo), hi);
-
-export class EditorStore {
-  // Raw (not deeply reactive): history snapshots are compared by identity and never mutated.
-  media = $state.raw<EditorMedia | null>(null);
-  history = $state.raw<History<Timeline>>(initHistory(createTimeline(0, DEFAULT_FPS, [])));
-  /** The live timeline during an edge drag or a volume slide; null otherwise. */
-  preview = $state.raw<Timeline | null>(null);
-  selection = $state.raw<string[]>([]);
-  /** Written by `seek` (and by the playback engine while it plays). */
-  playhead = $state(0);
-  /**
-   * Bumped on every seek, so the window forwards each one to the playback engine, even one that
-   * lands on the time the engine last reported (the engine's own reports don't bump it).
-   */
-  seekSeq = $state(0);
-
-  pxPerSecond = $state(20);
-  scrollX = $state(0);
-  /** Width of the lanes in px, measured by the window (0 until laid out). */
-  viewWidth = $state(0);
-  /** Set by `load`; the window fits the clip to the lanes once it knows their width. */
-  needsFit = $state(false);
-
-  linked = $state(true);
-  snapping = $state(true);
+export class EditorStore extends ClipEditor {
   /** The 20 MB copy toggle: video exports also save a ≤ 20 MB copy to Videos. */
   fit20 = $state(false);
-  showEmpty = $state(false);
-  /**
-   * Dim: everything you hear 11 dB quieter while editing. Never exported and not an undo step;
-   * it stays on across clips until turned off (spec 5.4).
-   */
-  dim = $state(false);
-  /**
-   * Keep border: exports (and the preview) keep the black border found on open instead of cropping
-   * it off (spec 5.7). Off for each clip as it opens; not an undo step.
-   */
-  keepBorder = $state(false);
-
-  peaks = $state.raw<Record<number, Peaks>>({});
-  thumbs = $state.raw<Thumb[]>([]);
-
-  shuttle = $state.raw<Shuttle>(STOPPED);
-  /** Where the dragged edge snapped to (drawn as a 1px line); null when it isn't snapped. */
-  snapAt = $state<number | null>(null);
-  /** Progress (0..1) of the H.264 preview proxy while it's being made; null otherwise. */
-  proxyFraction = $state<number | null>(null);
-
   /**
    * The files Hasami was asked to trim, oldest first. `next` is the first not opened yet; the
    * files from there on are re-sorted when more arrive.
    */
-  queue = $state<{ files: string[]; next: number }>({ files: [], next: 0 });
+  queue = $state<Queue>({ files: [], next: 0 });
   /** The file on screen; null before the first and after the last (nothing left to trim). */
   current = $state<Current | null>(null);
   /** Counts the stays on a clip: each open of one is a new visit, and its exports belong to it. */
@@ -185,23 +54,9 @@ export class EditorStore {
    * says why if it still can't (a failed check must not pass for "nothing that way").
    */
   aheadUnknown = $state.raw<Record<Direction, boolean>>({ next: false, prev: false });
-  exports = $state<{
-    /** Job ids handed to the queue and not yet finished. */
-    running: number[];
-    done: { id: number; input: string; output: string; bytes: number; note?: string }[];
-    failed: { id: number; input: string; message: string; originalIntact: boolean }[];
-    /** Latest progress (0..1) of each export the queue has started (absent: still queued). */
-    progress: Record<number, number>;
-  }>({ running: [], done: [], failed: [], progress: {} });
-  /** What was done to each file, in order, for the results list. */
-  log = $state<LogEntry[]>([]);
   /** The export being handed to the job queue (until `editor_export` answers); null otherwise. */
   handing = $state<ExportMode | null>(null);
 
-  /** A plain-language message when the clip couldn't be opened. */
-  error = $state<string | null>(null);
-  /** A plain-language message when an export couldn't start, or Next couldn't look (status bar). */
-  notice = $state<string | null>(null);
   /**
    * Why the open clip couldn't be discarded: said under the top bar, where it can't be missed,
    * until the next clip. `seq` tells one failure from the next with the same words.
@@ -213,15 +68,13 @@ export class EditorStore {
   /** An export hand-over, Next or Discard is under way; the buttons wait for it. */
   busy = $state(false);
 
+  /** The exports handed to the job queue, and everything done to each file (exportLog.svelte.ts). */
+  private readonly jobs = new ExportLog();
+
   /** Called after each clip loads (the browser mock applies its demo edits here). */
   afterLoad: ((store: EditorStore) => void) | null = null;
 
-  private drag: { segId: string; edge: 'start' | 'end'; base: Timeline } | null = null;
   private reply: ((ok: boolean) => void) | null = null;
-  /** Exports already finished, in case their last event beats `editor_export`'s answer. */
-  private finished = new Set<number>();
-  /** The timeline each export was made from, so Next and close know which edits went out. */
-  private exported = new Map<number, Timeline>();
   /**
    * Each opened file's modified time. Next finds the folder's next video from it, even once the
    * file has been recycled or moved.
@@ -238,14 +91,6 @@ export class EditorStore {
   private gone = $state.raw<ReadonlySet<string>>(new Set());
   /** `Files` batches merge one at a time (each waits for its ordering). */
   private merging: Promise<void> = Promise.resolve();
-
-  get timeline(): Timeline {
-    return this.preview ?? this.history.present;
-  }
-
-  get edited(): boolean {
-    return isEdited(this.history);
-  }
 
   /** The file that's open, opening, or failed to open; null when there's none. */
   get currentPath(): string | null {
@@ -282,87 +127,67 @@ export class EditorStore {
     return this.target('prev');
   }
 
-  get canExportAudio(): boolean {
-    return this.media !== null && hasAudibleAudio(this.timeline);
-  }
-
   /** The open clip's latest Quick / Save raw export, with how it stands; null when there's none. */
   get videoExport(): Result | null {
     if (this.handing === 'quick' || this.handing === 'save_raw') return this.handover(this.handing);
-    return this.latest((a) => a !== 'audio');
+    return this.jobs.latest(this.visit, (a) => a !== 'audio');
   }
 
   /** The open clip's latest Export audio, with how it stands; null when there's none. */
   get audioExport(): Result | null {
     if (this.handing === 'audio') return this.handover('audio');
-    return this.latest((a) => a === 'audio');
+    return this.jobs.latest(this.visit, (a) => a === 'audio');
   }
 
   /**
    * A Quick / Save raw export of the open clip is on its way or done, so its original is about
    * to move (or has): no more edits. A failed one unlocks the clip to try again.
    */
-  get locked(): boolean {
+  override get locked(): boolean {
     const v = this.videoExport;
     return v !== null && v.state !== 'failed';
   }
 
   /** The open clip has edits that no export (on its way or done) was made from. */
   get unsaved(): boolean {
-    if (!this.edited) return false;
-    const present = this.history.present;
-    return !this.log.some(
-      (l) => 'id' in l && l.visit === this.visit && this.exported.get(l.id) === present && !this.failedJob(l.id),
-    );
+    return this.edited && !this.jobs.exportedDuring(this.visit, this.history.present);
+  }
+
+  /** The exports handed to the job queue: running, done and failed. */
+  get exports(): Exports {
+    return this.jobs.exports;
+  }
+
+  /** What was done to each file, in order. */
+  get log(): LogEntry[] {
+    return this.jobs.log;
   }
 
   /** The results list's lines, in the order things were done. */
   get results(): Result[] {
-    return this.log.map((entry) => this.resultOf(entry));
-  }
-
-  /** The picture video exports keep, and the viewer shows: the border's inside, unless Keep border is on. */
-  get crop(): Crop | null {
-    const border = this.media?.border ?? null;
-    return border && !this.keepBorder ? border : null;
-  }
-
-  /**
-   * Quick export at source quality, × the kept video length: the source's video rate (its average
-   * rate less 192 kbit/s per audio track), ×1.3 for HEVC, AV1 and VP9 as the export encodes it,
-   * plus one 192 kbit/s AAC track when any audio is heard. A crop doesn't change it: the rate is
-   * the source's whatever the picture size.
-   */
-  get estimateBytes(): number {
-    const m = this.media;
-    if (!m || !(m.duration_s > 0)) return 0;
-    const sourceBps = (m.size_bytes * 8) / m.duration_s;
-    const videoBps = Math.max(MIN_VIDEO_BPS, sourceBps - AUDIO_TRACK_BPS * m.tracks.length);
-    const factor = DENSER_CODECS.includes(m.video?.codec ?? '') ? DENSER_CODEC_FACTOR : 1;
-    const audioBps = hasAudibleAudio(this.timeline) ? AUDIO_TRACK_BPS : 0;
-    return ((videoBps * factor + audioBps) / 8) * videoEnd(this.timeline);
-  }
-
-  /** Starts a fresh edit of `media`: one segment per track, nothing selected, no undo. */
-  load(media: EditorMedia): void {
-    const audio = media.tracks.filter((t) => !t.empty).map((t) => t.index);
-    this.media = media;
-    this.keepBorder = false;
-    this.history = initHistory(createTimeline(media.duration_s, media.video?.fps ?? DEFAULT_FPS, audio));
-    this.endLive();
-    this.selection = [];
-    this.movePlayhead(0);
-    this.scrollX = 0;
-    this.needsFit = true;
-    this.peaks = {};
-    this.thumbs = [];
-    this.shuttle = STOPPED;
-    this.proxyFraction = null;
-    this.error = null;
-    this.notice = null;
+    return this.jobs.results;
   }
 
   // --- queue -------------------------------------------------------------------------------
+
+  /**
+   * Starts the window: listens for the Rust side's events, tells it so (it holds them until then),
+   * and opens the files it was asked to trim; later batches arrive as `Files` events.
+   */
+  async start(): Promise<void> {
+    let files: string[];
+    try {
+      await api.onEvent((e) => this.applyEvent(e));
+      files = await api.files();
+    } catch (err) {
+      console.error('The editor could not start', err);
+      this.error = START_FAILED;
+      return;
+    }
+    const opening = this.addFiles(files);
+    api.ready().catch((err) => console.error('editor_ready failed', err));
+    await opening.catch((err) => console.error('Opening the first clip failed', err));
+  }
 
   /**
    * Merges files into the part of the queue not opened yet and sorts that part by date, oldest
@@ -381,7 +206,7 @@ export class EditorStore {
   private async merge(paths: string[]): Promise<void> {
     const q = this.queue;
     const ahead = q.files.slice(q.next);
-    const pending = new Set([...ahead, ...(this.current ? [this.current.path] : []), ...this.leaving()]);
+    const pending = new Set([...ahead, ...(this.current ? [this.current.path] : []), ...this.jobs.leaving()]);
     const fresh: string[] = [];
     for (const p of paths) {
       if (pending.has(p)) continue;
@@ -411,7 +236,7 @@ export class EditorStore {
   async exportClip(mode: ExportMode): Promise<void> {
     const m = this.media;
     if (!m || this.busy || this.locked) return;
-    if (mode === 'audio' && (!this.canExportAudio || this.inFlight(this.audioExport))) return;
+    if (mode === 'audio' && (!this.canExportAudio || inFlight(this.audioExport))) return;
     this.commitLive();
     const fit20 = mode !== 'audio' && this.fit20;
     const timeline = this.history.present;
@@ -429,9 +254,7 @@ export class EditorStore {
         this.notice = plain(err, EXPORT_FAILED);
         return;
       }
-      this.exported.set(id, timeline);
-      this.log.push({ action: mode, id, input: m.path, visit });
-      this.track(id);
+      this.jobs.addExport(mode, id, m.path, visit, timeline);
     } finally {
       this.handing = null;
       this.busy = false;
@@ -493,14 +316,13 @@ export class EditorStore {
       await this.leave();
       // An export of this clip still to finish (an Export audio) needs the file: the Rust side
       // recycles it after that, or keeps it if the export fails.
-      const after = this.runningExportsOf(path);
+      const after = this.jobs.runningExportsOf(path);
       // Logged before asking: Rust may report the outcome (Discard*) before its reply arrives.
-      const at = this.log.length;
-      this.log.push({ action: 'discard', input: path, state: after.length > 0 ? 'waiting' : 'done' });
+      const unlog = this.jobs.addDiscard(path, after.length > 0);
       try {
         await api.discard(path, after);
       } catch (err) {
-        this.log.splice(at, 1);
+        unlog();
         await this.open(path);
         this.discardFailure = { message: plain(err, DISCARD_FAILED), seq: ++this.discardFailures };
         return;
@@ -549,47 +371,18 @@ export class EditorStore {
 
   /** Applies an event from the Rust side. */
   applyEvent(e: EditorEvent): void {
-    const x = this.exports;
     switch (e.type) {
       case 'Files':
-        void this.addFiles(e.paths);
-        return;
-      case 'ExportStarted':
-        this.track(e.id);
-        if (x.running.includes(e.id) && !(e.id in x.progress)) x.progress[e.id] = 0;
-        return;
-      case 'ExportProgress':
-        if (x.running.includes(e.id)) x.progress[e.id] = e.fraction;
-        return;
-      case 'ExportDone': {
-        this.finish(e.id);
-        x.done.push({ id: e.id, input: e.input, output: e.output, bytes: e.bytes, note: e.note });
-        // A Quick / Save raw export has recycled or moved its original by now.
-        const entry = this.log.find((l) => 'id' in l && l.id === e.id);
-        if (entry && (entry.action === 'quick' || entry.action === 'save_raw')) this.markGone(entry.input);
-        this.refreshAhead();
-        return;
-      }
-      case 'ExportFailed':
-        this.finish(e.id);
-        x.failed.push({ id: e.id, input: e.input, message: e.message, originalIntact: e.original_intact });
-        // Its original usually stayed, and Prev / Next may reach it again; but not when it was
-        // recycled and the new file then couldn't take its name (spec 8.3).
-        if (!e.original_intact) this.markGone(e.input);
-        this.refreshAhead();
+        this.addFiles(e.paths).catch((err) => console.error('Adding files failed', err));
         return;
       case 'ProxyProgress':
         if (e.session === this.media?.session && this.proxyFraction !== null) this.proxyFraction = e.fraction;
         return;
-      case 'DiscardDone':
-      case 'DiscardKept': {
-        const entry = this.log.find((l) => l.action === 'discard' && l.input === e.path && l.state === 'waiting');
-        if (entry?.action !== 'discard') return;
-        entry.state = e.type === 'DiscardDone' ? 'done' : 'kept';
-        if (e.type === 'DiscardKept') entry.message = e.message;
-        else this.markGone(e.path);
-        this.refreshAhead();
-        return;
+      default: {
+        const { gone, ended } = this.jobs.apply(e);
+        if (gone) this.markGone(gone);
+        // An export or discard that ended can change which clips are on their way out.
+        if (ended) this.refreshAhead();
       }
     }
   }
@@ -691,132 +484,31 @@ export class EditorStore {
     return this.queueStep(from, dir) ?? (await this.folderStep(from, dir));
   }
 
-  /**
-   * The queued file Prev / Next go to from `from`, passing over files on their way out or gone;
-   * null when that way leads into the folder. From a queued file the step is to its neighbour.
-   * From a folder clip past the newer end, Next goes to the first queued file not opened yet
-   * (more arrived meanwhile); every other folder step is the folder's.
-   */
   private queueStep(from: Current, dir: Direction): Current | null {
-    const q = this.queue;
-    let at: number;
-    if (from.at !== null) at = from.at;
-    else if (dir === 'next' && from.side === 'newer') at = q.next - 1;
-    else return null;
-    const skip = this.unavailable();
-    const by = dir === 'next' ? 1 : -1;
-    for (let i = at + by; i >= 0 && i < q.files.length; i += by) {
-      const p = q.files[i];
-      if (p !== from.path && !skip.has(p)) return { path: p, at: i };
-    }
-    return null;
+    return queueStep(this.queue, from, dir, this.unavailable());
   }
 
-  /**
-   * The folder's next newer (Next) or older (Prev) video from `from`, passing over clips on their
-   * way out (a Quick / Save raw export or a discard still to finish). One that's queued takes its
-   * place in the queue, so walking back from the folder carries on through the queue. Null when
-   * there's nothing that way, or nothing known about `from` (it never opened).
-   */
-  private async folderStep(from: Current, dir: Direction): Promise<Current | null> {
-    const newer = dir === 'next';
-    const leaving = this.leaving();
-    let path = from.path;
-    for (let i = 0; i < MAX_PASSED; i++) {
-      const ms = this.modified.get(path);
-      if (ms === undefined) return null;
-      const found = await api.adjacentFile(path, ms, newer);
-      if (found === null) return null;
-      if (!leaving.has(found)) {
-        const files = this.queue.files;
-        const at = newer ? files.indexOf(found) : files.lastIndexOf(found);
-        if (at >= 0) return { path: found, at };
-        // Past the queue's newer or older end; a folder clip stays on the side it was on.
-        return { path: found, at: null, side: from.at === null ? from.side : newer ? 'newer' : 'older' };
-      }
-      path = found;
-    }
-    return null;
+  private folderStep(from: Current, dir: Direction): Promise<Current | null> {
+    return folderStep(from, dir, {
+      queuedFiles: () => this.queue.files,
+      modified: this.modified,
+      leaving: this.jobs.leaving(),
+      adjacentFile: (path, ms, newer) => api.adjacentFile(path, ms, newer),
+    });
   }
 
   /** Files Prev / Next pass over in the queue: on their way out, or gone. */
   private unavailable(): Set<string> {
-    return new Set([...this.leaving(), ...this.gone]);
+    return new Set([...this.jobs.leaving(), ...this.gone]);
   }
 
   private markGone(path: string): void {
     if (!this.gone.has(path)) this.gone = new Set([...this.gone, path]);
   }
 
-  /** Files waiting to be recycled or moved: as good as gone, so they're never opened again. */
-  private leaving(): Set<string> {
-    const running = new Set(this.exports.running);
-    return new Set(
-      this.log.flatMap((l) =>
-        (l.action === 'discard' && l.state === 'waiting') ||
-        ((l.action === 'quick' || l.action === 'save_raw') && running.has(l.id))
-          ? [l.input]
-          : [],
-      ),
-    );
-  }
-
-  /** The open clip's latest export of the kind `pick` accepts, in this visit. */
-  private latest(pick: (action: ExportMode) => boolean): Result | null {
-    for (let i = this.log.length - 1; i >= 0; i--) {
-      const l = this.log[i];
-      if ('id' in l && l.visit === this.visit && pick(l.action)) return this.resultOf(l);
-    }
-    return null;
-  }
-
   /** An export being handed over reads as queued. */
   private handover(action: ExportMode): Result {
     return { input: this.currentPath ?? '', action, state: 'queued', fraction: 0 };
-  }
-
-  private inFlight(r: Result | null): boolean {
-    return r !== null && (r.state === 'queued' || r.state === 'running');
-  }
-
-  private failedJob(id: number): boolean {
-    return this.exports.failed.some((f) => f.id === id);
-  }
-
-  private resultOf(entry: LogEntry): Result {
-    const e = this.exports;
-    if (entry.action === 'discard') {
-      const state = entry.state === 'done' ? 'none' : entry.state === 'kept' ? 'failed' : 'running';
-      return { input: entry.input, action: 'discard', state, fraction: 0, message: entry.message };
-    }
-    const { id, input, action } = entry;
-    const done = e.done.find((d) => d.id === id);
-    if (done) return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes, note: done.note };
-    const failed = e.failed.find((f) => f.id === id);
-    if (failed) {
-      const { message, originalIntact } = failed;
-      return { input, action, state: 'failed', fraction: 0, message, originalIntact };
-    }
-    if (id in e.progress) return { input, action, state: 'running', fraction: e.progress[id] };
-    return { input, action, state: 'queued', fraction: 0 };
-  }
-
-  /** Follows export `id` until it finishes (a no-op for one already followed or finished). */
-  private track(id: number): void {
-    if (!this.finished.has(id) && !this.exports.running.includes(id)) this.exports.running.push(id);
-  }
-
-  private finish(id: number): void {
-    this.finished.add(id);
-    const x = this.exports;
-    x.running = x.running.filter((r) => r !== id);
-    delete x.progress[id];
-  }
-
-  /** The job ids of exports of `path` still queued or running. */
-  private runningExportsOf(path: string): number[] {
-    const running = new Set(this.exports.running);
-    return this.log.flatMap((l) => ('id' in l && l.input === path && running.has(l.id) ? [l.id] : []));
   }
 
   /**
@@ -826,274 +518,12 @@ export class EditorStore {
   private leave(): Promise<void> {
     this.openSeq += 1; // an open still in flight is no longer wanted
     const closed = this.media ? this.closeSession(this.media.session) : Promise.resolve();
-    this.media = null;
-    this.history = initHistory(createTimeline(0, DEFAULT_FPS, []));
-    this.endLive();
-    this.selection = [];
-    this.movePlayhead(0);
-    this.peaks = {};
-    this.thumbs = [];
-    this.shuttle = STOPPED;
-    this.proxyFraction = null;
-    this.error = null;
-    this.notice = null;
+    this.clear();
     this.discardFailure = null;
     return closed;
   }
 
   private closeSession(session: number): Promise<void> {
     return api.close(session).catch((err) => console.error('editor_close failed', err));
-  }
-
-  /** Records `next` as an undo step (a no-op edit that returns the same timeline records nothing). */
-  edit(next: Timeline): void {
-    this.endLive();
-    if (this.locked) return;
-    this.history = push(this.history, next);
-    this.afterChange();
-  }
-
-  // --- keyboard and buttons ----------------------------------------------------------------
-
-  /** Runs one keyboard command (keys.ts) against the timeline, selection, playhead and shuttle. */
-  command(c: Command): void {
-    // A locked clip's original is about to move: it takes no more edits, but still plays.
-    if (this.locked && EDITS.has(c)) return;
-    // An edit made mid-drag (or mid-slide) lands on top of it as its own undo step.
-    if (c === 'cut' || c === 'delete') this.commitLive();
-    const tl = this.timeline;
-    const end = videoEnd(tl);
-    switch (c) {
-      case 'playPause':
-        if (this.shuttle.dir !== 0) {
-          this.shuttle = STOPPED;
-        } else {
-          // From the end, play starts over (there's nothing left to play).
-          if (this.playhead >= end - 0.5 / tl.fps) this.seek(0);
-          this.shuttle = PLAY_1X;
-        }
-        return;
-      case 'J':
-      case 'K':
-      case 'L':
-        this.shuttle = shuttle(this.shuttle, c);
-        return;
-      case 'frameBack':
-      case 'frameFwd':
-      case 'secBack':
-      case 'secFwd': {
-        // A step means "show me that frame", so it stops playback, as in Resolve.
-        this.shuttle = STOPPED;
-        const n = { frameBack: -1, frameFwd: 1, secBack: -tl.fps, secFwd: tl.fps }[c];
-        this.seek(stepFrames(this.playhead, tl.fps, n, end));
-        return;
-      }
-      case 'prevCut':
-        this.seek(prevCut(tl, this.playhead));
-        return;
-      case 'nextCut':
-        this.seek(nextCut(tl, this.playhead));
-        return;
-      case 'home':
-        this.seek(0);
-        return;
-      case 'end':
-        this.seek(end);
-        return;
-      case 'cut': {
-        // With a selected clip under the playhead, only the selection is cut; otherwise every
-        // track. The left pieces keep their ids, so the selection stays on them.
-        const t = this.playhead;
-        const sel = new Set(this.selection);
-        const underPlayhead = [...tl.video, ...tl.audio.flatMap((a) => a.segs)].some(
-          (s) => sel.has(s.id) && s.at < t && t < s.at + segLen(s),
-        );
-        this.edit(underPlayhead ? cutAt(tl, t, this.selection) : cutAt(tl, t));
-        return;
-      }
-      case 'delete':
-        // The deleted ids drop out of the selection in afterChange.
-        if (this.selection.length > 0) {
-          // The playhead lands at the join; an audio-only delete (no join) leaves it be.
-          const join = deleteJoin(tl, this.selection, this.linked);
-          this.edit(deleteSegs(tl, this.selection, this.linked));
-          if (join !== null && this.timeline !== tl) this.seek(join);
-        }
-        return;
-      case 'undo':
-      case 'redo':
-        this.endLive();
-        this.history = c === 'undo' ? undo(this.history) : redo(this.history);
-        this.afterChange();
-        return;
-      case 'toggleSnap':
-        this.snapping = !this.snapping;
-        return;
-      case 'toggleLinked':
-        this.linked = !this.linked;
-        return;
-      case 'selectAtPlayhead': {
-        // The video piece under the playhead (on a cut, the one that starts there), picked as a
-        // click would pick it. With no video there, the selection stays as it was.
-        const t = this.playhead;
-        const seg = tl.video.find((s) => t >= s.at && t < s.at + segLen(s));
-        if (seg) this.selectAt(seg.id);
-        return;
-      }
-    }
-  }
-
-  // --- selection and playhead --------------------------------------------------------------
-
-  /** Selects a segment, and with Linked on, the pieces on other tracks made by the same cuts. */
-  selectAt(segId: string): void {
-    this.selection = this.linked ? linkedIds(this.timeline, segId) : [segId];
-  }
-
-  clearSelection(): void {
-    this.selection = [];
-  }
-
-  /** Moves the playhead to `t`, on the frame grid inside [0, videoEnd], and keeps it in view. */
-  seek(t: number): void {
-    const tl = this.timeline;
-    this.movePlayhead(clamp(quantize(t, tl.fps), 0, videoEnd(tl)));
-    this.reveal();
-  }
-
-  /** While playing: pages the view when the playhead runs off either side. */
-  follow(): void {
-    const w = this.viewWidth;
-    if (w <= 0) return;
-    const at = this.playhead * this.pxPerSecond;
-    const x = at - this.scrollX;
-    if (x > w - FOLLOW_MARGIN_PX) this.setScroll(at - FOLLOW_MARGIN_PX);
-    else if (x < 0) this.setScroll(at - (w - FOLLOW_MARGIN_PX));
-  }
-
-  /** Scrolls so an off-screen playhead lands in the middle of the lanes. */
-  private reveal(): void {
-    const w = this.viewWidth;
-    if (w <= 0) return;
-    const x = this.playhead * this.pxPerSecond - this.scrollX;
-    if (x < 0 || x > w) this.setScroll(this.playhead * this.pxPerSecond - w / 2);
-  }
-
-  // --- zoom and pan ------------------------------------------------------------------------
-
-  /** Zooms by `factor` around `anchorX` (px from the lanes' left edge). */
-  zoomAt(factor: number, anchorX: number): void {
-    const z = zoomAround(this.pxPerSecond, factor, anchorX, this.scrollX);
-    this.pxPerSecond = z.pxPerSecond;
-    this.setScroll(z.scrollX);
-  }
-
-  /** Scrolls the lanes by `dx` px (positive = later). */
-  pan(dx: number): void {
-    this.setScroll(this.scrollX + dx);
-  }
-
-  /** Never before 0, and never so far that the material leaves the lanes entirely. */
-  private setScroll(x: number): void {
-    const tl = this.timeline;
-    const ends = tl.audio.flatMap((a) => a.segs.map((s) => s.at + segLen(s)));
-    const contentPx = Math.max(videoEnd(tl), ...ends) * this.pxPerSecond;
-    const max = this.viewWidth > 0 ? Math.max(0, contentPx + PAN_MARGIN_PX - this.viewWidth) : Infinity;
-    this.scrollX = clamp(x, 0, max);
-  }
-
-  // --- edge drags --------------------------------------------------------------------------
-
-  beginEdgeDrag(segId: string, edge: 'start' | 'end'): void {
-    this.endLive();
-    if (this.locked) return;
-    this.drag = { segId, edge, base: this.history.present };
-  }
-
-  /** Moves the dragged edge to `t` (snapped when Snap is on); shown live, not yet an undo step. */
-  dragEdgeTo(t: number): void {
-    const d = this.drag;
-    if (!d) return;
-    let to = t;
-    this.snapAt = null;
-    if (this.snapping) {
-      const candidates = snapCandidates(d.base, this.playhead, { segId: d.segId, edge: d.edge }, this.linked);
-      const snapped = snap(t, candidates, SNAP_PX / this.pxPerSecond);
-      if (snapped !== t) {
-        to = snapped;
-        this.snapAt = snapped;
-      }
-    }
-    this.preview = moveEdge(d.base, d.segId, d.edge, to, this.linked);
-  }
-
-  /** Releases the drag: the whole drag becomes one undo step (none if nothing changed). */
-  endEdgeDrag(): void {
-    if (!this.drag) return;
-    this.edit(this.preview ?? this.drag.base);
-  }
-
-  // --- track volume and mute ---------------------------------------------------------------
-
-  /** Sets a track's gain. While the slider moves (`commit` false) it's live only; release records it. */
-  setGain(index: number, db: number, commit: boolean): void {
-    if (commit) {
-      this.edit(setGain(this.history.present, index, db));
-    } else if (!this.locked) {
-      this.drag = null;
-      this.preview = setGain(this.preview ?? this.history.present, index, db);
-    }
-  }
-
-  /** Sets the master volume. While the slider moves (`commit` false) it's live only; release records it. */
-  setMaster(db: number, commit: boolean): void {
-    if (commit) {
-      this.edit(setMaster(this.history.present, db));
-    } else if (!this.locked) {
-      this.drag = null;
-      this.preview = setMaster(this.preview ?? this.history.present, db);
-    }
-  }
-
-  /** The master − / + buttons: one 3 dB step, one undo entry (none once clamped). */
-  nudgeMaster(dir: 1 | -1): void {
-    this.edit(setMaster(this.history.present, this.history.present.masterDb + dir * MASTER_STEP_DB));
-  }
-
-  toggleMute(index: number): void {
-    const track = this.history.present.audio.find((a) => a.index === index);
-    if (track) this.edit(setMuted(this.history.present, index, !track.muted));
-  }
-
-  // --- internals ---------------------------------------------------------------------------
-
-  private movePlayhead(t: number): void {
-    this.playhead = t;
-    this.seekSeq += 1;
-  }
-
-  /** Records a live drag or slide as its undo step now. */
-  private commitLive(): void {
-    if (this.preview) this.edit(this.preview);
-    else this.endLive();
-  }
-
-  /** Drops any live drag or slide state. */
-  private endLive(): void {
-    this.drag = null;
-    this.preview = null;
-    this.snapAt = null;
-  }
-
-  /** After the timeline changes: the playhead stays inside the video, the selection on real segs. */
-  private afterChange(): void {
-    const tl = this.timeline;
-    const end = videoEnd(tl);
-    if (this.playhead > end) this.movePlayhead(end);
-    if (this.selection.length > 0) {
-      const ids = new Set([...tl.video, ...tl.audio.flatMap((a) => a.segs)].map((s) => s.id));
-      const kept = this.selection.filter((id) => ids.has(id));
-      if (kept.length !== this.selection.length) this.selection = kept;
-    }
   }
 }

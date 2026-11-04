@@ -66,6 +66,16 @@ body {
   letter-spacing: 0.071em;
 }
 
+/* Read out by screen readers, never shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 ::selection {
   background: var(--graphite);
   color: var(--bone);
