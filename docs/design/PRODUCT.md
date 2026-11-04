@@ -2,7 +2,7 @@
 
 <!-- impeccable:product-schema 1 -->
 
-> Written by the Plan 2 Task 9 implementer from `docs/superpowers/specs/2026-10-30-hasami-design.md` §1–2 (approved by Dang, 2026-10-30). No interview was possible from inside the task, so everything here is taken from the approved spec; lines marked *(inferred)* are the implementer's reading and should be confirmed.
+> Written during Plan 2 Task 9 from [the design spec](specs/2026-10-30-hasami-design.md) §1–2 (approved 2026-10-30). No interview was possible from inside the task, so everything here is taken from the approved spec; lines marked *(inferred)* are the implementer's reading and should be confirmed.
 
 ## Platform
 
@@ -10,7 +10,7 @@ web *(inferred: a Tauri 2 desktop app for Windows whose windows are WebView2 pag
 
 ## Users
 
-Dang, who records gameplay with OBS's replay buffer. His `C:\Users\ledan\Videos\Clips` holds about 600 raw clips (530 GB, ~884 MB each), and most hold only a few seconds worth keeping inside ~90 s of footage. He works through them in batches from Explorer's right-click menu. The single primary user *(inferred: no other audience is named in the spec)*.
+People who record gameplay with OBS's replay buffer and end up with a folder of hundreds of raw clips, often close to 1 GB each, where most hold only a few seconds worth keeping inside ~90 s of footage. They work through them in batches from Explorer's right-click menu. One primary user at first *(inferred: no other audience is named in the spec)*.
 
 ## Product Purpose
 
@@ -29,7 +29,7 @@ Trimming in DaVinci Resolve is too heavy for this job, so the raws pile up. Hasa
 ## Operating Context
 
 - Typical session: select a batch of raw clips → right-click → **Hasami ▸ Quick Trim** → for each clip, find the play, cut, then Quick export, Discard or Skip → the next clip loads.
-- Keyboard follows DaVinci Resolve (J/K/L, Ctrl+B, arrows, Home/End), because Dang asked for it.
+- Keyboard follows DaVinci Resolve (J/K/L, Ctrl+B, arrows, Home/End), at the owner's request.
 - Results go to Discord (hence the 20 MB limit) or stay on disk as `[CLIPPED] <name>`.
 
 ## Capabilities and Constraints
@@ -42,7 +42,7 @@ Trimming in DaVinci Resolve is too heavy for this job, so the raws pile up. Hasa
 ## Brand Commitments
 
 - Name: Hasami. Wordmark "HASAMI *quick trim*" / "HASAMI *compress*".
-- Visual authority is `docs/branding/DESIGN.md` plus spec §9 and the approved mockup `docs/superpowers/specs/assets/quick-trim-mockup.html` (recorded here only as references; the visual rules live there).
+- Visual authority is [`docs/branding/DESIGN.md`](../branding/DESIGN.md) plus spec §9 and the approved mockup [`specs/assets/quick-trim-mockup.html`](specs/assets/quick-trim-mockup.html) (recorded here only as references; the visual rules live there).
 
 ## Evidence on Hand
 
@@ -54,4 +54,4 @@ Trimming in DaVinci Resolve is too heavy for this job, so the raws pile up. Hasa
 1. Never lose a raw: safety beats speed whenever they conflict.
 2. Fast enough to feel like part of Explorer.
 3. Do one job: cut a clip down; refuse editor scope creep.
-4. Match what Dang already knows from DaVinci instead of inventing new conventions.
+4. Match what users already know from DaVinci instead of inventing new conventions.

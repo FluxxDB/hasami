@@ -1,6 +1,8 @@
-# Brainstorming / tooling scratch
+# Agent and design tooling scratch (never commit these)
 .superpowers/
 .gstack/
+.impeccable/
+.claude/
 graphify-out/
 **/graphify-out/
 
@@ -13,5 +15,5 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
-# Bundled ffmpeg (fetched by scripts/fetch-ffmpeg.ps1)
-src-tauri/binaries/*.exe
+# Bundled ffmpeg binaries and license (fetched by scripts/fetch-ffmpeg.ps1)
+src-tauri/binaries/

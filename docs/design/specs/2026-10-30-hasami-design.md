@@ -1,14 +1,14 @@
 # Hasami — Design
 
 **Date:** 2026-10-30
-**Status:** Approved by Dang (2026-10-30)
+**Status:** Approved (2026-10-30)
 **Mockup:** [assets/quick-trim-mockup.html](assets/quick-trim-mockup.html), the approved Quick Trim editor and progress window. Open it in a browser. Click a palette under the editor to see the alternatives that were considered; **Sage + ochre** is the chosen one.
 
 ---
 
 ## 1. Why this exists
 
-Dang records gameplay with OBS's replay buffer. `C:\Users\ledan\Videos\Clips` holds **600 raw clips totaling 530 GB**, about 884 MB each. Most clips hold a few seconds worth keeping inside ~90 seconds of footage. Trimming them in DaVinci Resolve is too heavy for the job, so the raws pile up.
+Gamers who record with OBS's replay buffer end up with a folder of hundreds of raw clips, often close to 1 GB each. Most clips hold a few seconds worth keeping inside ~90 seconds of footage. Trimming them in DaVinci Resolve is too heavy for the job, so the raws pile up.
 
 Hasami (Japanese for "scissors") is a small Windows app that lives in Explorer's right-click menu. You right-click a clip, cut it down to the moment, and it replaces the raw. It can also squeeze any video under Discord's 20 MB upload limit in one click, and convert between common formats.
 
@@ -32,9 +32,9 @@ Hasami (Japanese for "scissors") is a small Windows app that lives in Explorer's
 - Multi-clip projects, titles, effects, transitions, fades, color, speed changes.
 - Moving clips along the timeline. Clips can only be cut, deleted, and edge-dragged.
 - Renaming tracks, a settings screen, or a configurable size limit (20 MB is fixed).
-- The Windows 11 compact context menu. Dang uses the classic menu, and it's already enabled on the machine.
+- The Windows 11 compact context menu. Hasami registers in the classic menu ("Show more options", or the classic menu when it's enabled).
 - macOS and Linux.
-- HandBrake. Dang suggested it but explicitly made it optional; the requirement is the ≤20 MB guarantee and that no third-party UI ever appears.
+- HandBrake. It was considered but made optional; the requirement is the ≤20 MB guarantee and that no third-party UI ever appears.
 
 **Anti-goals (failure even if it "works")**
 - Deleting or moving an original before its replacement is fully written and verified.
@@ -43,16 +43,16 @@ Hasami (Japanese for "scissors") is a small Windows app that lives in Explorer's
 - A sluggish launch that makes right-click → edit feel slower than opening DaVinci.
 - Quick Export output that's visibly worse than the source.
 
-## 3. Facts about Dang's setup (from recon, 2026-10-30)
+## 3. Target environment (assumptions)
 
 | | |
 |---|---|
-| OS | Windows 11 Pro, classic context menu enabled (the `{86ca1aa0-…}` InprocServer32 override is set) |
-| GPU / CPU | AMD Radeon RX 7900 GRE (AMF encoders: `hevc_amf`, `h264_amf`, `av1_amf`) · Ryzen 7 7800X3D · plus a Parsec virtual display adapter |
-| Toolchain on Windows | Rust via scoop rustup (`cargo.exe`, `rustc.exe`), Node.js |
-| Clips | 597 `.mp4`, 3 `.webm`. Sampled clips: **HEVC Main, 1920×1080, 60 fps, yuv420p**, ~86–90 s long |
-| Video bitrate | Varies widely: **0.6 Mbps to 152 Mbps**. Some 90 s clips are 1.4–1.6 GB |
-| Audio | **3 to 6 AAC-LC stereo 48 kHz tracks** per clip. None are named (`handler_name=SoundHandler`, no title). Several are **empty** (~2 kbps average bitrate) |
+| OS | Windows 10/11, x64. On Windows 11 the entries live in the classic menu (Show more options), unless the classic menu is enabled system-wide |
+| GPU / CPU | Any. AMD's AMF H.264 encoder is used when ffmpeg can open it; otherwise libx264 on the CPU (NVENC or QSV could follow) |
+| Toolchain on Windows | Rust (rustup, MSVC target) and Node.js, run natively on Windows |
+| Clips | Mostly `.mp4`, some `.webm`. The typical source is an OBS replay: **HEVC or H.264, 1920×1080, 60 fps, yuv420p**, ~60–90 s long |
+| Video bitrate | Varies widely, from under 1 Mbps to over 150 Mbps. A 90 s clip can be well over 1 GB |
+| Audio | **Several AAC-LC stereo 48 kHz tracks** per clip is common (OBS multi-track: game, voice, music…). Tracks are usually unnamed (`handler_name=SoundHandler`, no title), and some are **empty** (~2 kbps average bitrate) |
 | Naming | OBS default: `Replay YYYY-MM-DD HH-MM-SS.mp4` |
 
 Design for the general case too: H.264, HEVC, AV1, VP9, ProRes in `.mov`, 1 to 6+ audio tracks.
@@ -62,23 +62,23 @@ Design for the general case too: H.264, HEVC, AV1, VP9, ProRes in `.mov`, 1 to 6
 Classic-menu cascading entry **Hasami ▸** on `.mp4`, `.mov`, `.mkv`, `.webm`:
 
 - **Quick Trim**: opens the editor (§5). With several files selected, it opens a trim queue (§5.8).
-- **Compress**: shrinks the file to 20 MB or less (§7). *Updated 2026-11-03 (Dang's choice):* it writes a new `[20MB] <name>.mp4` to the Windows Videos folder and keeps the original.
+- **Compress**: shrinks the file to 20 MB or less (§7). *Updated 2026-11-03 (the owner's choice):* it writes a new `[20MB] <name>.mp4` to the Windows Videos folder and keeps the original.
 - **Convert to .mp4** / **Convert to .mov** / **Convert to .mp3**: replaces the file with the new format.
 
 Behavior:
-- **Compress keeps the original (Dang's choice, 2026-11-03):**
+- **Compress keeps the original (decided 2026-11-03):**
   - The new file goes in the Windows Videos known folder (`FOLDERID_Videos`, so a moved or OneDrive Videos folder is honoured), wherever the original was.
   - It is named `[20MB] <stem>.mp4`. The prefix is never doubled, and a clash adds " (2)", " (3)"….
   - Nothing is recycled.
   - *My call:* an "Already under 20 MB" clip still produces no file.
-- **Replace semantics (Dang's choice):** Convert replaces the original. The original goes to the **Recycle Bin**, never a permanent delete, and only after the new file is verified (§8).
+- **Replace semantics (the owner's choice):** Convert replaces the original. The original goes to the **Recycle Bin**, never a permanent delete, and only after the new file is verified (§8).
 - **Naming:**
   - Convert keeps the filename and changes only the extension (*my call*).
-  - Convert to .mp3 mixes all audio tracks into one stereo track. The original video goes to the Recycle Bin, because Dang chose replace.
+  - Convert to .mp3 mixes all audio tracks into one stereo track. The original video goes to the Recycle Bin, because replace was chosen.
 - *My call:* the menu hides "Convert to .mp4" on `.mp4` files, and so on for each format.
 - *My call:* Convert to .mp4/.mov **remuxes** (no re-encode) when the codecs are legal in the target container, and re-encodes otherwise. It keeps all audio tracks.
 - **Multi-select:** Compress and Convert run on every selected file, one after another, in a single progress window showing "File 3 of 12".
-- **Progress window (Dang's choice: a small window).** Shown in the mockup. It contains:
+- **Progress window (the owner's choice: a small window).** Shown in the mockup. It contains:
   - the app wordmark with the action ("HASAMI *compress*") and the filename;
   - input size → target (e.g. "412 MB → ≤ 20 MB"), plus the chosen output resolution and fps;
   - a progress bar, the pass number, percent, time remaining, and a **Cancel** button.
@@ -117,17 +117,17 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
   - Deleting an audio segment on its own **leaves silence** and doesn't ripple, so sync holds.
   - Audio can run past the end of the video. That stretch is shown hatched and dimmed, labeled "Video ends", and dropped on export.
 - **Empty source tracks (my call):** detected on open and hidden behind a "+N empty tracks" toggle under the last audio track.
-- **Ctrl+B** cuts at the playhead. If a selected clip is under the playhead, it cuts only the selected clips; with Linked on that includes their linked audio. With nothing selected under the playhead, it cuts every track (Dang's choice, 2026-11-01).
+- **Ctrl+B** cuts at the playhead. If a selected clip is under the playhead, it cuts only the selected clips; with Linked on that includes their linked audio. With nothing selected under the playhead, it cuts every track (decided 2026-11-01).
 - **Delete** removes the selection.
 - **Dragging a segment edge** restores previously deleted source material (extends the segment).
   - Video extends ripple the following video segments.
   - *My call:* an audio edge can't overlap a neighboring audio segment; it stops at the neighbor.
   - Nothing can extend past the source's real start or end.
-- **Linked selection (Dang's choice: linked, with a toggle):** on by default. Clicking a video segment also selects the audio pieces created by the same cuts. Deleting or edge-dragging applies to all of them, so sync is kept. With the toggle off, video and audio are selected and edited separately, and desync is the user's call.
-- **Snapping (Dang's choice):** to the playhead, to cut points and segment edges on any track, and to the end of the video. There's a toolbar toggle. No time-grid snapping.
+- **Linked selection (the owner's choice: linked, with a toggle):** on by default. Clicking a video segment also selects the audio pieces created by the same cuts. Deleting or edge-dragging applies to all of them, so sync is kept. With the toggle off, video and audio are selected and edited separately, and desync is the user's call.
+- **Snapping (the owner's choice):** to the playhead, to cut points and segment edges on any track, and to the end of the video. There's a toolbar toggle. No time-grid snapping.
 - **Zoom:** Ctrl+scroll, plus a zoom slider in the toolbar.
 - **Undo/redo** covers every edit: cuts, deletes, edge drags, volume, mute, master volume, and toggles.
-- **Playhead after a delete (Dang's choice, 2026-11-03):** it lands at the join, where the deleted video used to be.
+- **Playhead after a delete (decided 2026-11-03):** it lands at the join, where the deleted video used to be.
   - Delete the right half and it sits at the end of what's left.
   - Delete the left half and it sits at 0:00.
   - Delete a middle piece and it sits where its neighbours meet.
@@ -138,7 +138,7 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
 - Tag (V1, A1…), a small color square for audio tracks, and the track name.
 - For audio tracks: a mute button and one horizontal volume slider with a dB readout. *My call:* range −∞ to +6 dB, default 0 dB.
 - Muted tracks render in grey and are left out of exports.
-- **Master section (Dang's choices, 2026-11-03):** in the timeline toolbar, right of Undo/Redo (*my call on placement*).
+- **Master section (decided 2026-11-03):** in the timeline toolbar, right of Undo/Redo (*my call on placement*).
   - **Master volume:**
     - one gain on the final mix, **exported** in every mode, including Export audio;
     - range −∞ to **+12 dB**, with **no limiter**: what you set is exported, clipping included;
@@ -149,7 +149,7 @@ Layout follows the mockup: a top export bar, the viewer with transport controls,
     - It's for editing only: it is **never exported** and isn't an undo step.
     - *My call:* it stays on across clips until you turn it off.
 
-### 5.5 Keyboard (Dang asked to match DaVinci Resolve)
+### 5.5 Keyboard (matches DaVinci Resolve, at the owner's request)
 | Key | Action |
 |---|---|
 | Space | Play / pause |
@@ -178,12 +178,12 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 | **Export + save raw** | `[CLIPPED] <name>.<ext>` beside the original | Moved into a `Raw\` folder next to the original (created if missing) |
 | **Export audio** | `[CLIPPED] <name>.mp3` beside the original (*my call on the name*) | Untouched. The editor stays open |
 
-- **Discord-safe H.264 (Dang's choice, 2026-11-03; supersedes "same video codec" below):** both video exports always encode **H.264** (AMF when available, otherwise libx264) with AAC audio in **`.mp4`**. Resolution and frame rate still match the source.
+- **Discord-safe H.264 (decided 2026-11-03; supersedes "same video codec" below):** both video exports always encode **H.264** (AMF when available, otherwise libx264) with AAC audio in **`.mp4`**. Resolution and frame rate still match the source.
   - HEVC, AV1 or VP9 sources didn't play on Discord.
   - *My calls:*
     - The bitrate is the source's average video bitrate. It's ×1.3 when the source is HEVC, AV1 or VP9, so quality holds.
     - `.mov`/`.mkv`/`.webm` sources export as `.mp4`.
-- **Black-border auto-crop (Dang's choice, 2026-11-03):** some OBS recordings hold the game picture in only part of the frame, with black around it.
+- **Black-border auto-crop (decided 2026-11-03):** some OBS recordings hold the game picture in only part of the frame, with black around it.
   - On open, Hasami detects a fixed black border (ffmpeg `cropdetect` sampled across the clip; only a border that is the same throughout counts).
   - When one is found, the top bar shows **"BORDER REMOVED"** with a toggle to keep the border instead.
   - Video exports crop it off and scale the picture back up to the source's resolution, so it fills the frame. The 20 MB copy inherits this, since it's made from the `[CLIPPED]` file.
@@ -191,12 +191,12 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
     - It's on by default whenever a border is found.
     - Right-click Compress doesn't crop.
     - The editor preview shows the cropped picture while cropping is on.
-- **"Identical to source" (Dang's choice) applies to both video exports:**
+- **"Identical to source" (the owner's choice) applies to both video exports:**
   - re-encode with the **same video codec, resolution, and frame rate** at about the **source's average video bitrate**, for frame-accurate cuts with no visible loss;
-  - use the hardware encoder when available (AMF on this machine; NVENC or QSV elsewhere), with software fallback;
+  - use the hardware encoder when available (AMF; NVENC or QSV could follow), with software fallback;
   - keep the source container. *Builder's call* for codec/container combos that need it, e.g. Opus audio in `.webm`.
   - Expect big files from high-bitrate raws: a 10 s trim of a 152 Mbps clip is about 190 MB. That's accepted.
-- **20 MB copy toggle (Dang's choice; updated 2026-11-03).** One toggle applies to both video export buttons.
+- **20 MB copy toggle (the owner's choice; updated 2026-11-03).** One toggle applies to both video export buttons.
   - The export itself is always the full-quality `[CLIPPED] <name>.<ext>` beside the original.
   - With the toggle on, Hasami also saves `[20MB] <name>.mp4` (≤ 20 MB, via the Compress pipeline, §7) to the Windows Videos folder, the same place Compress writes.
   - *My calls:*
@@ -205,11 +205,11 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
     - If the `[CLIPPED]` file is already under 20 MB and Discord-ready, it's copied as-is.
     - The toggle's label becomes "20 MB COPY".
     - The clip stays locked, with one progress bar, until both files are done.
-- **Exports run in Hasami's job queue (§10), and the editor stays open (Dang's choice, updated 2026-11-01).** The original is only recycled or moved after its export verifies (§8).
+- **Exports run in Hasami's job queue (§10), and the editor stays open (the owner's choice, updated 2026-11-01).** The original is only recycled or moved after its export verifies (§8).
   - After **Quick export** or **Export + save raw**, the clip locks: no more edits, because its original is about to move. A progress bar replaces the export buttons. When it finishes, the top bar shows the saved file's name. On failure, it shows what went wrong and that the original is untouched, and the clip unlocks so you can try again.
   - **Export audio** shows its progress the same way, but the clip stays editable.
   - **The window never closes by itself.** Closing it while exports run is fine: they finish, and a failure shows in the small progress window.
-- **Prev / Next video (Dang's choice, 2026-11-01; direction updated 2026-11-03):** they step through the videos in the folder by date.
+- **Prev / Next video (decided 2026-11-01; direction updated 2026-11-03):** they step through the videos in the folder by date.
   - The folder's videos are sibling `.mp4`/`.mov`/`.mkv`/`.webm` files, ordered by modified time, ties by name.
   - **Next** goes to the next *newer* video, and **‹ Prev** goes to the next *older* one.
   - *My call:* `[CLIPPED]` and `[20MB]` outputs are skipped, and the `Raw\` subfolder isn't listed.
@@ -225,13 +225,13 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 - Opens the first file, with "3 of 30" in the top bar.
 - *Updated 2026-11-01:* exporting no longer moves on by itself. The clip stays, with its progress (§5.7).
 - **Prev / Next video** step through the selected files, ordered by date. *My call:* the queue opens on the oldest selected clip, so Next walks forward in time. Past either end, they carry on into the folder (§5.7). They replace Skip and leave the current file untouched.
-- **Discard** sends the current raw to the Recycle Bin and moves on (Dang's choice).
+- **Discard** sends the current raw to the Recycle Bin and moves on (the owner's choice).
 - While exports are still running, a small strip in the top bar shows them (e.g. "EXPORTING 2").
 - **Results list:** opens from that strip. It lists each export's result; a failed export says what went wrong and confirms the raw was kept. It never replaces the editor, and it never closes the window.
 
 ## 6. Preview and media pipeline (guidance; details are the builder's)
 
-- **Video preview:** play the source directly in WebView2's `<video>` when it can decode it. HEVC needs hardware support or the HEVC extension, and this machine should have it. If it can't, generate a fast temporary H.264 proxy and show a brief "Preparing preview" state.
+- **Video preview:** play the source directly in WebView2's `<video>` when it can decode it. HEVC needs hardware support or the HEVC Video Extensions. If it can't, generate a fast temporary H.264 proxy and show a brief "Preparing preview" state.
 - **Audio preview:** WebView2 plays only the default audio track and has no per-track control. So, on open, extract each non-empty audio track to its own temp file (stream copy is near-instant) and play them through Web Audio, kept in sync with a muted video element. This is what makes per-track volume and mute work during playback.
 - **Waveforms and thumbnails:** precompute with ffmpeg on open. Show the UI immediately and fill these in as they arrive.
 - **Empty-track detection:** e.g. a volume or peak analysis. Treat near-silent tracks as empty.
@@ -247,9 +247,9 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
   1. Compute the total bit budget with a container-overhead margin.
   2. Reserve audio: ~128 kbps, dropping to 96 or 64 kbps for long inputs.
   3. Pick resolution and frame rate from a ladder by bits-per-pixel: 1080p60 → 1080p30 → 720p60 → 720p30 → 480p30 → lower.
-  4. Encode with an accurate rate-controlled method (e.g. two-pass libx264; the 7800X3D makes this quick).
+  4. Encode with an accurate rate-controlled method (e.g. two-pass libx264).
   5. **Verify the file size and retry at a lower bitrate if over.**
-- **Warn first (Dang's choice):** if the chosen resolution would fall **below 480p** (*my call on the threshold*), show the resulting resolution before encoding and let the user cancel or continue. Otherwise Compress just runs.
+- **Warn first (the owner's choice):** if the chosen resolution would fall **below 480p** (*my call on the threshold*), show the resulting resolution before encoding and let the user cancel or continue. Otherwise Compress just runs.
 - **Never invoke HandBrake.**
 - **Floor (my call):** the ladder bottoms out at about 240p / 15 fps, with audio stepping down to 64 kbps and then 32 kbps mono. If even the floor can't fit in 20 MB (only multi-hour inputs), Compress fails with a clear message and leaves the original untouched. It never produces an oversize file.
 
@@ -260,16 +260,16 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 3. Only then rename the temp file to its final name, and only after that move or recycle the original. When the output takes the original's own name, the order is: check the original can be deleted → recycle the original under its real name (so Restore brings back the right file) → rename the temp file with a non-replacing rename. If that rename fails after the original is recycled, the new file is kept where it is and the error says where it is and that the original is in the Recycle Bin. Plan 2's Quick Export reuses this same commit routine (`fsops::commit_replace`).
 4. On any failure or cancel, delete the temp file and leave the original exactly as it was. Report the error in plain language.
 5. A file locked by another program fails cleanly with a message. Nothing is half-done.
-6. **Recycle Bin limits (Dang's choice):** the Recycle Bin is treated as a short undo window, not a backup. If Windows drops old raws once the bin fills, that's accepted. Hasami itself always recycles silently and never calls a permanent delete. For a file that's too big for the bin, or a drive with no bin, use whatever Windows does with no prompt shown. If Windows would show a dialog, the builder should suppress it so no UI appears (*builder's call on the exact flags*).
+6. **Recycle Bin limits (the owner's choice):** the Recycle Bin is treated as a short undo window, not a backup. If Windows drops old raws once the bin fills, that's accepted. Hasami itself always recycles silently and never calls a permanent delete. For a file that's too big for the bin, or a drive with no bin, use whatever Windows does with no prompt shown. If Windows would show a dialog, the builder should suppress it so no UI appears (*builder's call on the exact flags*).
 
 ## 9. Visual design
 
-- **Visual authority:** `docs/branding/DESIGN.md` ("black gallery wall, blood-red punctuation"), adapted for a dense, task-focused editor. `docs/frame.io/` was tried first and rejected; don't use it.
+- **Visual authority:** [`docs/branding/DESIGN.md`](../../branding/DESIGN.md) ("black gallery wall, blood-red punctuation"), adapted for a dense, task-focused editor. An earlier direction was tried first and rejected.
 - **Approved deviations and specifics (all from the mockup review):**
   - Red muted to **`#d43545`**, replacing `#fe1e34`. Use it in exactly three places: the playhead, the **Quick export** border, and the "edited" dot.
   - Selected clips get a **bone-white** 1.5px outline, not red.
   - **Audio track colors:** A1 sage `#7fa58c`, A2 ochre `#c9a063`, A3 dusty blue `#7f9cc4`, A4 mauve `#b08bb3`, A5 teal `#4fa8a2`, A6 amber `#d89a3e` (*my call for A3+*). Clip fill ≈ 15% of the track color over near-black, a 1px border at ≈ 38%, and the waveform near full color. Selected clips are brighter.
-  - **Fonts (Dang's choice: free stand-ins):** **Inter** for all UI, and **Instrument Serif** italic only in the wordmark connective ("quick trim", "compress"). Both are OFL and bundled, so no network font loading.
+  - **Fonts (the owner's choice: free stand-ins):** **Inter** for all UI, and **Instrument Serif** italic only in the wordmark connective ("quick trim", "compress"). Both are OFL and bundled, so no network font loading.
   - Small labels are uppercase and letter-spaced, at a **minimum 11px**. Timecodes use tabular numerals.
   - No gradients, glows, or filled buttons. Buttons are 8px-radius outlines with a drawn diagonal-arrow icon. Small controls use a 3px radius.
   - Surfaces: void `#080808`, viewer `#000`, headers `#171617`, dividers ~`#1f1e1f`. Text: bone `#fcfcfc`, pebble `#b5b2b2` for secondary.
@@ -277,7 +277,7 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 
 ## 10. How it's built
 
-- **Tauri 2** (Rust backend, web UI in WebView2), Windows only (*Dang approved this as my recommendation*). Small install, fast start.
+- **Tauri 2** (Rust backend, web UI in WebView2), Windows only (*recommended and approved*). Small install, fast start.
 - **Frontend framework:** builder's choice, in TypeScript.
 - **ffmpeg + ffprobe** bundled as sidecar binaries, run hidden.
 - **Single-instance handling:** Explorer launches one process per selected file. Aggregate them through Tauri's single-instance mechanism, with a short collection window, into one batch or queue.
@@ -288,8 +288,8 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
   - Compress and Convert jobs show in the small progress window, which lists what's queued.
   - The process stays alive until the queue is empty, even after every window has closed.
 - **Installer:** NSIS, per-user, registers the context menu, with uninstall support. No code signing for now.
-- **Dev setup (Dang's choice):** the repo lives at `C:\Users\ledan\Documents\Projects\hasami` and builds and runs with the **Windows** Rust/Node toolchain, so testing uses the real WebView2, codecs, and right-click menu. Agents working from WSL use the `/mnt/c/...` path with Windows interop (`cargo.exe`, `npm.cmd`).
-- **Audience:** just Dang for now, open source later. So:
+- **Dev setup (the owner's choice):** the repo lives on a Windows drive and builds and runs with the **Windows** Rust/Node toolchain, so testing uses the real WebView2, codecs, and right-click menu. Working from WSL means using the `/mnt/c/...` path with Windows interop (`cargo.exe`, `cmd.exe /c npm …`).
+- **Audience:** a single user at first, open source later. So:
   - no hardcoded user paths or secrets;
   - license-clean dependencies: OFL fonts; ffmpeg build licensing must be chosen knowingly (a GPL build is required for libx264, and the binary is shipped as a separate executable);
   - a README-level build guide when it goes public.
@@ -303,7 +303,7 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 - Exact timing of the multi-select collection window.
 - Test strategy. Expect real-media fixtures, including a multi-track HEVC sample and a high-bitrate one.
 
-## 12. Calls made without Dang's explicit input (review these)
+## 12. Calls made without the owner's explicit input (review these)
 
 1. *Updated 2026-11-03:* Compress writes `[20MB] <name>.mp4` to the Videos folder and keeps the original; Convert changes only the extension and sends the original to the Recycle Bin.
 2. Each "Convert to" item is hidden on files already in that format; Convert remuxes when possible and keeps all audio tracks.
@@ -311,7 +311,7 @@ All exports render the edited timeline. Every **unmuted** audio track is mixed a
 4. Audio edges can't overlap their neighbors; volume range −∞ to +6 dB.
 5. J/L shuttle tops out at 8×; Shift+arrows, ↑/↓, N, and Ctrl+Shift+L follow DaVinci defaults.
 6. Export audio is named `[CLIPPED] <name>.mp3` and keeps the clip editable.
-7. *Updated 2026-11-01 (Dang's choice):* after a video export the editor stays open with the clip locked and a progress bar; the window never closes by itself; closing with unsaved edits asks first.
+7. *Updated 2026-11-01 (the owner's choice):* after a video export the editor stays open with the clip locked and a progress bar; the window never closes by itself; closing with unsaved edits asks first.
 8. Never double the `[CLIPPED]` prefix; collisions get " (2)"; sources already in a `Raw` folder export to its parent.
 9. Fit to 20 MB and Compress output is H.264/AAC `.mp4` with one mixed audio track, at ≤ 20,000,000 bytes.
 10. Warn before Compress when the output would fall below 480p.

@@ -1,6 +1,9 @@
 <#
 Downloads the pinned ffmpeg build and installs ffmpeg.exe / ffprobe.exe into
-src-tauri/binaries/ using Tauri's sidecar naming (<name>-<target-triple>.exe).
+src-tauri/binaries/ using Tauri's sidecar naming (<name>-<target-triple>.exe),
+plus the build's LICENSE (GPLv3) and README.txt (configuration and library
+versions) as ffmpeg-LICENSE.txt / ffmpeg-README.txt. The installer ships those
+two files under licenses\ffmpeg\ (see bundle.resources in tauri.conf.json).
 
 Build: gyan.dev "full" release 9.0.2 (GPL; includes libx264, libx265, libmp3lame,
 libvpx, libopus). The binaries ship as separate executables, never linked.
@@ -18,14 +21,17 @@ $Triple  = 'x86_64-pc-windows-msvc'
 
 $Root    = Split-Path -Parent $PSScriptRoot
 $OutDir  = Join-Path $Root 'src-tauri\binaries'
+# Archive entry (relative to the archive's top folder) -> installed file.
 $Targets = @{
-    'ffmpeg.exe'  = Join-Path $OutDir "ffmpeg-$Triple.exe"
-    'ffprobe.exe' = Join-Path $OutDir "ffprobe-$Triple.exe"
+    'bin/ffmpeg.exe'  = Join-Path $OutDir "ffmpeg-$Triple.exe"
+    'bin/ffprobe.exe' = Join-Path $OutDir "ffprobe-$Triple.exe"
+    'LICENSE'         = Join-Path $OutDir 'ffmpeg-LICENSE.txt'
+    'README.txt'      = Join-Path $OutDir 'ffmpeg-README.txt'
 }
 
 $Missing = $Targets.Values | Where-Object { -not (Test-Path $_) }
 if (-not $Missing) {
-    Write-Host "ffmpeg $Version binaries already present in $OutDir"
+    Write-Host "ffmpeg $Version binaries and license already present in $OutDir"
     exit 0
 }
 
@@ -47,7 +53,7 @@ try {
     $Archive = [IO.Compression.ZipFile]::OpenRead($Zip)
     try {
         foreach ($Name in $Targets.Keys) {
-            $Entry = $Archive.Entries | Where-Object { $_.FullName -match "^[^/]+/bin/$([regex]::Escape($Name))$" } | Select-Object -First 1
+            $Entry = $Archive.Entries | Where-Object { $_.FullName -match "^[^/]+/$([regex]::Escape($Name))$" } | Select-Object -First 1
             if (-not $Entry) { throw "$Name not found in the ffmpeg archive." }
             [IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Targets[$Name], $true)
             Write-Host "Installed $($Targets[$Name])"
