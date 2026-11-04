@@ -46,12 +46,13 @@ async function start() {
           invoke('progress_ready').catch((err) => console.error('progress_ready failed', err));
           return off;
         }),
-      onCancel: (id) => void cancelJob(id),
-      onConfirm: (id, proceed) => void confirmLowRes(id, proceed),
-      onClose: () => void win.close(),
-      onMinimize: () => void win.minimize(),
+      onCancel: (id) => void cancelJob(id).catch((err) => console.error('cancel_job failed', err)),
+      onConfirm: (id, proceed) =>
+        void confirmLowRes(id, proceed).catch((err) => console.error('confirm_low_res failed', err)),
+      onClose: () => void win.close().catch((err) => console.error('window.close() failed', err)),
+      onMinimize: () => void win.minimize().catch((err) => console.error('window.minimize() failed', err)),
     },
   });
 }
 
-export default start();
+start().catch((err) => console.error('The progress window could not start', err));

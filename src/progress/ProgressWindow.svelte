@@ -24,10 +24,12 @@
     let disposed = false;
     listen((event) => {
       view = reduce(view, event);
-    }).then((fn) => {
-      if (disposed) fn();
-      else off = fn;
-    });
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else off = fn;
+      })
+      .catch((err) => console.error('Listening for job events failed', err));
     return () => {
       disposed = true;
       off?.();

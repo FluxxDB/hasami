@@ -68,7 +68,7 @@
       stopWatch();
       sy.destroy();
       e.destroy();
-      void ctx?.close();
+      ctx?.close().catch((err) => console.warn('Closing the AudioContext failed', err));
       engine = null;
       sync = null;
     };
