@@ -23,7 +23,7 @@
 // There's no real media behind the mock: the engine plays it on its clock, without picture or sound.
 import type { EditorApi, EditorEvent, EditorMedia, Peaks, Thumb } from './api';
 import { fileName } from './display';
-import type { EditorStore } from './store.svelte';
+import type { ClipEditor } from './clipEditor.svelte';
 import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
 const DIR = 'C:\\Users\\ledan\\Videos\\';
@@ -249,7 +249,7 @@ export const mockApi: EditorApi = {
 };
 
 /** The approved mockup's state, rebuilt with the real timeline functions. */
-export function demoEdits(store: EditorStore): void {
+export function demoEdits(store: ClipEditor): void {
   let tl = store.timeline;
   tl = cutAt(tl, 12);
   tl = cutAt(tl, 31);

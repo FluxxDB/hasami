@@ -6,7 +6,7 @@
 // Plain TypeScript, so it's unit-tested; the window's effects just call it when the store changes.
 
 import { STOPPED, type Shuttle } from './playbackModel';
-import type { EditorStore } from './store.svelte';
+import type { ClipEditor } from './clipEditor.svelte';
 import type { Timeline } from './timeline';
 
 /** The part of PlaybackEngine the store drives. */
@@ -23,7 +23,7 @@ export class EngineSync {
   private readonly off: (() => void)[];
 
   constructor(
-    private readonly store: EditorStore,
+    private readonly store: ClipEditor,
     private readonly engine: EngineLike,
   ) {
     this.off = [

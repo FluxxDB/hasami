@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api } from '../api';
-  import { cropPlacement } from '../display';
+  import { cropPlacement, nearestThumb } from '../display';
   import { formatTimecode, videoSourceAt } from '../playbackModel';
   import type { EditorStore } from '../store.svelte';
   import { videoEnd } from '../timeline';
@@ -49,12 +49,8 @@
 
   // Until the video has a frame to show, the nearest thumbnail stands in for it.
   const poster = $derived.by(() => {
-    const thumbs = store.thumbs;
-    if (thumbs.length === 0) return '';
-    const srcT = videoSourceAt(tl, store.playhead)?.srcT ?? 0;
-    let best = thumbs[0];
-    for (const th of thumbs) if (Math.abs(th.t - srcT) < Math.abs(best.t - srcT)) best = th;
-    return api.src(best.file);
+    const th = nearestThumb(store.thumbs, videoSourceAt(tl, store.playhead)?.srcT ?? 0);
+    return th ? api.src(th.file) : '';
   });
 
   const playing = $derived(store.shuttle.dir !== 0);

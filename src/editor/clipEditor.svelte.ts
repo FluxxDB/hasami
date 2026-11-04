@@ -105,6 +105,11 @@ export class ClipEditor {
     return isEdited(this.history);
   }
 
+  /** The source's audio tracks with nothing in them: not on the timeline, listed under "+N empty tracks". */
+  get emptyTracks(): EditorMedia['tracks'] {
+    return this.media?.tracks.filter((t) => t.empty) ?? [];
+  }
+
   get canExportAudio(): boolean {
     return this.media !== null && hasAudibleAudio(this.timeline);
   }
@@ -140,21 +145,13 @@ export class ClipEditor {
 
   /** Starts a fresh edit of `media`: one segment per track, nothing selected, no undo. */
   load(media: EditorMedia): void {
+    this.clear();
     const audio = media.tracks.filter((t) => !t.empty).map((t) => t.index);
     this.media = media;
-    this.keepBorder = false;
     this.history = initHistory(createTimeline(media.duration_s, media.video?.fps ?? DEFAULT_FPS, audio));
-    this.endLive();
-    this.selection = [];
-    this.movePlayhead(0);
+    this.keepBorder = false;
     this.scrollX = 0;
     this.needsFit = true;
-    this.peaks = {};
-    this.thumbs = [];
-    this.shuttle = STOPPED;
-    this.proxyFraction = null;
-    this.error = null;
-    this.notice = null;
   }
 
   /** Lets go of the clip: an empty timeline, nothing selected, nothing playing, no messages. */

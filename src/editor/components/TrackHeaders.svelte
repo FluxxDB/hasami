@@ -7,7 +7,7 @@
   let { store }: { store: EditorStore } = $props();
 
   const audio = $derived(store.timeline.audio);
-  const empties = $derived(store.media?.tracks.filter((t) => t.empty) ?? []);
+  const empties = $derived(store.emptyTracks);
 </script>
 
 <div class="heads">
