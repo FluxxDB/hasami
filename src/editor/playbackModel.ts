@@ -1,7 +1,7 @@
 // Playback-side maths for the Quick Trim editor: J/K/L shuttle, timecode, cut navigation, and
 // mapping timeline time to source time. Pure; the editor component owns the actual clock.
 
-import { quantize, segLen, videoEnd, type Seg, type Timeline } from './timeline';
+import { segLen, videoEnd, type Seg, type Timeline } from './timeline';
 
 export interface Shuttle {
   dir: -1 | 0 | 1;
