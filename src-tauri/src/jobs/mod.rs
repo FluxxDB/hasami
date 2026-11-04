@@ -3,6 +3,7 @@
 pub mod compress;
 pub mod convert;
 pub mod export;
+mod output;
 pub mod queue;
 
 use std::path::PathBuf;

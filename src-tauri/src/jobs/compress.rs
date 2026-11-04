@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::output::{claim_new_file, commit_claimed, RemoveOnDrop, VideosDirFn};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, CompressPlan, SIZE_LIMIT_BYTES};
-use crate::fsops::{commit_new, compressed_path, temp_path_for, videos_dir, FsError, NO_VIDEOS_FOLDER};
+use crate::fsops::{compressed_path, videos_dir};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
 use crate::verify::{verify_output, VerifyError};
@@ -31,11 +32,6 @@ const NEVER_FIT: &str = "Couldn't get this video under 20 MB.";
 const DIDNT_CHECK_OUT: &str = "Couldn't compress this video: the result didn't check out.";
 /// Where pass 1 writes its (discarded) output. The crate is Windows-only.
 const NULL_OUTPUT: &str = "NUL";
-/// Shown when the Videos folder is there but a new file can't be written in it.
-const NO_WRITE_VIDEOS: &str = "Couldn't write the new file in your Videos folder.";
-
-/// Finds the folder a `[20MB]` file goes into; only called once something will be written.
-pub(super) type VideosDirFn<'a> = &'a dyn Fn() -> Result<PathBuf, FsError>;
 
 /// Compress `input` to a new `.mp4` of at most [`SIZE_LIMIT_BYTES`] in the Windows Videos
 /// folder (see [`compress_in`]).
@@ -101,34 +97,6 @@ fn compress_work(
 
     commit_claimed(&mut temp, &final_path, cancel)?;
     Ok(JobOutcome::Done { output: final_path, bytes: verified.size_bytes, note: None })
-}
-
-/// Start a new file that will be named `final_path` (in the Videos folder): create its hidden
-/// temp file now, which proves the folder is there and writable before any encode runs. The
-/// temp file is deleted when the guard drops, unless [`commit_claimed`] keeps it.
-pub(super) fn claim_new_file(final_path: &Path) -> Result<RemoveOnDrop, JobError> {
-    if !final_path.parent().is_some_and(Path::is_dir) {
-        return Err(JobError::Message(NO_VIDEOS_FOLDER.to_owned()));
-    }
-    let temp = temp_path_for(final_path);
-    fs::File::create(&temp).map_err(|_| JobError::Message(NO_WRITE_VIDEOS.to_owned()))?;
-    Ok(RemoveOnDrop::file(temp))
-}
-
-/// Give a finished, verified [`claim_new_file`] temp file its name, never replacing anything.
-/// Checks `cancel` one last time first. If the rename may have happened after all, the temp
-/// file is kept, since it may be the only copy.
-pub(super) fn commit_claimed(temp: &mut RemoveOnDrop, final_path: &Path, cancel: &CancelToken) -> Result<(), JobError> {
-    if cancel.is_cancelled() {
-        return Err(JobError::Cancelled);
-    }
-    if let Err(e) = commit_new(temp.path(), final_path) {
-        if e.kept_new_file.is_some() {
-            temp.keep();
-        }
-        return Err(e.into());
-    }
-    Ok(())
 }
 
 /// Two-pass encode of `input` per `plan` into `output`, retried smaller until it verifies at
@@ -327,45 +295,10 @@ fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
     Err(JobError::Message("Couldn't create a temporary folder for the encode.".to_owned()))
 }
 
-/// Deletes a file or folder when dropped, so every exit path (error, cancel, panic) cleans up.
-/// Deleting something that is already gone (e.g. a temp file that was committed) is a no-op.
-pub(super) struct RemoveOnDrop {
-    path: PathBuf,
-    is_dir: bool,
-    kept: bool,
-}
-
-impl RemoveOnDrop {
-    pub(super) fn file(path: PathBuf) -> Self {
-        Self { path, is_dir: false, kept: false }
-    }
-
-    pub(super) fn dir(path: PathBuf) -> Self {
-        Self { path, is_dir: true, kept: false }
-    }
-
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Don't delete it after all.
-    pub(super) fn keep(&mut self) {
-        self.kept = true;
-    }
-}
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        if self.kept {
-            return;
-        }
-        let _ = if self.is_dir { fs::remove_dir_all(&self.path) } else { fs::remove_file(&self.path) };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fsops::FsError;
     use crate::media::hidden_command;
     use crate::media::{AudioStream, VideoStream};
 
@@ -523,20 +456,6 @@ mod tests {
         assert!(matches!(plain_verify_error(JobError::Cancelled), JobError::Cancelled));
     }
 
-    #[test]
-    fn remove_on_drop_deletes_unless_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let (gone, kept) = (dir.path().join("gone"), dir.path().join("kept"));
-        fs::write(&gone, b"x").unwrap();
-        fs::write(&kept, b"x").unwrap();
-        drop(RemoveOnDrop::file(gone.clone()));
-        let mut guard = RemoveOnDrop::file(kept.clone());
-        guard.keep();
-        drop(guard);
-        assert!(!gone.exists());
-        assert!(kept.exists());
-    }
-
     /// Write a small `.mkv` (so it is never "already small") into `dir`.
     fn small_mkv(paths: &FfmpegPaths, dir: &Path, name: &str) -> PathBuf {
         let out = dir.join(name);
@@ -569,20 +488,6 @@ mod tests {
             dir.path(),
         );
         assert!(matches!(&outcome, Ok(JobOutcome::Unchanged { reason }) if reason == ALREADY_SMALL), "{outcome:?}");
-    }
-
-    #[test]
-    fn claim_new_file_needs_the_folder_and_cleans_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("gone").join("[20MB] a.mp4");
-        let err = claim_new_file(&missing).err().unwrap();
-        assert_eq!(err.to_string(), NO_VIDEOS_FOLDER);
-
-        let final_path = dir.path().join("[20MB] a.mp4");
-        let claim = claim_new_file(&final_path).unwrap();
-        assert!(claim.path().is_file(), "the temp file is created up front");
-        drop(claim);
-        assert!(fs::read_dir(dir.path()).unwrap().next().is_none(), "and deleted when dropped");
     }
 
     #[test]

@@ -21,7 +21,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::compress::{claim_new_file, commit_claimed, encode_to_limit, RemoveOnDrop, VideosDirFn};
+use super::compress::encode_to_limit;
+use super::output::{claim_new_file, commit_claimed, RemoveOnDrop, VideosDirFn};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, SIZE_LIMIT_BYTES};
 use crate::editor::media::Crop;
