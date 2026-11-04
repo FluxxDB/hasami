@@ -115,6 +115,18 @@ describe('EditorStore', () => {
     expect(s.estimateBytes).toBe(cropped);
   });
 
+  it('a border with no area, or on a clip with no picture, is no border: nothing is cropped', () => {
+    const s = new EditorStore();
+    s.load(media({ border: { x: 0, y: 0, w: 0, h: 810 } }));
+    expect(s.border).toBeNull();
+    expect(s.crop).toBeNull();
+    s.load(media({ video: null, border: { x: 0, y: 0, w: 1440, h: 810 } }));
+    expect(s.border).toBeNull();
+    s.load(media({ border: { x: 240, y: 135, w: 1440, h: 810 } }));
+    expect(s.border).toEqual({ x: 240, y: 135, w: 1440, h: 810 });
+    expect(s.crop).toEqual(s.border);
+  });
+
   it('estimates at least 1 Mbit/s of video, as the export encodes', () => {
     const s = new EditorStore();
     // 2 MB over 90 s is 0.18 Mbit/s, under the 3 audio tracks' share.

@@ -32,7 +32,7 @@
   // it, and the whole picture is placed so only that part shows: the <video> itself is untouched,
   // so the engine's seeking and the proxy work as ever. (`object-view-box` would be simpler, but
   // Chromium doesn't apply it to the poster, which stands in until the first frame.)
-  const crop = $derived(media?.video ? store.crop : null);
+  const crop = $derived(store.crop);
   const place = $derived(crop && media?.video ? cropPlacement(crop, media.video) : null);
   const aspect = $derived(
     crop ? crop.w / crop.h : media?.video ? media.video.width / media.video.height : 16 / 9,

@@ -70,7 +70,7 @@
 
   // A black border found on open (spec 5.7): the meta line says it's cropped off (or kept), and Keep
   // border sits under the 20 MB copy toggle, with the other export settings.
-  const border = $derived(media?.video ? media.border : null);
+  const border = $derived(store.border);
   const borderTitle = $derived(
     border && media?.video
       ? `A black border was found around the picture: the game fills ${border.w}×${border.h} of the ${media.video.width}×${media.video.height} frame. ` +

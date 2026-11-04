@@ -321,9 +321,19 @@ export class EditorStore {
     return this.log.map((entry) => this.resultOf(entry));
   }
 
+  /**
+   * The black border found around the open clip's picture (spec 5.7), as the rectangle inside it;
+   * null when there's none. A rectangle with no area is no border (it would crop to nothing).
+   */
+  get border(): Crop | null {
+    const m = this.media;
+    const b = m?.video ? m.border : null;
+    return b && b.w > 0 && b.h > 0 ? b : null;
+  }
+
   /** The picture video exports keep, and the viewer shows: the border's inside, unless Keep border is on. */
   get crop(): Crop | null {
-    const border = this.media?.border ?? null;
+    const border = this.border;
     return border && !this.keepBorder ? border : null;
   }
 
