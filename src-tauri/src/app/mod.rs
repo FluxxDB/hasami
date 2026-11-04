@@ -17,6 +17,7 @@
 //! - [`commands`]: the Tauri commands the progress and editor windows call.
 //! - [`events`]: the events and data the windows are sent (the UI contract).
 //! - [`runner`]: what runs each job.
+//! - [`windows`]: opening the progress and editor windows.
 
 mod collector;
 mod commands;
@@ -25,6 +26,7 @@ mod events;
 mod flow;
 mod replay;
 mod runner;
+mod windows;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,10 +43,9 @@ use crate::cli::{self, Action};
 use crate::editor::session::{process_running, sweep_stale, EditorSessions};
 use crate::jobs::queue::JobQueue;
 use crate::media::FfmpegPaths;
-use commands::*;
-use dispatcher::{Dispatcher, Msg, EDITOR_LABEL, PROGRESS_LABEL};
-use flow::Flow;
+use dispatcher::{Dispatcher, Msg};
 use runner::job_runner;
+use windows::{EDITOR_LABEL, PROGRESS_LABEL};
 
 /// Every job fails with this when the bundled ffmpeg/ffprobe can't be found.
 const TOOLS_MISSING: &str = "Hasami's video tools are missing. Reinstall Hasami.";
@@ -98,20 +99,20 @@ pub fn run(action: Action) {
         }))
         .manage(state)
         .invoke_handler(tauri::generate_handler![
-            cancel_job,
-            confirm_low_res,
-            progress_ready,
-            editor_files,
-            editor_open,
-            editor_adjacent_file,
-            editor_order_files,
-            editor_peaks,
-            editor_thumbs,
-            editor_proxy,
-            editor_export,
-            editor_discard,
-            editor_close,
-            editor_ready,
+            commands::cancel_job,
+            commands::confirm_low_res,
+            commands::progress_ready,
+            commands::editor_files,
+            commands::editor_open,
+            commands::editor_adjacent_file,
+            commands::editor_order_files,
+            commands::editor_peaks,
+            commands::editor_thumbs,
+            commands::editor_proxy,
+            commands::editor_export,
+            commands::editor_discard,
+            commands::editor_close,
+            commands::editor_ready,
         ])
         .on_window_event(|window, event| {
             if !matches!(event, WindowEvent::Destroyed) {
@@ -126,8 +127,7 @@ pub fn run(action: Action) {
         })
         .setup(move |app| {
             let _ = setup_tx.send(Msg::Action(first));
-            let dispatcher =
-                Dispatcher { app: app.handle().clone(), queue: setup_queue, emitted, processed: 0, flow: Flow::new() };
+            let dispatcher = Dispatcher::new(app.handle().clone(), setup_queue, emitted);
             thread::Builder::new().name("hasami-dispatch".into()).spawn(move || dispatcher.run(rx))?;
             Ok(())
         })

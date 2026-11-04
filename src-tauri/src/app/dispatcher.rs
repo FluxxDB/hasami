@@ -1,26 +1,22 @@
 //! The dispatcher thread: it receives every launch, job event and window message in order, asks
 //! [`Flow`] what to do, and carries that out against Tauri and the job queue.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::commands::{recycle, DISCARD_FAILED};
 use super::events::{EditorEvent, EDITOR_EVENT, JOB_EVENT};
 use super::flow::{Effect, Flow};
-use super::{lock, AppState};
+use super::{lock, windows, AppState};
 use crate::cli::Action;
 use crate::editor::request::ExportRequest;
 use crate::editor::session::next_session_id;
 use crate::jobs::queue::{ExportJob, JobEvent, JobKind, JobQueue};
-
-pub(super) const PROGRESS_LABEL: &str = "progress";
-pub(super) const EDITOR_LABEL: &str = "editor";
 
 /// What the dispatcher is told, by the queue, the windows and the commands.
 pub(super) enum Msg {
@@ -50,14 +46,21 @@ pub(super) enum Msg {
 
 /// Carries out [`Flow`]'s decisions against Tauri and the queue.
 pub(super) struct Dispatcher {
-    pub(super) app: AppHandle,
-    pub(super) queue: Arc<JobQueue>,
-    pub(super) emitted: Arc<AtomicU64>,
-    pub(super) processed: u64,
-    pub(super) flow: Flow,
+    app: AppHandle,
+    queue: Arc<JobQueue>,
+    /// Events the queue has emitted (counted by its emit callback) and those handled here.
+    emitted: Arc<AtomicU64>,
+    processed: u64,
+    flow: Flow,
 }
 
 impl Dispatcher {
+    /// A dispatcher for `queue`, whose emit callback counts every event it sends in `emitted`.
+    pub(super) fn new(app: AppHandle, queue: Arc<JobQueue>, emitted: Arc<AtomicU64>) -> Self {
+        Self { app, queue, emitted, processed: 0, flow: Flow::new() }
+    }
+
+    /// Handle messages until every sender is gone.
     pub(super) fn run(mut self, rx: Receiver<Msg>) {
         loop {
             let msg = match self.flow.deadline() {
@@ -141,7 +144,7 @@ impl Dispatcher {
         while let Some(effect) = todo.pop_front() {
             match effect {
                 Effect::OpenWindow { kind, ext } => {
-                    if let Err(e) = self.open_window(kind, ext) {
+                    if let Err(e) = windows::open_progress(&self.app, kind, ext) {
                         eprintln!("hasami: could not open the progress window: {e}");
                         // With no window coming, this may have been the last thing to wait for.
                         let settled = self.settled();
@@ -154,7 +157,7 @@ impl Dispatcher {
                     }
                 }
                 Effect::OpenEditor(files) => {
-                    if let Err(e) = self.open_editor(files) {
+                    if let Err(e) = windows::open_editor(&self.app, files) {
                         eprintln!("hasami: could not open the editor window: {e}");
                         let settled = self.settled();
                         todo.extend(self.flow.on_editor_closed(settled));
@@ -185,34 +188,5 @@ impl Dispatcher {
                 Effect::Exit => self.app.exit(0),
             }
         }
-    }
-
-    fn open_window(&self, kind: &str, ext: Option<&str>) -> tauri::Result<()> {
-        let mut url = format!("progress.html?kind={kind}");
-        if let Some(ext) = ext {
-            url.push_str(&format!("&ext={ext}"));
-        }
-        WebviewWindowBuilder::new(&self.app, PROGRESS_LABEL, WebviewUrl::App(url.into()))
-            .title("Hasami")
-            .inner_size(440.0, 190.0)
-            .resizable(false)
-            .maximizable(false)
-            .decorations(false)
-            .center()
-            .build()
-            .map(|_| ())
-    }
-
-    fn open_editor(&self, files: Vec<PathBuf>) -> tauri::Result<()> {
-        *lock(&self.app.state::<AppState>().editor_files) = files.iter().map(|f| f.display().to_string()).collect();
-        WebviewWindowBuilder::new(&self.app, EDITOR_LABEL, WebviewUrl::App("editor.html".into()))
-            .title("Hasami")
-            .inner_size(1280.0, 800.0)
-            .min_inner_size(960.0, 600.0)
-            .resizable(true)
-            .decorations(false)
-            .center()
-            .build()
-            .map(|_| ())
     }
 }
