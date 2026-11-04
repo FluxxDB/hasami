@@ -1,8 +1,9 @@
-//! Command-line argument parsing into actions (Task 2).
+//! Command-line argument parsing into actions.
 //!
 //! Explorer launches `hasami.exe <verb> <files…>`. [`parse_args`] turns the arguments
 //! (without argv[0]) into an [`Action`].
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -37,18 +38,20 @@ pub enum CliError {
     UnexpectedFiles(String),
 }
 
-/// Parse the arguments that follow the program name. `args` excludes argv[0].
-pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
+/// Parse the arguments that follow the program name. `args` excludes argv[0]. File names are taken
+/// as given, so a name that isn't valid Unicode (Windows allows that) still reaches the job.
+pub fn parse_args<S: AsRef<OsStr>>(args: &[S]) -> Result<Action, CliError> {
     let (verb, rest) = args.split_first().ok_or(CliError::MissingVerb)?;
+    let verb = verb.as_ref().to_string_lossy();
 
     let file_verb = |verb: &str| -> Result<Vec<PathBuf>, CliError> {
         if rest.is_empty() {
             return Err(CliError::NoFiles(verb.to_string()));
         }
-        Ok(rest.iter().map(PathBuf::from).collect())
+        Ok(rest.iter().map(|file| PathBuf::from(file.as_ref())).collect())
     };
 
-    match verb.as_str() {
+    match verb.as_ref() {
         "trim" => Ok(Action::Trim(file_verb("trim")?)),
         "compress" => Ok(Action::Compress(file_verb("compress")?)),
         "convert-mp4" => Ok(Action::Convert(Target::Mp4, file_verb("convert-mp4")?)),
@@ -56,7 +59,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         "convert-mp3" => Ok(Action::Convert(Target::Mp3, file_verb("convert-mp3")?)),
         "register" | "unregister" => {
             if !rest.is_empty() {
-                return Err(CliError::UnexpectedFiles(verb.to_string()));
+                return Err(CliError::UnexpectedFiles(verb.into_owned()));
             }
             Ok(if verb == "register" { Action::Register } else { Action::Unregister })
         }
@@ -120,7 +123,17 @@ mod tests {
 
     #[test]
     fn no_arguments_errors() {
-        assert_eq!(parse_args(&[]), Err(CliError::MissingVerb));
+        assert_eq!(parse_args::<&str>(&[]), Err(CliError::MissingVerb));
+    }
+
+    #[test]
+    fn a_file_name_that_isnt_valid_unicode_is_kept_as_is() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        // "a\u{D800}.mp4": Windows allows an unpaired surrogate in a file name.
+        let odd = OsString::from_wide(&[0x61, 0xD800, 0x2E, 0x6D, 0x70, 0x34]);
+        let action = parse_args(&[OsString::from("trim"), odd.clone()]).unwrap();
+        assert_eq!(action, Action::Trim(vec![PathBuf::from(odd)]));
     }
 
     #[test]
