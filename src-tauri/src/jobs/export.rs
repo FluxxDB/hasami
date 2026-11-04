@@ -38,6 +38,8 @@ use crate::verify::{verify_output, VerifyError};
 const NO_AUDIO: &str = "This clip has no audio to export.";
 /// Shown for a video export whose timeline has no video left in it.
 const NO_VIDEO: &str = "Couldn't export this clip: there's no video left in it.";
+/// Shown for a video export of a source that has no video stream at all.
+const SOURCE_HAS_NO_VIDEO: &str = "This clip has no video to export.";
 /// Shown when the area to keep doesn't fit inside the source's picture.
 const CROP_DOESNT_FIT: &str = "Couldn't export this clip: the border to remove doesn't fit the picture.";
 /// Shown when the rendered result fails verification for a reason other than its size.
@@ -115,6 +117,8 @@ fn export_with(
         (Render::Mp3, graph)
     } else if req.video.is_empty() {
         return Err(JobError::Message(NO_VIDEO.to_owned()));
+    } else if info.video.is_none() {
+        return Err(JobError::Message(SOURCE_HAS_NO_VIDEO.to_owned()));
     } else if req.crop.is_some_and(|c| !fits(c, source_size)) {
         return Err(JobError::Message(CROP_DOESNT_FIT.to_owned()));
     } else {
@@ -661,6 +665,28 @@ mod tests {
         }
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names, ["clip.mkv"]);
+    }
+
+    #[test]
+    fn a_video_export_of_a_source_without_video_is_refused() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("sound.mkv");
+        let status = hidden_command(&paths.ffmpeg)
+            .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2", "-c:a", "aac"])
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let req = ExportRequest { input: input.clone(), fit_20mb: false, ..fit_request(&input) };
+        let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
+        let mut ran = false;
+        let err =
+            export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+        assert_eq!(err.to_string(), SOURCE_HAS_NO_VIDEO);
+        assert!(!ran, "ffmpeg must not run");
+        assert_eq!(names(dir.path()), ["sound.mkv"]);
     }
 
     #[test]
