@@ -28,7 +28,9 @@
   const audio = $derived(store.audioExport);
   const outcome = $derived(media ? outcomeOf(store.currentPath ?? '', store.discardFailure, video, audio) : null);
   /** Read out once per change: a video export in the bar, else an outcome, else a running Export audio. */
-  const announce = $derived(announcement(media && store.locked ? video : (outcome ?? (inFlight(audio) ? audio : null))));
+  const announce = $derived(
+    announcement(media && store.locked ? video : (outcome ?? (inFlight(audio) ? audio : null))),
+  );
   // A black border found on open (spec 5.7): the meta line says it's cropped off (or kept), and
   // Keep border sits under the 20 MB copy toggle, with the other export settings.
   const title = $derived(

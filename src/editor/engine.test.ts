@@ -321,7 +321,11 @@ describe('PlaybackEngine: master volume and Dim', () => {
 
   it('routes every track through one master gain before the speakers', () => {
     const { ctx, gains, destination } = fakeCtx();
-    const engine = new PlaybackEngine(new FakeMedia() as unknown as HTMLVideoElement, ctx, () => new FakeMedia() as unknown as HTMLAudioElement);
+    const engine = new PlaybackEngine(
+      new FakeMedia() as unknown as HTMLVideoElement,
+      ctx,
+      () => new FakeMedia() as unknown as HTMLAudioElement,
+    );
     engine.setTimeline(setMaster(tl, -6));
     engine.load('', [{ index: 0, src: 'a0.m4a' }]);
     const [master, track] = gains;

@@ -240,13 +240,7 @@ export function deleteJoin(tl: Timeline, ids: string[], _linked: boolean): numbe
 
 const clamp = (x: number, lo: number, hi: number): number => Math.min(Math.max(x, lo), hi);
 
-export function moveEdge(
-  tl: Timeline,
-  segId: string,
-  edge: 'start' | 'end',
-  toT: number,
-  linked: boolean,
-): Timeline {
+export function moveEdge(tl: Timeline, segId: string, edge: 'start' | 'end', toT: number, linked: boolean): Timeline {
   const q = quantize(toT, tl.fps);
   const frame = 1 / tl.fps;
   const D = tl.sourceDuration;
@@ -295,8 +289,7 @@ function moveVideoEdge(
   // changed. A track with no such seg is ordinary audio: its segs after the edge shift by the
   // video's length change, but never into a seg that stays put. Either way a drag cannot overlap.
   const aligned = (s: Seg): boolean =>
-    s.link === seg.link &&
-    (edge === 'end' ? Math.abs(segEnd(s) - oldEnd) < EPS : Math.abs(s.at - seg.at) < EPS);
+    s.link === seg.link && (edge === 'end' ? Math.abs(segEnd(s) - oldEnd) < EPS : Math.abs(s.at - seg.at) < EPS);
   const audio = tl.audio.map((tr) => {
     const hit = tr.segs.find(aligned);
     let from = oldEnd;

@@ -31,7 +31,9 @@
       <span class="cap plabel">{LABEL[outcome.action]}</span>
       <span class="msg" title={outcome.note}>{outcome.note}</span>
     {:else}
-      <span class="cap plabel">Saved</span><span class="out" title={outcome.output}>{fileName(outcome.output ?? '')}</span>
+      <span class="cap plabel">Saved</span><span class="out" title={outcome.output}
+        >{fileName(outcome.output ?? '')}</span
+      >
     {/if}
     <button type="button" class="ctl dismiss" aria-label="Dismiss" onclick={() => (dismissed = outcomeKey)}>
       <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"

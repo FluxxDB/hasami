@@ -513,7 +513,9 @@ describe('ClipEditor commands', () => {
     s.seek(20);
     s.command('selectAtPlayhead');
     const mid = s.timeline.video[1];
-    expect(new Set(s.selection)).toEqual(new Set([mid.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]));
+    expect(new Set(s.selection)).toEqual(
+      new Set([mid.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]),
+    );
     s.command('delete');
     expect(s.timeline.video.map((v) => v.src)).toEqual([
       [0, 12],
@@ -549,7 +551,9 @@ describe('ClipEditor commands', () => {
     s.command('cut');
     const v = s.timeline.video[1];
     s.selectAt(v.id);
-    expect(new Set(s.selection)).toEqual(new Set([v.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]));
+    expect(new Set(s.selection)).toEqual(
+      new Set([v.id, s.timeline.audio[0].segs[1].id, s.timeline.audio[1].segs[1].id]),
+    );
     s.linked = false;
     s.selectAt(v.id);
     expect(s.selection).toEqual([v.id]);

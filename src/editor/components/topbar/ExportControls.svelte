@@ -23,7 +23,15 @@
 </script>
 
 {#snippet arrow()}
-  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+  <svg
+    width="11"
+    height="11"
+    viewBox="0 0 12 12"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.2"
+    aria-hidden="true"
+  >
     <path d="M3 9 9 3M4 3h5v5" />
   </svg>
 {/snippet}

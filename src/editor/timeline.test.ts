@@ -64,7 +64,11 @@ describe('createTimeline', () => {
 
 describe('cutAt', () => {
   it('cutAt_splits_every_track', () => {
-    expect(src(tl2.video)).toEqual([[0, 12], [12, 31], [31, 90]]);
+    expect(src(tl2.video)).toEqual([
+      [0, 12],
+      [12, 31],
+      [31, 90],
+    ]);
     expect(at(tl2.video)).toEqual([0, 12, 31]);
     for (const a of tl2.audio) {
       expect(src(a.segs)).toEqual(src(tl2.video));
@@ -88,7 +92,10 @@ describe('cutAt', () => {
     expect(cut.video).toHaveLength(1);
     expect(cut.audio[0].segs).toHaveLength(1);
     expect(cut.audio[1].segs).toHaveLength(2);
-    expect(src(cut.audio[1].segs)).toEqual([[0, 12], [12, 90]]);
+    expect(src(cut.audio[1].segs)).toEqual([
+      [0, 12],
+      [12, 90],
+    ]);
     expect(cut.audio[1].segs[0].id).toBe(a1.id); // the left piece keeps its id
     expect(cut.audio[1].segs[1].link).not.toBe(a1.link);
   });
@@ -138,9 +145,7 @@ describe('cutAt', () => {
 
   it('linkedIds returns the segs that share a link on every track', () => {
     const mid = tl2.video[1];
-    expect(linkedIds(tl2, mid.id).sort()).toEqual(
-      [mid.id, tl2.audio[0].segs[1].id, tl2.audio[1].segs[1].id].sort(),
-    );
+    expect(linkedIds(tl2, mid.id).sort()).toEqual([mid.id, tl2.audio[0].segs[1].id, tl2.audio[1].segs[1].id].sort());
     expect(linkedIds(tl2, 'nope')).toEqual([]);
   });
 });
@@ -149,10 +154,16 @@ describe('deleteSegs', () => {
   it('linked_delete_ripples_all_tracks', () => {
     const tl = linkedDeleted();
     expect(videoEnd(tl)).toBe(71);
-    expect(src(tl.video)).toEqual([[0, 12], [31, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 12],
+      [31, 90],
+    ]);
     expect(at(tl.video)).toEqual([0, 12]);
     for (const a of tl.audio) {
-      expect(src(a.segs)).toEqual([[0, 12], [31, 90]]);
+      expect(src(a.segs)).toEqual([
+        [0, 12],
+        [31, 90],
+      ]);
       expect(at(a.segs)).toEqual([0, 12]);
     }
   });
@@ -160,14 +171,24 @@ describe('deleteSegs', () => {
   it('unlinked_delete_moves_only_video', () => {
     const tl = deleteSegs(tl2, [tl2.video[1].id], false);
     expect(videoEnd(tl)).toBe(71);
-    expect(src(tl.video)).toEqual([[0, 12], [31, 90]]);
-    expect(src(track(tl, 0).segs)).toEqual([[0, 12], [12, 31], [31, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 12],
+      [31, 90],
+    ]);
+    expect(src(track(tl, 0).segs)).toEqual([
+      [0, 12],
+      [12, 31],
+      [31, 90],
+    ]);
     expect(at(track(tl, 0).segs)).toEqual([0, 12, 31]);
   });
 
   it('audio_delete_leaves_silence', () => {
     const tl = deleteSegs(tl2, [tl2.audio[1].segs[1].id], true);
-    expect(src(track(tl, 1).segs)).toEqual([[0, 12], [31, 90]]);
+    expect(src(track(tl, 1).segs)).toEqual([
+      [0, 12],
+      [31, 90],
+    ]);
     expect(at(track(tl, 1).segs)).toEqual([0, 31]);
     expect(tl.video).toEqual(tl2.video);
     expect(track(tl, 0).segs).toEqual(track(tl2, 0).segs);
@@ -183,7 +204,10 @@ describe('deleteSegs', () => {
   it('linked delete of the final piece ripples nothing after it', () => {
     const tl = deleteSegs(tl2, linkedIds(tl2, tl2.video[2].id), true);
     expect(videoEnd(tl)).toBe(31);
-    expect(src(track(tl, 0).segs)).toEqual([[0, 12], [12, 31]]);
+    expect(src(track(tl, 0).segs)).toEqual([
+      [0, 12],
+      [12, 31],
+    ]);
   });
 
   it('linked delete cuts audio that spans the removed range', () => {
@@ -205,28 +229,49 @@ describe('moveEdge', () => {
   it('extend_video_end_linked', () => {
     const base = linkedDeleted();
     const tl = moveEdge(base, base.video[0].id, 'end', 14, true);
-    expect(src(tl.video)).toEqual([[0, 14], [31, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 14],
+      [31, 90],
+    ]);
     expect(at(tl.video)).toEqual([0, 14]);
-    expect(src(track(tl, 0).segs)).toEqual([[0, 14], [31, 90]]);
+    expect(src(track(tl, 0).segs)).toEqual([
+      [0, 14],
+      [31, 90],
+    ]);
     expect(at(track(tl, 0).segs)).toEqual([0, 14]);
-    expect(src(track(tl, 1).segs)).toEqual([[0, 14], [31, 90]]);
+    expect(src(track(tl, 1).segs)).toEqual([
+      [0, 14],
+      [31, 90],
+    ]);
     expect(videoEnd(tl)).toBe(73);
   });
 
   it('video end edge, unlinked, leaves audio alone', () => {
     const base = linkedDeleted();
     const tl = moveEdge(base, base.video[0].id, 'end', 14, false);
-    expect(src(tl.video)).toEqual([[0, 14], [31, 90]]);
-    expect(src(track(tl, 0).segs)).toEqual([[0, 12], [31, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 14],
+      [31, 90],
+    ]);
+    expect(src(track(tl, 0).segs)).toEqual([
+      [0, 12],
+      [31, 90],
+    ]);
     expect(at(track(tl, 0).segs)).toEqual([0, 12]);
   });
 
   it('shrinking a video end edge ripples later video and linked audio left', () => {
     const base = linkedDeleted();
     const tl = moveEdge(base, base.video[0].id, 'end', 10, true);
-    expect(src(tl.video)).toEqual([[0, 10], [31, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 10],
+      [31, 90],
+    ]);
     expect(at(tl.video)).toEqual([0, 10]);
-    expect(src(track(tl, 0).segs)).toEqual([[0, 10], [31, 90]]);
+    expect(src(track(tl, 0).segs)).toEqual([
+      [0, 10],
+      [31, 90],
+    ]);
     expect(at(track(tl, 0).segs)).toEqual([0, 10]);
   });
 
@@ -240,16 +285,27 @@ describe('moveEdge', () => {
   it('video start edge keeps at, changes src[0], and ripples what follows', () => {
     // Trim 2 s off the front of the second piece [12,31]@12 -> [14,31]@12.
     const tl = moveEdge(tl2, tl2.video[1].id, 'start', 14, true);
-    expect(src(tl.video)).toEqual([[0, 12], [14, 31], [31, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 12],
+      [14, 31],
+      [31, 90],
+    ]);
     expect(at(tl.video)).toEqual([0, 12, 29]);
-    expect(src(track(tl, 0).segs)).toEqual([[0, 12], [14, 31], [31, 90]]);
+    expect(src(track(tl, 0).segs)).toEqual([
+      [0, 12],
+      [14, 31],
+      [31, 90],
+    ]);
     expect(at(track(tl, 0).segs)).toEqual([0, 12, 29]);
   });
 
   it('video start edge restores material to the left and clamps at source 0', () => {
     const base = linkedDeleted(); // second piece is [31,90]@12
     const ext = moveEdge(base, base.video[1].id, 'start', 10, true);
-    expect(src(ext.video)).toEqual([[0, 12], [29, 90]]);
+    expect(src(ext.video)).toEqual([
+      [0, 12],
+      [29, 90],
+    ]);
     expect(at(ext.video)).toEqual([0, 12]);
     const clamped = moveEdge(tl2, tl2.video[0].id, 'start', -5, true);
     expect(clamped.video[0].src[0]).toBe(0);
@@ -370,14 +426,21 @@ describe('link and overlap invariants', () => {
     tl = cutAt(tl, 20); // splits video only: A0 has no material there
     const first = tl.audio[0].segs[0];
     tl = moveEdge(tl, first.id, 'end', 31, true); // A0 now one seg [0,31] over three video segs
-    expect(tl.audio[0].segs.map((s) => s.src)).toEqual([[0, 31], [31, 90]]);
+    expect(tl.audio[0].segs.map((s) => s.src)).toEqual([
+      [0, 31],
+      [31, 90],
+    ]);
     return tl;
   };
 
   it('linked delete over a spanning audio seg gives the right remnant a fresh link', () => {
     const tl = spanning();
     const out = deleteSegs(tl, [tl.video[1].id], true); // video [12,20]
-    expect(src(out.audio[0].segs)).toEqual([[0, 12], [20, 31], [31, 90]]);
+    expect(src(out.audio[0].segs)).toEqual([
+      [0, 12],
+      [20, 31],
+      [31, 90],
+    ]);
     expect(at(out.audio[0].segs)).toEqual([0, 12, 23]);
     expectInvariants(out);
     const ids = linkedIds(out, out.video[0].id);
@@ -389,7 +452,11 @@ describe('link and overlap invariants', () => {
     const tl = spanning();
     const out = deleteSegs(tl, [tl.video[1].id], true);
     const dragged = moveEdge(out, out.video[0].id, 'end', 14, true);
-    expect(src(dragged.audio[0].segs)).toEqual([[0, 14], [20, 31], [31, 90]]);
+    expect(src(dragged.audio[0].segs)).toEqual([
+      [0, 14],
+      [20, 31],
+      [31, 90],
+    ]);
     expect(at(dragged.audio[0].segs)).toEqual([0, 14, 25]);
     expectInvariants(dragged);
   });
@@ -412,7 +479,12 @@ describe('link and overlap invariants', () => {
     let tl = createTimeline(D, FPS, [0, 1]);
     for (const t of [10, 20, 30, 40, 50]) tl = cutAt(tl, t);
     tl = deleteSegs(tl, [tl.video[1].id, tl.video[3].id], true);
-    expect(src(tl.video)).toEqual([[0, 10], [20, 30], [40, 50], [50, 90]]);
+    expect(src(tl.video)).toEqual([
+      [0, 10],
+      [20, 30],
+      [40, 50],
+      [50, 90],
+    ]);
     expect(videoEnd(tl)).toBe(70);
     for (const a of tl.audio) {
       expect(src(a.segs)).toEqual(src(tl.video));
@@ -432,8 +504,14 @@ describe('linked edge drags on desynced audio never overlap', () => {
     tl = moveEdge(tl, tl.audio[1].segs[0].id, 'end', 15, false); // A1 [0,15]
     expect(at(track(tl, 1).segs)).toEqual([0, 15]);
     const out = moveEdge(tl, tl.video[0].id, 'end', 8, true);
-    expect(src(out.video)).toEqual([[0, 8], [12, 90]]);
-    expect(src(track(out, 0).segs)).toEqual([[0, 8], [12, 90]]); // aligned track ripples
+    expect(src(out.video)).toEqual([
+      [0, 8],
+      [12, 90],
+    ]);
+    expect(src(track(out, 0).segs)).toEqual([
+      [0, 8],
+      [12, 90],
+    ]); // aligned track ripples
     expect(at(track(out, 0).segs)).toEqual([0, 8]);
     expect(at(track(out, 1).segs)).toEqual([0, 15]); // desynced track cannot close up
     expectInvariants(out);
@@ -446,7 +524,11 @@ describe('linked edge drags on desynced audio never overlap', () => {
     tl = moveEdge(tl, a1[2].id, 'start', 31, false); // A1 [31,90]@31
     expect(at(track(tl, 1).segs)).toEqual([0, 12, 31]);
     const out = moveEdge(tl, tl.video[1].id, 'start', 10, true); // video [10,40]@12
-    expect(src(track(out, 1).segs)).toEqual([[0, 12], [10, 30], [31, 90]]);
+    expect(src(track(out, 1).segs)).toEqual([
+      [0, 12],
+      [10, 30],
+      [31, 90],
+    ]);
     expect(at(track(out, 1).segs)).toEqual([0, 12, 33]);
     expectInvariants(out);
     const shrunk = moveEdge(tl, tl.video[1].id, 'start', 20, true); // video [20,40]@12
@@ -493,7 +575,7 @@ describe('randomized edit sequences keep the invariants', () => {
   it('holds across 300 seeded sequences of cuts, deletes and edge drags', () => {
     for (let seed = 1; seed <= 300; seed++) {
       const rnd = prng(seed);
-      const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
+      const pick = <T>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
       let tl = createTimeline(D, FPS, [0, 1]);
       for (let step = 0; step < 30; step++) {
         const allSegs = [...tl.video, ...tl.audio.flatMap((a) => a.segs)];

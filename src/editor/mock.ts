@@ -28,7 +28,9 @@ import { cutAt, deleteSegs, linkedIds, moveEdge } from './timeline';
 
 const DIR = 'C:\\Users\\ledan\\Videos\\';
 /** The fake folder, newest first, as Explorer sorts it by date, descending. */
-const FOLDER = ['23-40-17', '23-21-50', '23-05-33', '22-48-09', '22-31-44'].map((t) => `${DIR}Replay 2026-10-09 ${t}.mp4`);
+const FOLDER = ['23-40-17', '23-21-50', '23-05-33', '22-48-09', '22-31-44'].map(
+  (t) => `${DIR}Replay 2026-10-09 ${t}.mp4`,
+);
 /** Each clip's modified time, from the time in its name. */
 const MODIFIED = new Map(
   FOLDER.map((p) => {
@@ -169,7 +171,13 @@ function runExport(id: number, input: string, mode: string, fit20: boolean): Pro
       clearInterval(timer);
       const ok = input !== FAILING;
       if (!ok) {
-        emit({ type: 'ExportFailed', id, input, message: "Couldn't export this clip: the result didn't check out.", original_intact: true });
+        emit({
+          type: 'ExportFailed',
+          id,
+          input,
+          message: "Couldn't export this clip: the result didn't check out.",
+          original_intact: true,
+        });
       } else {
         const name = fileName(input).replace(/\.[^.]+$/, mode === 'audio' ? '.mp3' : '.mp4');
         const output = input.replace(/[^\\]+$/, `[CLIPPED] ${name}`);
@@ -235,7 +243,11 @@ export const mockApi: EditorApi = {
     return later(found ?? null);
   },
   orderFiles: (paths) =>
-    later([...paths].sort((a, b) => (MODIFIED.get(a) ?? Number.MAX_SAFE_INTEGER) - (MODIFIED.get(b) ?? Number.MAX_SAFE_INTEGER))),
+    later(
+      [...paths].sort(
+        (a, b) => (MODIFIED.get(a) ?? Number.MAX_SAFE_INTEGER) - (MODIFIED.get(b) ?? Number.MAX_SAFE_INTEGER),
+      ),
+    ),
   close: (session) => {
     console.info('[mock] editor_close', { session });
     return later(undefined);

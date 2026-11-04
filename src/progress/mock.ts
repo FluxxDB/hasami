@@ -22,16 +22,8 @@ const progress = (fraction: number, pass = 1, eta_s: number | null = 24): JobEve
 const plan = { width: 1280, height: 720, fps: 60 };
 
 export const scripts: Record<string, JobEvent[]> = {
-  running: [
-    { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
-    started(plan),
-    progress(0.384),
-  ],
-  batch: [
-    { type: 'Queued', snapshot: { current_index: 3, total: 12 } },
-    started(plan),
-    progress(0.384),
-  ],
+  running: [{ type: 'Queued', snapshot: { current_index: 1, total: 1 } }, started(plan), progress(0.384)],
+  batch: [{ type: 'Queued', snapshot: { current_index: 3, total: 12 } }, started(plan), progress(0.384)],
   convert: [
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started({ kind: 'convert', ext: 'mov' }),
@@ -46,7 +38,7 @@ export const scripts: Record<string, JobEvent[]> = {
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started(plan),
     progress(0.2),
-    { type: 'Failed', id: 1, message: 'Couldn\'t process this video.', original_intact: true },
+    { type: 'Failed', id: 1, message: "Couldn't process this video.", original_intact: true },
     { type: 'Drained' },
   ],
   unchanged: [
@@ -59,7 +51,12 @@ export const scripts: Record<string, JobEvent[]> = {
     { type: 'Queued', snapshot: { current_index: 1, total: 1 } },
     started(plan),
     progress(1, 2, 0),
-    { type: 'Done', id: 1, output: 'C:\\Users\\ledan\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4', bytes: 19_400_000 },
+    {
+      type: 'Done',
+      id: 1,
+      output: 'C:\\Users\\ledan\\Videos\\[20MB] Replay 2026-10-09 23-40-17.mp4',
+      bytes: 19_400_000,
+    },
     { type: 'Drained' },
   ],
   // An editor export saved after its window closed, whose 20 MB copy wasn't made.

@@ -45,7 +45,9 @@ describe('EditorStore queue and exports', () => {
     vi.mocked(api.discard).mockResolvedValue(undefined);
     vi.mocked(api.adjacentFile).mockResolvedValue(null);
     // Like the Rust side: oldest first.
-    vi.mocked(api.orderFiles).mockImplementation(async (paths) => [...paths].sort((x, y) => modifiedOf(x) - modifiedOf(y)));
+    vi.mocked(api.orderFiles).mockImplementation(async (paths) =>
+      [...paths].sort((x, y) => modifiedOf(x) - modifiedOf(y)),
+    );
     vi.mocked(api.close).mockResolvedValue(undefined);
     vi.mocked(api.peaks).mockResolvedValue({ rate: 10, values: [] });
     vi.mocked(api.thumbs).mockResolvedValue([]);
@@ -145,7 +147,7 @@ describe('EditorStore queue and exports', () => {
     expect(s.locked).toBe(true);
   });
 
-  it("a video export reads queued until it starts, then follows its progress, and done shows what was saved", async () => {
+  it('a video export reads queued until it starts, then follows its progress, and done shows what was saved', async () => {
     const s = await queued();
     await s.exportClip('quick');
     expect(s.videoExport).toMatchObject({ action: 'quick', state: 'queued', fraction: 0 });
@@ -167,9 +169,17 @@ describe('EditorStore queue and exports', () => {
     cut(s);
     await s.exportClip('quick');
     s.applyEvent({ type: 'ExportStarted', id: 100, input: FILES[0] });
-    s.applyEvent({ type: 'ExportFailed', id: 100, input: FILES[0], message: 'Out of disk space.', original_intact: true });
+    s.applyEvent({
+      type: 'ExportFailed',
+      id: 100,
+      input: FILES[0],
+      message: 'Out of disk space.',
+      original_intact: true,
+    });
     expect(s.videoExport).toMatchObject({ state: 'failed', message: 'Out of disk space.', originalIntact: true });
-    expect(s.exports.failed).toEqual([{ id: 100, input: FILES[0], message: 'Out of disk space.', originalIntact: true }]);
+    expect(s.exports.failed).toEqual([
+      { id: 100, input: FILES[0], message: 'Out of disk space.', originalIntact: true },
+    ]);
     expect(s.locked).toBe(false);
     cut(s, 30);
     expect(s.timeline.video).toHaveLength(3);
@@ -179,7 +189,7 @@ describe('EditorStore queue and exports', () => {
     expect(s.videoExport).toMatchObject({ state: 'queued' });
   });
 
-  it("export audio shows its progress and leaves the clip editable", async () => {
+  it('export audio shows its progress and leaves the clip editable', async () => {
     const s = await queued();
     s.fit20 = true;
     cut(s);

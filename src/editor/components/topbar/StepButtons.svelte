@@ -15,13 +15,29 @@
 </script>
 
 {#snippet forward()}
-  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+  <svg
+    width="11"
+    height="11"
+    viewBox="0 0 12 12"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.2"
+    aria-hidden="true"
+  >
     <path d="M1.5 6h9M7 2.5 10.5 6 7 9.5" />
   </svg>
 {/snippet}
 
 {#snippet backward()}
-  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+  <svg
+    width="11"
+    height="11"
+    viewBox="0 0 12 12"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.2"
+    aria-hidden="true"
+  >
     <path d="M10.5 6h-9M5 2.5 1.5 6 5 9.5" />
   </svg>
 {/snippet}

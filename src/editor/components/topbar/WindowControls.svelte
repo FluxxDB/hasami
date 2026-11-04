@@ -13,7 +13,9 @@
 
 <div class="winctl">
   <button type="button" class="ctl" aria-label="Minimize" onclick={onMinimize}>
-    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" fill="none" /></svg>
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
+      ><path d="M1 6h10" stroke="currentColor" fill="none" /></svg
+    >
   </button>
   <button type="button" class="ctl" aria-label="Maximize" onclick={onToggleMaximize}>
     <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"

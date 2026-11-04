@@ -34,9 +34,7 @@
   // Chromium doesn't apply it to the poster, which stands in until the first frame.)
   const crop = $derived(store.crop);
   const place = $derived(crop && media?.video ? cropPlacement(crop, media.video) : null);
-  const aspect = $derived(
-    crop ? crop.w / crop.h : media?.video ? media.video.width / media.video.height : 16 / 9,
-  );
+  const aspect = $derived(crop ? crop.w / crop.h : media?.video ? media.video.width / media.video.height : 16 / 9);
 
   // The frame is the largest box of the video's shape that fits; the transport matches its width.
   const frame = $derived.by(() => {
@@ -99,24 +97,104 @@
       {#if badge}<span class="speed cap">{badge}</span>{/if}
     </div>
     <div class="tbtns">
-      <button type="button" class="ibtn" aria-label="Jump to start" disabled={!media} onclick={() => store.command('home')}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 20 9 12l10-8v16Z" /><path d="M5 19V5" /></svg>
+      <button
+        type="button"
+        class="ibtn"
+        aria-label="Jump to start"
+        disabled={!media}
+        onclick={() => store.command('home')}
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"><path d="M19 20 9 12l10-8v16Z" /><path d="M5 19V5" /></svg
+        >
       </button>
-      <button type="button" class="ibtn" aria-label="Previous frame" disabled={!media} onclick={() => store.command('frameBack')}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+      <button
+        type="button"
+        class="ibtn"
+        aria-label="Previous frame"
+        disabled={!media}
+        onclick={() => store.command('frameBack')}
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg
+        >
       </button>
-      <button type="button" class="ibtn play" aria-label={playing ? 'Pause' : 'Play'} disabled={!media} onclick={() => store.command('playPause')}>
+      <button
+        type="button"
+        class="ibtn play"
+        aria-label={playing ? 'Pause' : 'Play'}
+        disabled={!media}
+        onclick={() => store.command('playPause')}
+      >
         {#if playing}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
+            ><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect
+              x="14"
+              y="4.5"
+              width="4"
+              height="15"
+              rx="1"
+            /></svg
+          >
         {:else}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a.5.5 0 0 0 .77.42l11.5-7.5a.5.5 0 0 0 0-.84L7.77 4.08A.5.5 0 0 0 7 4.5Z" /></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
+            ><path d="M7 4.5v15a.5.5 0 0 0 .77.42l11.5-7.5a.5.5 0 0 0 0-.84L7.77 4.08A.5.5 0 0 0 7 4.5Z" /></svg
+          >
         {/if}
       </button>
-      <button type="button" class="ibtn" aria-label="Next frame" disabled={!media} onclick={() => store.command('frameFwd')}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+      <button
+        type="button"
+        class="ibtn"
+        aria-label="Next frame"
+        disabled={!media}
+        onclick={() => store.command('frameFwd')}
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg
+        >
       </button>
-      <button type="button" class="ibtn" aria-label="Jump to end" disabled={!media} onclick={() => store.command('end')}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 4 10 8-10 8V4Z" /><path d="M19 5v14" /></svg>
+      <button
+        type="button"
+        class="ibtn"
+        aria-label="Jump to end"
+        disabled={!media}
+        onclick={() => store.command('end')}
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"><path d="m5 4 10 8-10 8V4Z" /><path d="M19 5v14" /></svg
+        >
       </button>
     </div>
     <span class="tc dim">{formatTimecode(videoEnd(tl), fps)}</span>

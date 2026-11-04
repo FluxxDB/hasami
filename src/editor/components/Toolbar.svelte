@@ -35,7 +35,20 @@
     title="Snap (N)"
     onclick={() => store.command('toggleSnap')}
   >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15" /><path d="m5 8 4 4" /><path d="m12 15 4 4" /></svg>Snap
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      ><path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15" /><path
+        d="m5 8 4 4"
+      /><path d="m12 15 4 4" /></svg
+    >Snap
   </button>
   <button
     type="button"
@@ -45,17 +58,83 @@
     title="Linked selection (Ctrl+Shift+L)"
     onclick={() => store.command('toggleLinked')}
   >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>Linked
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      ><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path
+        d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+      /></svg
+    >Linked
   </button>
   <div class="vsep"></div>
-  <button type="button" class="tool cap" title="Cut at the playhead: the selected clips, or every track (Ctrl+B)" disabled={!media || store.locked} onclick={() => store.command('cut')}>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M20 4 8.12 15.88" /><path d="M14.47 14.48 20 20" /><path d="M8.12 8.12 12 12" /></svg>Cut <span class="k">Ctrl+B</span>
+  <button
+    type="button"
+    class="tool cap"
+    title="Cut at the playhead: the selected clips, or every track (Ctrl+B)"
+    disabled={!media || store.locked}
+    onclick={() => store.command('cut')}
+  >
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      ><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M20 4 8.12 15.88" /><path
+        d="M14.47 14.48 20 20"
+      /><path d="M8.12 8.12 12 12" /></svg
+    >Cut <span class="k">Ctrl+B</span>
   </button>
-  <button type="button" class="tool" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={store.locked || store.history.past.length === 0} onclick={() => store.command('undo')}>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg>
+  <button
+    type="button"
+    class="tool"
+    aria-label="Undo"
+    title="Undo (Ctrl+Z)"
+    disabled={store.locked || store.history.past.length === 0}
+    onclick={() => store.command('undo')}
+  >
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg
+    >
   </button>
-  <button type="button" class="tool" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled={store.locked || store.history.future.length === 0} onclick={() => store.command('redo')}>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></svg>
+  <button
+    type="button"
+    class="tool"
+    aria-label="Redo"
+    title="Redo (Ctrl+Shift+Z)"
+    disabled={store.locked || store.history.future.length === 0}
+    onclick={() => store.command('redo')}
+  >
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></svg
+    >
   </button>
   <div class="vsep"></div>
 
@@ -80,7 +159,16 @@
     disabled={!editable || master <= MIN_GAIN_DB}
     onclick={() => store.nudgeMaster(-1)}
   >
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14" /></svg>
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      aria-hidden="true"><path d="M5 12h14" /></svg
+    >
   </button>
   <button
     type="button"
@@ -90,7 +178,16 @@
     disabled={!editable || master >= MASTER_MAX_DB}
     onclick={() => store.nudgeMaster(1)}
   >
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M12 5v14" /></svg>
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      aria-hidden="true"><path d="M5 12h14M12 5v14" /></svg
+    >
   </button>
   <!-- Not an edit: it works on a locked clip too, and stays on from clip to clip. -->
   <button
@@ -101,7 +198,20 @@
     title="Dim: hear everything 11 dB quieter (never exported)"
     onclick={() => (store.dim = !store.dim)}
   >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5Z" /><path d="M15.5 10a3 3 0 0 1 0 4" /></svg>Dim
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      ><path
+        d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5Z"
+      /><path d="M15.5 10a3 3 0 0 1 0 4" /></svg
+    >Dim
   </button>
 
   <div class="spacer"></div>
@@ -110,11 +220,35 @@
     <span class="kept cap"><b>{formatClock(videoEnd(store.timeline))}</b> kept of {formatClock(media.duration_s)}</span>
   {/if}
   <div class="zoom">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14" /></svg>
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      aria-hidden="true"><path d="M5 12h14" /></svg
+    >
     <div class="zoomrail">
-      <Slider value={zoom} label="Zoom" valuetext="{Math.round(store.pxPerSecond)} pixels per second" oninput={onZoom} disabled={!media} />
+      <Slider
+        value={zoom}
+        label="Zoom"
+        valuetext="{Math.round(store.pxPerSecond)} pixels per second"
+        oninput={onZoom}
+        disabled={!media}
+      />
     </div>
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M12 5v14" /></svg>
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      aria-hidden="true"><path d="M5 12h14M12 5v14" /></svg
+    >
   </div>
 </div>
 

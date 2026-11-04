@@ -56,7 +56,9 @@ describe('labels and tooltips', () => {
     const border = { x: 240, y: 135, w: 1440, h: 810 };
     const frame = { width: 1920, height: 1080 };
     expect(borderTitle(border, frame, false)).toContain('crop it off and scale the picture back up to 1920×1080');
-    expect(borderTitle(border, frame, true)).toContain('the game fills 1440×810 of the 1920×1080 frame. Video exports keep it.');
+    expect(borderTitle(border, frame, true)).toContain(
+      'the game fills 1440×810 of the 1920×1080 frame. Video exports keep it.',
+    );
   });
 
   it("Prev / Next name where they go, say when there's nothing that way, and say nothing while checking", () => {

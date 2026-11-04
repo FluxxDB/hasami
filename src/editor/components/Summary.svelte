@@ -40,7 +40,8 @@
 
   function detail(r: Result): string {
     if (r.state === 'done' && r.output) return `${fileName(r.output)} · ${formatBytes(r.bytes ?? 0)}`;
-    if (r.action === 'discard') return r.state === 'running' ? 'Goes to the Recycle Bin once its export finishes' : 'Sent to the Recycle Bin';
+    if (r.action === 'discard')
+      return r.state === 'running' ? 'Goes to the Recycle Bin once its export finishes' : 'Sent to the Recycle Bin';
     return '';
   }
 
@@ -59,8 +60,16 @@
   <header>
     <!-- Polite: "Finishing 2 exports" turning into "All done" is the news here. -->
     <h2 id="results-heading" aria-live="polite">{heading}</h2>
-    <button type="button" class="ctl" aria-label="Close the results" popovertarget={RESULTS_ID} popovertargetaction="hide">
-      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg>
+    <button
+      type="button"
+      class="ctl"
+      aria-label="Close the results"
+      popovertarget={RESULTS_ID}
+      popovertargetaction="hide"
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"
+        ><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" fill="none" /></svg
+      >
     </button>
   </header>
   {#if running > 0}<p class="note">Closing the window is fine: exports keep running.</p>{/if}

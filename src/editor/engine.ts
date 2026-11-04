@@ -109,7 +109,11 @@ export class PlaybackEngine {
   private endedCbs = new Set<() => void>();
 
   /** `makeAudio` is for tests, which hand in fake elements. */
-  constructor(video: HTMLVideoElement, ctx: AudioContext | null, makeAudio: () => HTMLAudioElement = () => new Audio()) {
+  constructor(
+    video: HTMLVideoElement,
+    ctx: AudioContext | null,
+    makeAudio: () => HTMLAudioElement = () => new Audio(),
+  ) {
     this.video = video;
     this.ctx = ctx;
     this.makeAudio = makeAudio;

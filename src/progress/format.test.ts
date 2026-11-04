@@ -43,9 +43,7 @@ describe('formatPercent', () => {
 
 describe('progressLine', () => {
   it('shows pass, percent and eta', () => {
-    expect(progressLine({ pass: 1, passes: 2, fraction: 0.384, etaS: 24 })).toBe(
-      'Pass 1 of 2 · 38% · about 0:24 left',
-    );
+    expect(progressLine({ pass: 1, passes: 2, fraction: 0.384, etaS: 24 })).toBe('Pass 1 of 2 · 38% · about 0:24 left');
   });
   it('omits the pass for single-pass jobs and the eta when unknown', () => {
     expect(progressLine({ pass: 1, passes: 1, fraction: 0.5, etaS: null })).toBe('50%');

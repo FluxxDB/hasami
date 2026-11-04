@@ -102,9 +102,7 @@ export function reduce(s: ViewState, e: JobEvent): ViewState {
 
     case 'Started': {
       // A Started after Drained begins a new batch in a reused window.
-      const base = s.drained
-        ? { ...initialState(s.kind, s.ext), queue: s.queue, fileLabel: s.fileLabel }
-        : s;
+      const base = s.drained ? { ...initialState(s.kind, s.ext), queue: s.queue, fileLabel: s.fileLabel } : s;
       return {
         ...base,
         phase: 'running',

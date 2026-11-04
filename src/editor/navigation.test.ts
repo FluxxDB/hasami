@@ -62,7 +62,7 @@ describe('folderStep', () => {
     });
   });
 
-  it("is null with nothing that way, or nothing known about the clip (it never opened)", async () => {
+  it('is null with nothing that way, or nothing known about the clip (it never opened)', async () => {
     expect(await folderStep({ path: E, at: null, side: 'newer' }, 'next', ctx())).toBeNull();
     expect(await folderStep({ path: C, at: 1 }, 'next', ctx({ modified: new Map() }))).toBeNull();
   });

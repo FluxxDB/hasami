@@ -526,5 +526,4 @@ export class EditorStore extends ClipEditor {
   private closeSession(session: number): Promise<void> {
     return api.close(session).catch((err) => console.error('editor_close failed', err));
   }
-
 }

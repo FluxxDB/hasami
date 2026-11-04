@@ -37,7 +37,8 @@
   {#if results.length > 0}
     <button type="button" class="strip cap" popovertarget={RESULTS_ID} aria-label="{strip}: show the results">
       <span>{strip}</span>
-      {#if running > 0}<span class="rail" aria-hidden="true"><i style:width="{Math.round(fraction * 100)}%"></i></span>{/if}
+      {#if running > 0}<span class="rail" aria-hidden="true"><i style:width="{Math.round(fraction * 100)}%"></i></span
+        >{/if}
     </button>
   {/if}
 </div>

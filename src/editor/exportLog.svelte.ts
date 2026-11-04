@@ -172,7 +172,8 @@ export class ExportLog {
     }
     const { id, input, action } = entry;
     const done = e.done.find((d) => d.id === id);
-    if (done) return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes, note: done.note };
+    if (done)
+      return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes, note: done.note };
     const failed = e.failed.find((f) => f.id === id);
     if (failed) {
       const { message, originalIntact } = failed;
