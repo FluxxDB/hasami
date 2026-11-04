@@ -63,6 +63,95 @@ The keys follow DaVinci Resolve.
 | ↑ / ↓ | Previous / next cut | N | Toggle snapping |
 | Home / End | Timeline start / end | Ctrl+Shift+L | Toggle linked selection |
 
+## How it works
+
+A Rust backend (Tauri 2) owns every file and every ffmpeg run, and two small Svelte windows talk to it through commands and events. More detail, including a Quick export step by step, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+<details>
+<summary>Architecture chart (click to expand; boxes link to their source)</summary>
+
+```mermaid
+flowchart TB
+  subgraph win["Windows"]
+    explorer["Explorer<br/>right-click ▸ Hasami"]
+    registry[("HKCU registry<br/>SystemFileAssociations")]
+    installer["NSIS installer<br/>hooks.nsh"]
+  end
+
+  subgraph rust["Rust backend · hasami.exe"]
+    cli["cli.rs<br/>verb + files"]
+    single["single-instance<br/>+ 400 ms collector"]
+    flow["app/flow · dispatcher<br/>windows, queue, exit rule"]
+    commands["app/commands<br/>Tauri commands"]
+    events["app/events<br/>JobEvent · EditorEvent"]
+    queue["jobs/queue<br/>serial job queue"]
+    jobs["jobs/compress · convert · export<br/>compress/plan (20 MB ladder)"]
+    sessions["editor/session<br/>per-clip work folders"]
+    prep["editor/media · border · peaks<br/>tracks, waveforms, thumbs, proxy"]
+    graph_["editor/request<br/>filter graph, H.264 encoder"]
+    folder["editor/folder<br/>Prev / Next by date"]
+    media["media/run · probe<br/>hidden ffmpeg / ffprobe"]
+    fsops["fsops + verify<br/>temp → verify → commit → recycle"]
+    menu["shell_menu.rs<br/>register / unregister"]
+  end
+
+  subgraph ui["Svelte windows"]
+    editor["Quick Trim editor<br/>EditorStore · timeline · history"]
+    engine["engine.ts<br/>video + Web Audio per track"]
+    progress["Progress window<br/>Compress / Convert"]
+  end
+
+  subgraph ext["Bundled tools and outputs"]
+    ffmpeg[["ffmpeg / ffprobe<br/>(GPL sidecars)"]]
+    files[("[CLIPPED] · [20MB]<br/>Raw folder · Recycle Bin")]
+  end
+
+  installer --> menu --> registry
+  explorer --> registry
+  registry -- "hasami.exe trim | compress | convert-*" --> cli
+  cli --> single --> flow
+  flow -- "Compress / Convert" --> queue
+  flow -- "Quick Trim" --> editor
+  editor <-- "invoke" --> commands
+  commands --> sessions --> prep
+  commands --> folder
+  commands -- "editor_export" --> queue
+  queue --> jobs
+  jobs --> graph_
+  jobs --> media
+  prep --> media
+  media --> ffmpeg
+  jobs --> fsops --> files
+  queue --> events
+  events -- "hasami://job" --> progress
+  events -- "hasami://editor" --> editor
+  editor --> engine
+
+  click cli "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/cli.rs"
+  click single "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/app/collector.rs"
+  click flow "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/app/flow.rs"
+  click commands "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/app/commands.rs"
+  click events "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/app/events.rs"
+  click queue "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/jobs/queue.rs"
+  click jobs "https://github.com/FluxxDB/hasami/tree/main/src-tauri/src/jobs"
+  click sessions "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/editor/session.rs"
+  click prep "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/editor/media.rs"
+  click graph_ "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/editor/request.rs"
+  click folder "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/editor/folder.rs"
+  click media "https://github.com/FluxxDB/hasami/tree/main/src-tauri/src/media"
+  click fsops "https://github.com/FluxxDB/hasami/tree/main/src-tauri/src/fsops"
+  click menu "https://github.com/FluxxDB/hasami/blob/main/src-tauri/src/shell_menu.rs"
+  click installer "https://github.com/FluxxDB/hasami/blob/main/src-tauri/nsis/hooks.nsh"
+  click editor "https://github.com/FluxxDB/hasami/blob/main/src/editor/store.svelte.ts"
+  click engine "https://github.com/FluxxDB/hasami/blob/main/src/editor/engine.ts"
+  click progress "https://github.com/FluxxDB/hasami/blob/main/src/progress/ProgressWindow.svelte"
+
+  classDef red stroke:#d43545,stroke-width:2px
+  class fsops,queue red
+```
+
+</details>
+
 ## Build from source
 
 You need Windows 10/11 x64, [Rust](https://rustup.rs) 1.89 or newer (MSVC toolchain),

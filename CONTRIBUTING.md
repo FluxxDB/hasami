@@ -54,12 +54,13 @@ cargo test       # unit + integration tests; they generate fixtures with the fet
 
 | Path | What lives there |
 |---|---|
-| `src-tauri/src/` | The Rust side. `app.rs` (Tauri setup, single-instance batching, windows, commands), `cli.rs`, `shell_menu.rs` (HKCU registry menu), `media/` (finding and running ffmpeg/ffprobe, probing), `fsops.rs` + `verify.rs` (temp file → verify → commit → recycle), `compress/` (the 20 MB planner), `jobs/` (Compress, Convert and Export jobs, the serial queue), `editor/` (Quick Trim sessions, media prep and export graphs) |
+| `src-tauri/src/` | The Rust side. `app/` (Tauri setup, single-instance batching, the Flow state machine, windows, commands, events), `cli.rs`, `shell_menu.rs` (HKCU registry menu), `media/` (finding and running ffmpeg/ffprobe, probing), `fsops/` + `verify.rs` (temp file → verify → commit → recycle), `compress/` (the 20 MB planner), `jobs/` (Compress, Convert and Export jobs, the serial queue), `editor/` (Quick Trim sessions, media prep and export graphs) |
 | `src-tauri/tests/` | Integration tests against real ffmpeg output |
 | `src-tauri/nsis/hooks.nsh` | Installer hooks that register and unregister the menu |
 | `src/editor/` | The Quick Trim editor (Svelte 5): timeline model, playback engine, keyboard map, components |
 | `src/progress/` | The small progress window for Compress and Convert |
 | `src/lib/` | Shared TypeScript types and the bundled fonts |
+| `docs/ARCHITECTURE.md` | Component and Quick-export diagrams |
 | `docs/design/` | The design spec (behavior, file-safety rules, visual rules), the implementation plans, product notes, and the approved mockup |
 | `docs/branding/` | The visual system the UI follows |
 
