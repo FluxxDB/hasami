@@ -67,9 +67,6 @@ The keys follow DaVinci Resolve.
 
 A Rust backend (Tauri 2) owns every file and every ffmpeg run, and two small Svelte windows talk to it through commands and events. More detail, including a Quick export step by step, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-<details>
-<summary>Architecture chart (click to expand; boxes link to their source)</summary>
-
 ```mermaid
 flowchart TB
   subgraph win["Windows"]
@@ -149,8 +146,6 @@ flowchart TB
   classDef red stroke:#d43545,stroke-width:2px
   class fsops,queue red
 ```
-
-</details>
 
 ## Build from source
 
