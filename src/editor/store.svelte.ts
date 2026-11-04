@@ -12,6 +12,7 @@
 
 import { api, type EditorEvent, type EditorMedia, type Peaks, type Thumb } from './api';
 import { estimateExportBytes } from './estimate';
+import { ExportLog, inFlight, type ExportMode, type Exports, type LogEntry, type Result } from './exportLog.svelte';
 import { SNAP_PX, zoomAround } from './geometry';
 import { initHistory, isEdited, push, redo, undo, type History } from './history';
 import { folderStep, queueStep, type Current, type Direction, type Queue } from './navigation';
@@ -36,40 +37,11 @@ import {
   toExportRequest,
   videoEnd,
   type Crop,
-  type ExportRequest,
   type Timeline,
 } from './timeline';
 
-export type ExportMode = ExportRequest['mode'];
-
-type LogEntry =
-  /** `visit` is the stay on the clip it was started from (see `EditorStore.visit`). */
-  | { action: ExportMode; id: number; input: string; visit: number }
-  /**
-   * A discard of a clip with exports still to finish (an Export audio still queued reads the
-   * file) is carried out by the Rust side once they're done; `Discard*` events report it.
-   */
-  | { action: 'discard'; input: string; state: 'waiting' | 'done' | 'kept'; message?: string };
 /** What the unsaved-edits dialog is asking about: closing, moving on (Prev / Next), or Discard. */
 export type ConfirmKind = 'close' | 'move' | 'discard';
-/** One line of the results list: something done to a file, and how it stands. */
-export interface Result {
-  input: string;
-  action: ExportMode | 'discard';
-  /**
-   * An export is `queued` until the job queue starts it. A discard is `running` while it waits
-   * for an export, `none` once done, and `failed` when it kept the clip.
-   */
-  state: 'queued' | 'running' | 'done' | 'failed' | 'none';
-  fraction: number;
-  output?: string;
-  bytes?: number;
-  /** Said about a saved export, e.g. that its 20 MB copy couldn't be made. */
-  note?: string;
-  message?: string;
-  originalIntact?: boolean;
-}
-
 // Shown when a command fails without a message of its own.
 const START_FAILED = "The editor couldn't start. Close this window and try Quick Trim again.";
 const OPEN_FAILED = "Couldn't open this clip.";
@@ -161,16 +133,6 @@ export class EditorStore {
    * says why if it still can't (a failed check must not pass for "nothing that way").
    */
   aheadUnknown = $state.raw<Record<Direction, boolean>>({ next: false, prev: false });
-  exports = $state<{
-    /** Job ids handed to the queue and not yet finished. */
-    running: number[];
-    done: { id: number; input: string; output: string; bytes: number; note?: string }[];
-    failed: { id: number; input: string; message: string; originalIntact: boolean }[];
-    /** Latest progress (0..1) of each export the queue has started (absent: still queued). */
-    progress: Record<number, number>;
-  }>({ running: [], done: [], failed: [], progress: {} });
-  /** What was done to each file, in order, for the results list. */
-  log = $state<LogEntry[]>([]);
   /** The export being handed to the job queue (until `editor_export` answers); null otherwise. */
   handing = $state<ExportMode | null>(null);
 
@@ -189,15 +151,14 @@ export class EditorStore {
   /** An export hand-over, Next or Discard is under way; the buttons wait for it. */
   busy = $state(false);
 
+  /** The exports handed to the job queue, and everything done to each file (exportLog.svelte.ts). */
+  private readonly jobs = new ExportLog();
+
   /** Called after each clip loads (the browser mock applies its demo edits here). */
   afterLoad: ((store: EditorStore) => void) | null = null;
 
   private drag: { segId: string; edge: 'start' | 'end'; base: Timeline } | null = null;
   private reply: ((ok: boolean) => void) | null = null;
-  /** Exports already finished, in case their last event beats `editor_export`'s answer. */
-  private finished = new Set<number>();
-  /** The timeline each export was made from, so Next and close know which edits went out. */
-  private exported = new Map<number, Timeline>();
   /**
    * Each opened file's modified time. Next finds the folder's next video from it, even once the
    * file has been recycled or moved.
@@ -265,13 +226,13 @@ export class EditorStore {
   /** The open clip's latest Quick / Save raw export, with how it stands; null when there's none. */
   get videoExport(): Result | null {
     if (this.handing === 'quick' || this.handing === 'save_raw') return this.handover(this.handing);
-    return this.latest((a) => a !== 'audio');
+    return this.jobs.latest(this.visit, (a) => a !== 'audio');
   }
 
   /** The open clip's latest Export audio, with how it stands; null when there's none. */
   get audioExport(): Result | null {
     if (this.handing === 'audio') return this.handover('audio');
-    return this.latest((a) => a === 'audio');
+    return this.jobs.latest(this.visit, (a) => a === 'audio');
   }
 
   /**
@@ -285,16 +246,22 @@ export class EditorStore {
 
   /** The open clip has edits that no export (on its way or done) was made from. */
   get unsaved(): boolean {
-    if (!this.edited) return false;
-    const present = this.history.present;
-    return !this.log.some(
-      (l) => 'id' in l && l.visit === this.visit && this.exported.get(l.id) === present && !this.failedJob(l.id),
-    );
+    return this.edited && !this.jobs.exportedDuring(this.visit, this.history.present);
+  }
+
+  /** The exports handed to the job queue: running, done and failed. */
+  get exports(): Exports {
+    return this.jobs.exports;
+  }
+
+  /** What was done to each file, in order. */
+  get log(): LogEntry[] {
+    return this.jobs.log;
   }
 
   /** The results list's lines, in the order things were done. */
   get results(): Result[] {
-    return this.log.map((entry) => this.resultOf(entry));
+    return this.jobs.results;
   }
 
   /**
@@ -375,7 +342,7 @@ export class EditorStore {
   private async merge(paths: string[]): Promise<void> {
     const q = this.queue;
     const ahead = q.files.slice(q.next);
-    const pending = new Set([...ahead, ...(this.current ? [this.current.path] : []), ...this.leaving()]);
+    const pending = new Set([...ahead, ...(this.current ? [this.current.path] : []), ...this.jobs.leaving()]);
     const fresh: string[] = [];
     for (const p of paths) {
       if (pending.has(p)) continue;
@@ -405,7 +372,7 @@ export class EditorStore {
   async exportClip(mode: ExportMode): Promise<void> {
     const m = this.media;
     if (!m || this.busy || this.locked) return;
-    if (mode === 'audio' && (!this.canExportAudio || this.inFlight(this.audioExport))) return;
+    if (mode === 'audio' && (!this.canExportAudio || inFlight(this.audioExport))) return;
     this.commitLive();
     const fit20 = mode !== 'audio' && this.fit20;
     const timeline = this.history.present;
@@ -423,9 +390,7 @@ export class EditorStore {
         this.notice = plain(err, EXPORT_FAILED);
         return;
       }
-      this.exported.set(id, timeline);
-      this.log.push({ action: mode, id, input: m.path, visit });
-      this.track(id);
+      this.jobs.addExport(mode, id, m.path, visit, timeline);
     } finally {
       this.handing = null;
       this.busy = false;
@@ -487,14 +452,13 @@ export class EditorStore {
       await this.leave();
       // An export of this clip still to finish (an Export audio) needs the file: the Rust side
       // recycles it after that, or keeps it if the export fails.
-      const after = this.runningExportsOf(path);
+      const after = this.jobs.runningExportsOf(path);
       // Logged before asking: Rust may report the outcome (Discard*) before its reply arrives.
-      const at = this.log.length;
-      this.log.push({ action: 'discard', input: path, state: after.length > 0 ? 'waiting' : 'done' });
+      const unlog = this.jobs.addDiscard(path, after.length > 0);
       try {
         await api.discard(path, after);
       } catch (err) {
-        this.log.splice(at, 1);
+        unlog();
         await this.open(path);
         this.discardFailure = { message: plain(err, DISCARD_FAILED), seq: ++this.discardFailures };
         return;
@@ -543,47 +507,18 @@ export class EditorStore {
 
   /** Applies an event from the Rust side. */
   applyEvent(e: EditorEvent): void {
-    const x = this.exports;
     switch (e.type) {
       case 'Files':
         this.addFiles(e.paths).catch((err) => console.error('Adding files failed', err));
         return;
-      case 'ExportStarted':
-        this.track(e.id);
-        if (x.running.includes(e.id) && !(e.id in x.progress)) x.progress[e.id] = 0;
-        return;
-      case 'ExportProgress':
-        if (x.running.includes(e.id)) x.progress[e.id] = e.fraction;
-        return;
-      case 'ExportDone': {
-        this.finish(e.id);
-        x.done.push({ id: e.id, input: e.input, output: e.output, bytes: e.bytes, note: e.note });
-        // A Quick / Save raw export has recycled or moved its original by now.
-        const entry = this.log.find((l) => 'id' in l && l.id === e.id);
-        if (entry && (entry.action === 'quick' || entry.action === 'save_raw')) this.markGone(entry.input);
-        this.refreshAhead();
-        return;
-      }
-      case 'ExportFailed':
-        this.finish(e.id);
-        x.failed.push({ id: e.id, input: e.input, message: e.message, originalIntact: e.original_intact });
-        // Its original usually stayed, and Prev / Next may reach it again; but not when it was
-        // recycled and the new file then couldn't take its name (spec 8.3).
-        if (!e.original_intact) this.markGone(e.input);
-        this.refreshAhead();
-        return;
       case 'ProxyProgress':
         if (e.session === this.media?.session && this.proxyFraction !== null) this.proxyFraction = e.fraction;
         return;
-      case 'DiscardDone':
-      case 'DiscardKept': {
-        const entry = this.log.find((l) => l.action === 'discard' && l.input === e.path && l.state === 'waiting');
-        if (entry?.action !== 'discard') return;
-        entry.state = e.type === 'DiscardDone' ? 'done' : 'kept';
-        if (e.type === 'DiscardKept') entry.message = e.message;
-        else this.markGone(e.path);
-        this.refreshAhead();
-        return;
+      default: {
+        const { gone, ended } = this.jobs.apply(e);
+        if (gone) this.markGone(gone);
+        // An export or discard that ended can change which clips are on their way out.
+        if (ended) this.refreshAhead();
       }
     }
   }
@@ -693,89 +628,23 @@ export class EditorStore {
     return folderStep(from, dir, {
       files: this.queue.files,
       modified: this.modified,
-      leaving: this.leaving(),
+      leaving: this.jobs.leaving(),
       adjacentFile: (path, ms, newer) => api.adjacentFile(path, ms, newer),
     });
   }
 
   /** Files Prev / Next pass over in the queue: on their way out, or gone. */
   private unavailable(): Set<string> {
-    return new Set([...this.leaving(), ...this.gone]);
+    return new Set([...this.jobs.leaving(), ...this.gone]);
   }
 
   private markGone(path: string): void {
     if (!this.gone.has(path)) this.gone = new Set([...this.gone, path]);
   }
 
-  /** Files waiting to be recycled or moved: as good as gone, so they're never opened again. */
-  private leaving(): Set<string> {
-    const running = new Set(this.exports.running);
-    return new Set(
-      this.log.flatMap((l) =>
-        (l.action === 'discard' && l.state === 'waiting') ||
-        ((l.action === 'quick' || l.action === 'save_raw') && running.has(l.id))
-          ? [l.input]
-          : [],
-      ),
-    );
-  }
-
-  /** The open clip's latest export of the kind `pick` accepts, in this visit. */
-  private latest(pick: (action: ExportMode) => boolean): Result | null {
-    for (let i = this.log.length - 1; i >= 0; i--) {
-      const l = this.log[i];
-      if ('id' in l && l.visit === this.visit && pick(l.action)) return this.resultOf(l);
-    }
-    return null;
-  }
-
   /** An export being handed over reads as queued. */
   private handover(action: ExportMode): Result {
     return { input: this.currentPath ?? '', action, state: 'queued', fraction: 0 };
-  }
-
-  private inFlight(r: Result | null): boolean {
-    return r !== null && (r.state === 'queued' || r.state === 'running');
-  }
-
-  private failedJob(id: number): boolean {
-    return this.exports.failed.some((f) => f.id === id);
-  }
-
-  private resultOf(entry: LogEntry): Result {
-    const e = this.exports;
-    if (entry.action === 'discard') {
-      const state = entry.state === 'done' ? 'none' : entry.state === 'kept' ? 'failed' : 'running';
-      return { input: entry.input, action: 'discard', state, fraction: 0, message: entry.message };
-    }
-    const { id, input, action } = entry;
-    const done = e.done.find((d) => d.id === id);
-    if (done) return { input, action, state: 'done', fraction: 1, output: done.output, bytes: done.bytes, note: done.note };
-    const failed = e.failed.find((f) => f.id === id);
-    if (failed) {
-      const { message, originalIntact } = failed;
-      return { input, action, state: 'failed', fraction: 0, message, originalIntact };
-    }
-    if (id in e.progress) return { input, action, state: 'running', fraction: e.progress[id] };
-    return { input, action, state: 'queued', fraction: 0 };
-  }
-
-  /** Follows export `id` until it finishes (a no-op for one already followed or finished). */
-  private track(id: number): void {
-    if (!this.finished.has(id) && !this.exports.running.includes(id)) this.exports.running.push(id);
-  }
-
-  private finish(id: number): void {
-    this.finished.add(id);
-    const x = this.exports;
-    x.running = x.running.filter((r) => r !== id);
-    delete x.progress[id];
-  }
-
-  /** The job ids of exports of `path` still queued or running. */
-  private runningExportsOf(path: string): number[] {
-    const running = new Set(this.exports.running);
-    return this.log.flatMap((l) => ('id' in l && l.input === path && running.has(l.id) ? [l.id] : []));
   }
 
   /**

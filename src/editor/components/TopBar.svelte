@@ -2,7 +2,8 @@
   import { formatPercent } from '../../progress/format';
   import { fileName, metaLine } from '../display';
   import type { Current, Direction } from '../navigation';
-  import type { EditorStore, Result } from '../store.svelte';
+  import type { Result } from '../exportLog.svelte';
+  import type { EditorStore } from '../store.svelte';
   import { RESULTS_ID } from './Summary.svelte';
 
   interface Props {

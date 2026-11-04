@@ -6,7 +6,8 @@
 <script lang="ts">
   import { formatBytes, formatPercent } from '../../progress/format';
   import { fileName } from '../display';
-  import type { EditorStore, Result } from '../store.svelte';
+  import type { Result } from '../exportLog.svelte';
+  import type { EditorStore } from '../store.svelte';
 
   // The results list (spec 5.8): each export and discard and how it went, opened from the top
   // bar's export strip. A popover over the editor: it never replaces the editor and never closes
