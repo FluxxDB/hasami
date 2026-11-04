@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/editor.png" width="900" alt="The Quick Trim editor: viewer, transport and a timeline with one video track and three audio tracks">
+  <img src="docs/screenshots/editor.png" width="900" alt="The Quick Trim editor: viewer, transport and a timeline with one video track and two audio tracks">
 </p>
 
 Hasami (はさみ, "scissors") is a small Windows app for `.mp4`, `.mov`, `.mkv` and
