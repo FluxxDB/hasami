@@ -3,7 +3,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -212,23 +215,48 @@ pub struct VideoEncoder {
     pub args: Vec<String>,
 }
 
-/// Whether the bundled ffmpeg can encode with `name` on this machine: a one-frame test encode,
-/// remembered per encoder name for the life of the process.
+/// How long the one-frame test encode in [`encoder_available`] may take. A stuck hardware driver
+/// would otherwise hold up the export, and every job queued behind it, for good.
+const ENCODER_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Whether the bundled ffmpeg can encode with `name` on this machine: a one-frame test encode
+/// (given up after [`ENCODER_TEST_TIMEOUT`]), remembered per encoder name for the life of the
+/// process.
 pub fn encoder_available(paths: &FfmpegPaths, name: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(&known) = cache.lock().unwrap().get(name) {
+    let lock = || cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(&known) = lock().get(name) {
         return known;
     }
     // Not holding the lock while ffmpeg runs; two threads racing just both run the test.
-    let ok = hidden_command(&paths.ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"])
-        .args(["-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", name, "-f", "null", "-"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    cache.lock().unwrap().insert(name.to_owned(), ok);
+    let mut test = hidden_command(&paths.ffmpeg);
+    test.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"])
+        .args(["-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", name, "-f", "null", "-"]);
+    let ok = succeeds_within(test, ENCODER_TEST_TIMEOUT);
+    lock().insert(name.to_owned(), ok);
     ok
+}
+
+/// Run `command` (its output discarded) and say whether it exits successfully within `limit`. One
+/// still running then is killed, and counts as a failure.
+fn succeeds_within(mut command: Command, limit: Duration) -> bool {
+    let spawned = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = spawned else {
+        return false;
+    };
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -465,6 +493,22 @@ mod tests {
                        "crop":{"x":0,"y":0,"w":1440,"h":810}}"#;
         let crop = serde_json::from_str::<ExportRequest>(json).unwrap().crop;
         assert_eq!(crop, Some(Crop { x: 0, y: 0, w: 1440, h: 810 }));
+    }
+
+    #[test]
+    fn a_test_encode_that_hangs_counts_as_unavailable() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        // Ten seconds of real-time input stands in for a stuck driver.
+        let mut slow = hidden_command(&paths.ffmpeg);
+        slow.args(["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "color=s=64x64:d=10"]);
+        slow.args(["-f", "null", "-"]);
+        let started = std::time::Instant::now();
+        assert!(!succeeds_within(slow, Duration::from_millis(300)));
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+
+        let mut quick = hidden_command(&paths.ffmpeg);
+        quick.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=64x64:d=0.1", "-f", "null", "-"]);
+        assert!(succeeds_within(quick, ENCODER_TEST_TIMEOUT));
     }
 
     #[test]
