@@ -226,50 +226,68 @@ pub struct VideoEncoder {
 /// would otherwise hold up the export, and every job queued behind it, for good.
 const ENCODER_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Whether the bundled ffmpeg can encode with `name` on this machine: a one-frame test encode
-/// (given up after 15 s), remembered per encoder name for the life of the
-/// process.
+/// Whether the bundled ffmpeg can encode with `name` on this machine: a one-frame test encode,
+/// remembered per encoder name for the life of the process. A test that is given up after 15 s
+/// counts as "no" for this export but isn't remembered, so one slow first start of a hardware
+/// driver doesn't send every later export to software.
 pub fn encoder_available(paths: &FfmpegPaths, name: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
+    remembered(CACHE.get_or_init(Default::default), name, || {
+        let mut test = hidden_command(&paths.ffmpeg);
+        test.args(["-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"])
+            .args(["-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", name])
+            .args(["-f", "null", "-"]);
+        run_within(test, ENCODER_TEST_TIMEOUT)
+    })
+}
+
+/// How a bounded test run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestRun {
+    Succeeded,
+    Failed,
+    /// Still running at the deadline, so it was killed. Says nothing lasting about the encoder.
+    TimedOut,
+}
+
+/// The answer for `name` in `cache`, or `test`'s, which is remembered unless the test timed out.
+/// The lock isn't held while `test` runs; two threads racing just both run it.
+fn remembered(cache: &Mutex<HashMap<String, bool>>, name: &str, test: impl FnOnce() -> TestRun) -> bool {
     let lock = || cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(&known) = lock().get(name) {
         return known;
     }
-    // Not holding the lock while ffmpeg runs; two threads racing just both run the test.
-    let mut test = hidden_command(&paths.ffmpeg);
-    test.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"]).args([
-        "-frames:v",
-        "1",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:v",
-        name,
-        "-f",
-        "null",
-        "-",
-    ]);
-    let ok = succeeds_within(test, ENCODER_TEST_TIMEOUT);
-    lock().insert(name.to_owned(), ok);
+    let outcome = test();
+    let ok = outcome == TestRun::Succeeded;
+    if outcome != TestRun::TimedOut {
+        lock().insert(name.to_owned(), ok);
+    }
     ok
 }
 
-/// Run `command` (its output discarded) and say whether it exits successfully within `limit`. One
-/// still running then is killed, and counts as a failure.
-fn succeeds_within(mut command: Command, limit: Duration) -> bool {
+/// Run `command` (its output discarded) for at most `limit`; one still running then is killed.
+/// This covers a run that hangs in user mode: a process stuck inside a kernel driver call only
+/// finishes dying once that call returns.
+fn run_within(mut command: Command, limit: Duration) -> TestRun {
     let spawned = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     let Ok(mut child) = spawned else {
-        return false;
+        return TestRun::Failed;
     };
     let deadline = Instant::now() + limit;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => return if status.success() { TestRun::Succeeded } else { TestRun::Failed },
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return TestRun::TimedOut;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return TestRun::Failed;
             }
         }
     }
@@ -512,30 +530,41 @@ mod tests {
     }
 
     #[test]
-    fn a_test_encode_that_hangs_counts_as_unavailable() {
+    fn a_test_encode_that_hangs_is_given_up() {
         let paths = FfmpegPaths::resolve().unwrap();
         // Ten seconds of real-time input stands in for a stuck driver.
         let mut slow = hidden_command(&paths.ffmpeg);
-        slow.args(["-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "color=s=64x64:d=10"]);
+        slow.args(["-hide_banner", "-loglevel", "error", "-re"]).args(["-f", "lavfi", "-i", "color=s=64x64:d=10"]);
         slow.args(["-f", "null", "-"]);
         let started = std::time::Instant::now();
-        assert!(!succeeds_within(slow, Duration::from_millis(300)));
+        assert_eq!(run_within(slow, Duration::from_millis(300)), TestRun::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
 
         let mut quick = hidden_command(&paths.ffmpeg);
-        quick.args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=s=64x64:d=0.1",
-            "-f",
-            "null",
-            "-",
-        ]);
-        assert!(succeeds_within(quick, ENCODER_TEST_TIMEOUT));
+        quick.args(["-hide_banner", "-loglevel", "error"]).args(["-f", "lavfi", "-i", "color=s=64x64:d=0.1"]);
+        quick.args(["-f", "null", "-"]);
+        assert_eq!(run_within(quick, ENCODER_TEST_TIMEOUT), TestRun::Succeeded);
+
+        let mut broken = hidden_command(&paths.ffmpeg);
+        broken.args(["-hide_banner", "-loglevel", "error", "-i", "no such input"]);
+        assert_eq!(run_within(broken, ENCODER_TEST_TIMEOUT), TestRun::Failed);
+    }
+
+    #[test]
+    fn a_timed_out_encoder_test_is_tried_again_next_time() {
+        let cache = Mutex::new(HashMap::new());
+        let runs = std::cell::Cell::new(0);
+        let test = |outcome| {
+            runs.set(runs.get() + 1);
+            outcome
+        };
+        assert!(!remembered(&cache, "h264_amf", || test(TestRun::TimedOut)));
+        assert!(remembered(&cache, "h264_amf", || test(TestRun::Succeeded)), "the next export tests again");
+        assert!(remembered(&cache, "h264_amf", || panic!("a real answer is remembered")));
+        assert_eq!(runs.get(), 2);
+
+        assert!(!remembered(&cache, "hevc_amf", || TestRun::Failed));
+        assert!(!remembered(&cache, "hevc_amf", || panic!("a failure is remembered too")));
     }
 
     #[test]
