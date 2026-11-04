@@ -231,8 +231,17 @@ pub fn encoder_available(paths: &FfmpegPaths, name: &str) -> bool {
     }
     // Not holding the lock while ffmpeg runs; two threads racing just both run the test.
     let mut test = hidden_command(&paths.ffmpeg);
-    test.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"])
-        .args(["-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", name, "-f", "null", "-"]);
+    test.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"]).args([
+        "-frames:v",
+        "1",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        name,
+        "-f",
+        "null",
+        "-",
+    ]);
     let ok = succeeds_within(test, ENCODER_TEST_TIMEOUT);
     lock().insert(name.to_owned(), ok);
     ok
@@ -507,7 +516,18 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
 
         let mut quick = hidden_command(&paths.ffmpeg);
-        quick.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=64x64:d=0.1", "-f", "null", "-"]);
+        quick.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=s=64x64:d=0.1",
+            "-f",
+            "null",
+            "-",
+        ]);
         assert!(succeeds_within(quick, ENCODER_TEST_TIMEOUT));
     }
 
