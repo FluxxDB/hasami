@@ -30,7 +30,7 @@ describe('queueStep', () => {
 
 describe('folderStep', () => {
   const ctx = (over: Partial<FolderContext> = {}): FolderContext => ({
-    files: [B, C],
+    queuedFiles: () => [B, C],
     modified: new Map(FOLDER.map((p, i) => [p, 1000 + i])),
     leaving: none,
     adjacentFile: async (path, _ms, newer) => {
@@ -52,6 +52,18 @@ describe('folderStep', () => {
 
   it('a queued neighbour takes its place in the queue', async () => {
     expect(await folderStep({ path: D, at: null, side: 'newer' }, 'prev', ctx())).toEqual({ path: C, at: 1 });
+  });
+
+  it('reads the queue as it is once the folder answers: a file queued meanwhile takes its place', async () => {
+    let queued: string[] = [B, C];
+    const c = ctx({
+      queuedFiles: () => queued,
+      adjacentFile: async () => {
+        queued = [B, C, D]; // a Files batch lands while the folder is being read
+        return D;
+      },
+    });
+    expect(await folderStep({ path: C, at: 1 }, 'next', c)).toEqual({ path: D, at: 2 });
   });
 
   it('passes over clips on their way out', async () => {

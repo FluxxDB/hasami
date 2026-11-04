@@ -820,6 +820,19 @@ describe('EditorStore queue and exports', () => {
     expect(s.current).toEqual({ path: E, at: 1 });
   });
 
+  it('a file queued while Next reads the folder opens as the queued file it now is', async () => {
+    folder();
+    const s = await queued([FILES[0]]);
+    vi.mocked(api.adjacentFile).mockImplementationOnce(async () => {
+      s.applyEvent({ type: 'Files', paths: [FILES[1]] }); // lands mid-walk
+      await settle();
+      return FILES[1];
+    });
+    await s.nextVideo();
+    expect(s.current).toEqual({ path: FILES[1], at: 1 });
+    expect(s.queue).toEqual({ files: [FILES[0], FILES[1]], next: 2 });
+  });
+
   it('files arriving with nothing left open open the first of them', async () => {
     const s = await queued([FILES[0]]);
     await s.discard();

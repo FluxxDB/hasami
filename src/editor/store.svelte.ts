@@ -490,7 +490,7 @@ export class EditorStore extends ClipEditor {
 
   private folderStep(from: Current, dir: Direction): Promise<Current | null> {
     return folderStep(from, dir, {
-      files: this.queue.files,
+      queuedFiles: () => this.queue.files,
       modified: this.modified,
       leaving: this.jobs.leaving(),
       adjacentFile: (path, ms, newer) => api.adjacentFile(path, ms, newer),

@@ -52,8 +52,11 @@ export function queueStep(q: Queue, from: Current, dir: Direction, skip: Readonl
 
 /** What the folder walk needs to know. */
 export interface FolderContext {
-  /** The queued files, oldest first. */
-  files: readonly string[];
+  /**
+   * The queued files, oldest first, as they are now: read after each folder look, because more
+   * files can arrive (a `Files` batch) while the walk waits for one.
+   */
+  queuedFiles(): readonly string[];
   /** Each opened file's modified time: the walk goes on from it even once the file is gone. */
   modified: ReadonlyMap<string, number>;
   /** Clips on their way out, passed over. */
@@ -77,7 +80,8 @@ export async function folderStep(from: Current, dir: Direction, ctx: FolderConte
     const found = await ctx.adjacentFile(path, ms, newer);
     if (found === null) return null;
     if (!ctx.leaving.has(found)) {
-      const at = newer ? ctx.files.indexOf(found) : ctx.files.lastIndexOf(found);
+      const files = ctx.queuedFiles();
+      const at = newer ? files.indexOf(found) : files.lastIndexOf(found);
       if (at >= 0) return { path: found, at };
       // Past the queue's newer or older end; a folder clip stays on the side it was on.
       return { path: found, at: null, side: from.at === null ? from.side : newer ? 'newer' : 'older' };
