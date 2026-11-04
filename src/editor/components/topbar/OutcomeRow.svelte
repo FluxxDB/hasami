@@ -21,7 +21,7 @@
 </script>
 
 {#if show && outcome}
-  <div class="outcome" class:failed={outcome.state === 'failed'}>
+  <div class="outcome">
     {#if outcome.state === 'failed'}
       <span class="cap plabel">{LABEL[outcome.action]} failed</span>
       <span class="msg">{outcome.message}</span>

@@ -40,7 +40,7 @@
 
 <header class="topbar" data-tauri-drag-region>
   <div class="brand"><b>HASAMI</b><em>quick trim</em></div>
-  <div class="vsep brand-sep"></div>
+  <div class="vsep"></div>
   <FileTitle {store} borderTitle={title} />
   <div class="spacer" data-tauri-drag-region></div>
 

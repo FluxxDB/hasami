@@ -77,7 +77,7 @@
   {#if results.length > 0}
     <ol class="results">
       {#each results as r, i (i)}
-        <li class:failed={r.state === 'failed'}>
+        <li>
           <div class="what">
             <span class="name" title={r.input}>{fileName(r.input)}</span>
             <span class="action cap">{ACTION[r.action]}</span>
