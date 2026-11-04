@@ -1,4 +1,9 @@
 <script lang="ts">
+  // The Quick Trim editor window: lays out the top bar, viewer, toolbar, track headers, lanes and
+  // status bar around one EditorStore, owns the playback engine (engine.ts, kept in step by sync.ts)
+  // and the choice between the original video and its H.264 proxy (preview.ts), and turns keys
+  // into store commands (keys.ts).
+
   import { untrack } from 'svelte';
   import { api, type EditorMedia } from './api';
   import ConfirmDialog from './components/ConfirmDialog.svelte';

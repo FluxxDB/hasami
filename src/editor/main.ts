@@ -1,3 +1,7 @@
+// The Rust side opens this window as `editor.html` once a Quick Trim batch starts; the files to
+// trim come from `editor_files`, and later batches arrive as `Files` events. The store runs the
+// queue (store.svelte.ts); this file wires it to the window.
+
 import { mount } from 'svelte';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import '../lib/theme.css';
@@ -5,9 +9,6 @@ import { isMock } from './api';
 import EditorWindow from './EditorWindow.svelte';
 import { EditorStore } from './store.svelte';
 
-// The Rust side opens this window as `editor.html` once a Quick Trim batch starts; the files to
-// trim come from `editor_files`, and later batches arrive as `Files` events. The store runs the
-// queue (store.svelte.ts); this file wires it to the window.
 const store = new EditorStore();
 const win = isMock ? null : getCurrentWindow();
 const mockParam = new URLSearchParams(location.search).get('mock');

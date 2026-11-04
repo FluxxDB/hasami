@@ -1,3 +1,7 @@
+// The Rust side opens this window as `progress.html?kind=compress|convert[&ext=mov]`.
+// `kind` (and `ext`, for convert) only seed the window; a `Started` event that carries
+// its own `kind`/`ext` overrides them, which keeps a reused window right across mixed queues.
+
 import { mount } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -6,9 +10,6 @@ import { cancelJob, confirmLowRes, onJobEvent } from '../lib/jobs';
 import ProgressWindow from './ProgressWindow.svelte';
 import type { Kind } from './state';
 
-// The Rust side opens this window as `progress.html?kind=compress|convert[&ext=mov]`.
-// `kind` (and `ext`, for convert) only seed the window; a `Started` event that carries
-// its own `kind`/`ext` overrides them, which keeps a reused window right across mixed queues.
 const params = new URLSearchParams(location.search);
 const kind: Kind = params.get('kind') === 'convert' ? 'convert' : 'compress';
 const ext = params.get('ext')?.replace(/^\./, '') || null;

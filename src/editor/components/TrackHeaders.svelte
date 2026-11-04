@@ -1,4 +1,7 @@
 <script lang="ts">
+  // The headers left of the lanes: V1, then each audio track's tag, color, mute and volume, and the
+  // "+N empty tracks" toggle for source tracks with nothing in them.
+
   import { MUTED_COLOR, formatDb, trackColor } from '../display';
   import { faderDb, faderPos } from '../geometry';
   import type { EditorStore } from '../store.svelte';

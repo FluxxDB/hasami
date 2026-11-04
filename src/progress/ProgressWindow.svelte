@@ -1,4 +1,8 @@
 <script lang="ts">
+  // The small progress window for right-click Compress / Convert jobs (and editor exports whose
+  // window has closed): one job at a time, from its job events (state.ts), with Cancel, the
+  // low-resolution question, and what went wrong. It closes itself 1.5 s after a clean finish.
+
   import { untrack } from 'svelte';
   import type { JobEvent } from '../lib/jobs';
   import { doneLine, formatBytes, formatFps, progressLine } from './format';

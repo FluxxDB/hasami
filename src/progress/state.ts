@@ -1,3 +1,6 @@
+// The progress window's state: `reduce` folds each job event (lib/jobs.ts) into what the window
+// shows. Pure, so it's unit-tested.
+
 import type { JobEvent } from '../lib/jobs';
 
 /** Shown in the title bar as "HASAMI <kind>". */

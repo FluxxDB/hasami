@@ -1,4 +1,8 @@
 <script lang="ts">
+  // The timeline lanes: the ruler, V1 with its thumbnail tiles, one lane per audio track with its
+  // waveform, silences and audio past the end of the video, and the playhead. Pointer input here
+  // selects, scrubs, drags edges, pans and zooms; every action also has a key (spec 5.5).
+
   import { api, type Peaks } from '../api';
   import { BONE, LANE_BG, MUTED_COLOR, formatClock, mixHex, nearestThumb, trackColor } from '../display';
   import { edgeAt, rulerStep, timeToX, xToTime } from '../geometry';

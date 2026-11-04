@@ -1,4 +1,8 @@
 <script lang="ts">
+  // The picture and the transport under it: the <video> the playback engine drives (cropped to the
+  // picture inside a black border unless Keep border is on), the "Preparing preview" meter, the
+  // clip's error or end message, the timecode and the transport buttons.
+
   import { api } from '../api';
   import { cropPlacement, nearestThumb } from '../display';
   import { formatTimecode, videoSourceAt } from '../playbackModel';

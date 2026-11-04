@@ -1,4 +1,7 @@
 <script lang="ts">
+  // The tool row between the viewer and the timeline: Snap and Linked, Cut, Undo / Redo, the master
+  // volume with its ±3 dB steps and Dim (spec 5.4), how much of the clip is kept, and zoom.
+
   import { formatClock, formatDb } from '../display';
   import { faderDb, faderPos, zoomFromPos, zoomPos } from '../geometry';
   import type { EditorStore } from '../store.svelte';

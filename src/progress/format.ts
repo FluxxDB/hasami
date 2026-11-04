@@ -1,3 +1,6 @@
+// Number and text formatting for the progress window (sizes, frame rates, times, percentages);
+// the editor reuses formatBytes and formatPercent. Pure, so it's unit-tested.
+
 import type { Kind } from './state';
 
 /** Decimal (1000-based) size, e.g. "412 MB", "19.4 MB". */
