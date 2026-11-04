@@ -280,15 +280,23 @@ fn commit_new_with(temp: &Path, final_path: &Path, rename: RenameFn, presence: P
 /// free name, without replacing anything. `None` means it already sits in a
 /// `Raw` folder and was left where it is; otherwise the new path.
 pub fn move_to_raw(original: &Path) -> Result<Option<PathBuf>, FsError> {
+    move_to_raw_with(original, &rename_no_replace, &presence)
+}
+
+/// `move_to_raw` with the rename and presence check injectable. A rename that reports failure
+/// although the original is gone from its path and something is at the target counts as done.
+fn move_to_raw_with(original: &Path, rename: RenameFn, presence: PresenceFn) -> Result<Option<PathBuf>, FsError> {
     if in_raw_folder(original) {
         return Ok(None);
     }
     let raw = original.parent().unwrap_or_else(|| Path::new("")).join(RAW_FOLDER);
     std::fs::create_dir_all(&raw).map_err(|e| FsError::with_source("Couldn't create the Raw folder.", e))?;
     let target = unique_path(&raw.join(original.file_name().unwrap_or_default()), None);
-    rename_with_retry(&rename_no_replace, original, &target)
-        .map_err(|e| FsError::with_source("Couldn't move the original into the Raw folder.", e))?;
-    Ok(Some(target))
+    match rename_with_retry(rename, original, &target) {
+        Ok(()) => Ok(Some(target)),
+        Err(_) if presence(original) == Presence::Absent && presence(&target) == Presence::Present => Ok(Some(target)),
+        Err(e) => Err(FsError::with_source("Couldn't move the original into the Raw folder.", e)),
+    }
 }
 
 /// Replace `original` with the finished `temp` file, saved as `final_path`.
@@ -1445,6 +1453,36 @@ mod tests {
         assert_eq!(move_to_raw(&a).unwrap(), None);
         assert_eq!(fs::read(&a).unwrap(), b"1");
         assert_eq!(names(&raw), vec!["a.mp4"]);
+    }
+
+    #[test]
+    fn move_to_raw_counts_a_move_that_reported_failure_but_happened() {
+        let dir = test_dir();
+        let a = dir.path().join("a.mp4");
+        fs::write(&a, b"1").unwrap();
+        let moved_then_failed = |from: &Path, to: &Path| {
+            rename_no_replace(from, to)?;
+            Err(io::Error::other("lost the reply"))
+        };
+        let moved = move_to_raw_with(&a, &moved_then_failed, &presence).unwrap();
+        assert_eq!(moved, Some(dir.path().join("Raw").join("a.mp4")));
+        assert_eq!(fs::read(dir.path().join("Raw").join("a.mp4")).unwrap(), b"1");
+
+        // A move that really failed is still an error, and the original stays.
+        fs::write(&a, b"2").unwrap();
+        let refused = |_: &Path, _: &Path| Err(io::Error::other("refused"));
+        assert!(move_to_raw_with(&a, &refused, &presence).is_err());
+        assert_eq!(fs::read(&a).unwrap(), b"2");
+    }
+
+    #[test]
+    fn a_raw_folder_at_a_drive_root_or_a_bare_name_is_handled() {
+        assert!(in_raw_folder(Path::new(r"C:\Raw\a.mp4")));
+        // Outputs of a clip in C:\Raw go to the drive root.
+        assert_eq!(clipped_path(Path::new(r"C:\Raw\a.mp4"), "mp4"), Path::new(r"C:\[CLIPPED] a.mp4"));
+        // A bare file name (no folder) stays relative to where Hasami was started.
+        assert_eq!(clipped_path(Path::new("a.mov"), "mp4"), Path::new("[CLIPPED] a.mp4"));
+        assert!(!in_raw_folder(Path::new("a.mp4")));
     }
 
     #[test]
