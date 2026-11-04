@@ -80,23 +80,37 @@ impl FsError {
         }
     }
 
-    /// Wrap an I/O error, choosing the wording from what went wrong.
+    /// Wrap an I/O error from replacing an original, choosing the wording from what went wrong.
     fn from_io(err: io::Error) -> Self {
-        // Windows: 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION,
-        // 5 = ERROR_ACCESS_DENIED.
-        let message = match err.raw_os_error() {
-            Some(32) | Some(33) => "Couldn't replace the file because another program is using it.",
-            Some(5) => "Couldn't replace the file because Windows denied access to it.",
-            _ if err.kind() == io::ErrorKind::PermissionDenied => {
-                "Couldn't replace the file because Windows denied access to it."
-            }
-            _ if err.kind() == io::ErrorKind::NotFound => {
-                "Couldn't replace the file because it could no longer be found."
-            }
-            _ if err.kind() == io::ErrorKind::AlreadyExists => {
-                "Couldn't save the new file because a file with that name already exists."
-            }
-            _ => "Couldn't replace the file.",
+        FsError::from_io_while(err, "replace the file")
+    }
+
+    /// Wrap an I/O error from giving a new file its name (no original involved).
+    fn from_io_saving(err: io::Error) -> Self {
+        FsError::from_io_while(err, "save the new file")
+    }
+
+    /// `Couldn't <doing> because <why>.`, the reason read from the error.
+    fn from_io_while(err: io::Error, doing: &str) -> Self {
+        // Windows: 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION, 5 = ERROR_ACCESS_DENIED.
+        let why = match err.raw_os_error() {
+            Some(32) | Some(33) => Some("another program is using it"),
+            Some(5) => Some("Windows denied access to it"),
+            _ => match err.kind() {
+                io::ErrorKind::PermissionDenied => Some("Windows denied access to it"),
+                io::ErrorKind::NotFound => Some("it could no longer be found"),
+                io::ErrorKind::AlreadyExists => {
+                    return FsError::with_source(
+                        "Couldn't save the new file because a file with that name already exists.",
+                        err,
+                    )
+                }
+                _ => None,
+            },
+        };
+        let message = match why {
+            Some(why) => format!("Couldn't {doing} because {why}."),
+            None => format!("Couldn't {doing}."),
         };
         FsError::with_source(message, err)
     }
@@ -257,7 +271,7 @@ fn commit_new_with(temp: &Path, final_path: &Path, rename: RenameFn, presence: P
     // rename may have gone through and the file must be kept.
     if presence(temp) == Presence::Present {
         let _ = std::fs::remove_file(temp);
-        return Err(FsError::from_io(e));
+        return Err(FsError::from_io_saving(e));
     }
     Err(FsError::rename_unsure(temp, final_path, e))
 }
@@ -1315,6 +1329,23 @@ mod tests {
         assert!(err.kept_new_file.is_none());
         assert_eq!(fs::read(&final_path).unwrap(), b"new");
         assert!(!temp.exists(), "the temp file is deleted");
+    }
+
+    #[test]
+    fn a_failed_commit_new_speaks_of_saving_not_replacing() {
+        let dir = test_dir();
+        let final_path = dir.path().join("x.mp4");
+        let temp = temp_path_for(&final_path);
+        fs::write(&temp, b"new").unwrap();
+        let busy = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(32)); // ERROR_SHARING_VIOLATION
+        let err = commit_new_with(&temp, &final_path, &busy, &presence).unwrap_err();
+        assert_eq!(err.message, "Couldn't save the new file because another program is using it.");
+        assert!(!temp.exists());
+
+        fs::write(&temp, b"new").unwrap();
+        let odd = |_: &Path, _: &Path| Err(io::Error::other("odd"));
+        let err = commit_new_with(&temp, &final_path, &odd, &presence).unwrap_err();
+        assert_eq!(err.message, "Couldn't save the new file.");
     }
 
     #[test]
