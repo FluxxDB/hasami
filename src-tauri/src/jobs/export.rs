@@ -29,9 +29,7 @@ use crate::editor::request::{
     build_graph, encoder_available, export_bitrate, h264_encoder, output_size, software_h264, ExportMode,
     ExportRequest, Graph, VideoEncoder,
 };
-use crate::fsops::{
-    clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir,
-};
+use crate::fsops::{clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
 use crate::verify::{verify_output, VerifyError};
@@ -170,8 +168,7 @@ fn save_20mb_copy(
     match plan_compress(&info)? {
         CompressDecision::AlreadySmall => {
             fs::copy(clipped, temp.path()).map_err(|_| JobError::Message(COPY_FAILED.to_owned()))?;
-            verify_output(paths, temp.path(), info.duration_s, Some(SIZE_LIMIT_BYTES))
-                .map_err(plain_verify_error)?;
+            verify_output(paths, temp.path(), info.duration_s, Some(SIZE_LIMIT_BYTES)).map_err(plain_verify_error)?;
             on_progress(JobProgress { pass: 2, passes: 2, fraction: 1.0 });
         }
         CompressDecision::Encode(plan) => {
@@ -270,8 +267,7 @@ impl Job<'_> {
             ExportMode::SaveRaw => {
                 commit_new(self.temp, final_path)?;
                 // The new file is saved either way; only the original's move can still fail.
-                move_to_raw(input)
-                    .map_err(|_| JobError::Message(raw_move_failed(final_path, self.req.fit_20mb)))?;
+                move_to_raw(input).map_err(|_| JobError::Message(raw_move_failed(final_path, self.req.fit_20mb)))?;
             }
             ExportMode::Audio => commit_new(self.temp, final_path)?,
         }
@@ -288,8 +284,7 @@ impl Job<'_> {
         run_ffmpeg(self.paths, args, self.req.duration_s, cancel, &mut |fraction| {
             on_progress(JobProgress { pass: 1, passes: self.passes, fraction })
         })?;
-        let verified =
-            verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
+        let verified = verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
         Ok(verified.size_bytes)
     }
 }
@@ -659,8 +654,8 @@ mod tests {
             let req = ExportRequest { mode, fit_20mb: fit, video: Vec::new(), ..fit_request(&input) };
             let mut ran = false;
             let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
-            let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path())
-                .unwrap_err();
+            let err =
+                export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
             assert_eq!(err.to_string(), NO_VIDEO);
             assert!(!ran, "ffmpeg must not run");
         }
@@ -677,8 +672,7 @@ mod tests {
         let req = ExportRequest { crop: Some(Crop { x: 0, y: 0, w: 320, h: 182 }), ..fit_request(&input) };
         let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
         let mut ran = false;
-        let err =
-            export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+        let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
         assert_eq!(err.to_string(), CROP_DOESNT_FIT);
         assert!(!ran, "ffmpeg must not run");
         assert_eq!(names(dir.path()), ["clip.mkv"]);

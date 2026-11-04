@@ -19,11 +19,9 @@ pub fn run() {
         Ok(action) => {
             // The installer runs `register`/`unregister`; they must exit without starting Tauri
             // (no window, and nothing joins a running instance).
-            if let Some(code) = shell_menu::handle_action(
-                &action,
-                std::env::current_exe(),
-                shell_menu::DEFAULT_CLASSES_ROOT,
-            ) {
+            if let Some(code) =
+                shell_menu::handle_action(&action, std::env::current_exe(), shell_menu::DEFAULT_CLASSES_ROOT)
+            {
                 std::process::exit(code);
             }
             app::run(action)

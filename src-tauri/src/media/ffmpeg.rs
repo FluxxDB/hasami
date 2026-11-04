@@ -44,11 +44,9 @@ impl FfmpegPaths {
         #[cfg(debug_assertions)]
         {
             let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
-            if let Some(found) = Self::in_dir(
-                &dev_dir,
-                "ffmpeg-x86_64-pc-windows-msvc.exe",
-                "ffprobe-x86_64-pc-windows-msvc.exe",
-            ) {
+            if let Some(found) =
+                Self::in_dir(&dev_dir, "ffmpeg-x86_64-pc-windows-msvc.exe", "ffprobe-x86_64-pc-windows-msvc.exe")
+            {
                 return Ok(found);
             }
             searched.push(dev_dir);

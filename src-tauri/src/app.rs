@@ -179,16 +179,9 @@ pub fn run(action: Action) {
         })
         .setup(move |app| {
             let _ = setup_tx.send(Msg::Action(first));
-            let dispatcher = Dispatcher {
-                app: app.handle().clone(),
-                queue: setup_queue,
-                emitted,
-                processed: 0,
-                flow: Flow::new(),
-            };
-            thread::Builder::new()
-                .name("hasami-dispatch".into())
-                .spawn(move || dispatcher.run(rx))?;
+            let dispatcher =
+                Dispatcher { app: app.handle().clone(), queue: setup_queue, emitted, processed: 0, flow: Flow::new() };
+            thread::Builder::new().name("hasami-dispatch".into()).spawn(move || dispatcher.run(rx))?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -256,9 +249,16 @@ enum Msg {
     /// thread that enqueues (see [`Dispatcher::settled`]).
     Export(Box<ExportRequest>, Sender<u64>),
     /// Recycle `path` once every export in `after` is done; answers once it's recorded.
-    Discard { path: String, after: Vec<u64>, reply: Sender<()> },
+    Discard {
+        path: String,
+        after: Vec<u64>,
+        reply: Sender<()>,
+    },
     /// A deferred discard's recycle finished.
-    Recycled { path: String, result: Result<(), String> },
+    Recycled {
+        path: String,
+        result: Result<(), String>,
+    },
 }
 
 /// What the editor window is told. Mirrored in `src/editor/api.ts`.
@@ -266,10 +266,18 @@ enum Msg {
 #[serde(tag = "type")]
 pub enum EditorEvent {
     /// More files from a later Trim launch, to add to the editor's queue.
-    Files { paths: Vec<String> },
-    ExportStarted { id: u64, input: String },
+    Files {
+        paths: Vec<String>,
+    },
+    ExportStarted {
+        id: u64,
+        input: String,
+    },
     /// `fraction` covers the whole export, across all its passes.
-    ExportProgress { id: u64, fraction: f64 },
+    ExportProgress {
+        id: u64,
+        fraction: f64,
+    },
     ExportDone {
         id: u64,
         input: String,
@@ -279,13 +287,26 @@ pub enum EditorEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
-    ExportFailed { id: u64, input: String, message: String, original_intact: bool },
-    ProxyProgress { session: u64, fraction: f64 },
+    ExportFailed {
+        id: u64,
+        input: String,
+        message: String,
+        original_intact: bool,
+    },
+    ProxyProgress {
+        session: u64,
+        fraction: f64,
+    },
     /// A deferred discard sent the clip to the Recycle Bin.
-    DiscardDone { path: String },
+    DiscardDone {
+        path: String,
+    },
     /// A deferred discard left the clip where it was (an export it waited for didn't finish, or
     /// the recycle failed).
-    DiscardKept { path: String, message: String },
+    DiscardKept {
+        path: String,
+        message: String,
+    },
 }
 
 /// Why a deferred discard left the clip in place.
@@ -391,12 +412,10 @@ async fn blocking<T: Send + 'static>(
     app: AppHandle,
     work: impl FnOnce(&AppHandle, &AppState) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(move || work(&app, &app.state::<AppState>()))
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("hasami: an editor command panicked: {e}");
-            Err(COMMAND_FAILED.to_owned())
-        })
+    tauri::async_runtime::spawn_blocking(move || work(&app, &app.state::<AppState>())).await.unwrap_or_else(|e| {
+        eprintln!("hasami: an editor command panicked: {e}");
+        Err(COMMAND_FAILED.to_owned())
+    })
 }
 
 /// The files the editor window was opened with.
@@ -422,7 +441,8 @@ async fn editor_open(app: AppHandle, path: String) -> Result<EditorMediaDto, Str
             lock(&state.sessions).close(session);
             return Err(OPEN_FAILED.to_owned());
         }
-        let modified_ms = std::fs::metadata(&input).and_then(|m| m.modified()).ok().and_then(folder::millis).unwrap_or(0);
+        let modified_ms =
+            std::fs::metadata(&input).and_then(|m| m.modified()).ok().and_then(folder::millis).unwrap_or(0);
         Ok(EditorMediaDto::new(session, &input, &media, modified_ms))
     })
     .await
@@ -440,12 +460,12 @@ async fn editor_adjacent_file(
     newer: bool,
 ) -> Result<Option<String>, String> {
     blocking(app, move |_, _| {
-        adjacent_video(Path::new(&path), modified_ms, newer).map(|found| found.map(|p| p.display().to_string())).map_err(
-            |e| {
+        adjacent_video(Path::new(&path), modified_ms, newer)
+            .map(|found| found.map(|p| p.display().to_string()))
+            .map_err(|e| {
                 eprintln!("hasami: could not look for the neighbouring video of {path}: {e}");
                 if newer { NEXT_FAILED } else { PREV_FAILED }.to_owned()
-            },
-        )
+            })
     })
     .await
 }
@@ -765,7 +785,10 @@ impl Dispatcher {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Effect {
     /// Open the progress window.
-    OpenWindow { kind: &'static str, ext: Option<&'static str> },
+    OpenWindow {
+        kind: &'static str,
+        ext: Option<&'static str>,
+    },
     /// Send to the progress window (only produced once it listens).
     Emit(JobEvent),
     /// Open the editor window for these files.
@@ -950,7 +973,8 @@ impl Flow {
                 i += 1;
             } else if !ok {
                 let discard = self.discards.remove(i);
-                let event = EditorEvent::DiscardKept { message: kept_message(&discard.path), path: discard.path.clone() };
+                let event =
+                    EditorEvent::DiscardKept { message: kept_message(&discard.path), path: discard.path.clone() };
                 self.report_discard(&discard, event, out);
             } else {
                 if d.waiting.is_empty() {
@@ -1066,7 +1090,14 @@ impl Flow {
     }
 
     /// Show a failed export in the progress window, opening it if needed.
-    fn show_export_failure(&mut self, id: u64, input: String, message: String, original_intact: bool, out: &mut Vec<Effect>) {
+    fn show_export_failure(
+        &mut self,
+        id: u64,
+        input: String,
+        message: String,
+        original_intact: bool,
+        out: &mut Vec<Effect>,
+    ) {
         self.show_export_outcome(id, input, JobEvent::Failed { id, message, original_intact }, out);
     }
 
@@ -1347,10 +1378,7 @@ mod tests {
         let batch = c.take_due(t0 + ms(1000)).expect("batch due");
         assert_eq!(
             batch.jobs,
-            vec![
-                (JobKind::Compress, files(&["a.mp4", "c.mp4"])),
-                (JobKind::Convert(Target::Mov), files(&["b.mkv"])),
-            ]
+            vec![(JobKind::Compress, files(&["a.mp4", "c.mp4"])), (JobKind::Convert(Target::Mov), files(&["b.mkv"])),]
         );
         assert!(batch.trims.is_empty());
         assert!(c.is_empty());
@@ -1520,10 +1548,7 @@ mod tests {
                 Effect::Enqueue(JobKind::Compress, files(&["b.mp4"])),
             ]
         );
-        assert_eq!(
-            f.on_job_event(queued(1, 2), false),
-            vec![Effect::OpenWindow { kind: "convert", ext: Some("mov") }]
-        );
+        assert_eq!(f.on_job_event(queued(1, 2), false), vec![Effect::OpenWindow { kind: "convert", ext: Some("mov") }]);
     }
 
     #[test]
@@ -1762,7 +1787,6 @@ mod tests {
         assert!(effects.contains(&Effect::EmitEditor(EditorEvent::ExportStarted { id, input: "t.mp4".into() })));
     }
 
-
     #[test]
     fn a_trim_batch_opens_the_editor() {
         let t0 = Instant::now();
@@ -1772,10 +1796,7 @@ mod tests {
         f.on_action(Action::Trim(files(&["b.mp4"])), t0 + ms(20));
         assert_eq!(
             f.on_tick(t0 + ms(420)),
-            vec![
-                Effect::Enqueue(JobKind::Compress, files(&["c.mp4"])),
-                Effect::OpenEditor(files(&["a.mp4", "b.mp4"])),
-            ]
+            vec![Effect::Enqueue(JobKind::Compress, files(&["c.mp4"])), Effect::OpenEditor(files(&["a.mp4", "b.mp4"])),]
         );
     }
 
@@ -1792,10 +1813,7 @@ mod tests {
         assert_eq!(f.on_editor_ready(), to_editor(&[appended]));
         // Once it listens, they go straight to it.
         f.on_action(Action::Trim(files(&["d.mp4"])), t0 + ms(1000));
-        assert_eq!(
-            f.on_tick(t0 + ms(1400)),
-            to_editor(&[EditorEvent::Files { paths: strings(&["d.mp4"]) }])
-        );
+        assert_eq!(f.on_tick(t0 + ms(1400)), to_editor(&[EditorEvent::Files { paths: strings(&["d.mp4"]) }]));
     }
 
     #[test]
@@ -1808,10 +1826,7 @@ mod tests {
         );
         // Pass 2 of 3, half done: halfway through the whole export.
         let tick = JobEvent::Progress { id: 5, pass: 2, passes: 3, fraction: 0.5, eta_s: None };
-        assert_eq!(
-            f.on_job_event(tick, false),
-            to_editor(&[EditorEvent::ExportProgress { id: 5, fraction: 0.5 }])
-        );
+        assert_eq!(f.on_job_event(tick, false), to_editor(&[EditorEvent::ExportProgress { id: 5, fraction: 0.5 }]));
         assert_eq!(
             f.on_job_event(done(5), false),
             to_editor(&[EditorEvent::ExportDone {
@@ -1961,7 +1976,6 @@ mod tests {
         assert_eq!(f.on_job_event(ask, false), vec![Effect::Decline(5)]);
     }
 
-
     // ---- Deferred discards ----
 
     /// `editing()` with an export of `input` enqueued on a real queue, and Discard of `input`
@@ -2026,14 +2040,13 @@ mod tests {
         let messages: Vec<_> = shown
             .iter()
             .filter_map(|e| match e {
-                Effect::Emit(JobEvent::Failed { message, original_intact, .. }) => Some((message.clone(), *original_intact)),
+                Effect::Emit(JobEvent::Failed { message, original_intact, .. }) => {
+                    Some((message.clone(), *original_intact))
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            messages,
-            vec![("Couldn't export this clip.".to_string(), true), (kept_message("fail.mp4"), true)]
-        );
+        assert_eq!(messages, vec![("Couldn't export this clip.".to_string(), true), (kept_message("fail.mp4"), true)]);
         assert_eq!(f.on_window_closed(true), vec![Effect::Exit]);
     }
 

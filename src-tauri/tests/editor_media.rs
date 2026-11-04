@@ -153,7 +153,8 @@ fn peaks_of_silence_are_flat() {
     let dir = tempfile::tempdir().unwrap();
     let silent = dir.path().join("silent.m4a");
     let out = hidden_command(&paths().ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:a", "aac"])
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:a", "aac"])
         .arg(&silent)
         .output()
         .unwrap();

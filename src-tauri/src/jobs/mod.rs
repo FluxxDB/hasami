@@ -29,9 +29,17 @@ pub struct JobProgress {
 pub enum JobOutcome {
     /// `note` says something went partly wrong although `output` was saved, e.g. the editor's
     /// extra 20 MB copy couldn't be made. Plain language, shown as is.
-    Done { output: PathBuf, bytes: u64, note: Option<String> },
-    Unchanged { reason: String },
-    NeedsConfirm { plan: CompressPlan },
+    Done {
+        output: PathBuf,
+        bytes: u64,
+        note: Option<String>,
+    },
+    Unchanged {
+        reason: String,
+    },
+    NeedsConfirm {
+        plan: CompressPlan,
+    },
 }
 
 /// Why a job failed. `Display` is shown to the user in the progress window.
@@ -103,10 +111,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_failures_read_as_plain_language() {
-        assert_eq!(
-            failed("[out#0/mp4 @ 0x1] Error writing trailer: No space left on device"),
-            DISK_FULL
-        );
+        assert_eq!(failed("[out#0/mp4 @ 0x1] Error writing trailer: No space left on device"), DISK_FULL);
         assert_eq!(failed("C:\\clips\\.a.mp4.hasami-tmp: Permission denied"), NO_WRITE_ACCESS);
         assert_eq!(failed("Invalid data found when processing input"), PROCESS_FAILED);
         assert_eq!(failed(""), PROCESS_FAILED);
@@ -127,10 +132,8 @@ mod tests {
     fn only_a_stranded_commit_reports_the_original_as_moved() {
         assert!(JobError::Message("x".into()).original_intact());
         assert!(JobError::Fs(FsError::new("x")).original_intact());
-        let stranded = FsError::stranded(
-            std::path::Path::new(r"C:\d\.a.mp4.hasami-tmp"),
-            std::io::Error::from_raw_os_error(5),
-        );
+        let stranded =
+            FsError::stranded(std::path::Path::new(r"C:\d\.a.mp4.hasami-tmp"), std::io::Error::from_raw_os_error(5));
         let e = JobError::Fs(stranded);
         assert!(!e.original_intact());
         assert!(e.keeps_new_file());

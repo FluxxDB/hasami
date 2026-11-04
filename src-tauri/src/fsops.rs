@@ -31,10 +31,7 @@ impl FsError {
         FsError { message: message.into(), original_intact: true, kept_new_file: None, source: None }
     }
 
-    fn with_source(
-        message: impl Into<String>,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
+    fn with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         FsError { source: Some(Box::new(source)), ..FsError::new(message) }
     }
 
@@ -88,9 +85,7 @@ impl FsError {
         // Windows: 32 = ERROR_SHARING_VIOLATION, 33 = ERROR_LOCK_VIOLATION,
         // 5 = ERROR_ACCESS_DENIED.
         let message = match err.raw_os_error() {
-            Some(32) | Some(33) => {
-                "Couldn't replace the file because another program is using it."
-            }
+            Some(32) | Some(33) => "Couldn't replace the file because another program is using it.",
             Some(5) => "Couldn't replace the file because Windows denied access to it.",
             _ if err.kind() == io::ErrorKind::PermissionDenied => {
                 "Couldn't replace the file because Windows denied access to it."
@@ -203,9 +198,7 @@ pub fn compressed_path(input: &Path, videos_dir: &Path) -> PathBuf {
     let stem = input.file_stem().unwrap_or_default();
     let stem = match stem.to_str() {
         Some(mut bare) => {
-            while let Some(rest) =
-                bare.strip_prefix(CLIPPED_PREFIX).or_else(|| bare.strip_prefix(COMPRESSED_PREFIX))
-            {
+            while let Some(rest) = bare.strip_prefix(CLIPPED_PREFIX).or_else(|| bare.strip_prefix(COMPRESSED_PREFIX)) {
                 bare = rest;
             }
             OsString::from(bare)
@@ -238,9 +231,7 @@ pub fn videos_dir() -> Result<PathBuf, FsError> {
 
 /// True when the folder holding `path` is named `Raw` (any letter case).
 pub fn in_raw_folder(path: &Path) -> bool {
-    path.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(RAW_FOLDER))
+    path.parent().and_then(Path::file_name).is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(RAW_FOLDER))
 }
 
 /// Give the finished `temp` file its name, `final_path`, without ever replacing
@@ -255,16 +246,9 @@ pub fn commit_new(temp: &Path, final_path: &Path) -> Result<(), FsError> {
 
 /// `commit_new` with the rename and presence check injectable, so the failure
 /// paths can be tested deterministically.
-fn commit_new_with(
-    temp: &Path,
-    final_path: &Path,
-    rename: RenameFn,
-    presence: PresenceFn,
-) -> Result<(), FsError> {
+fn commit_new_with(temp: &Path, final_path: &Path, rename: RenameFn, presence: PresenceFn) -> Result<(), FsError> {
     if !temp.is_file() {
-        return Err(FsError::new(
-            "Couldn't save the new file because it could no longer be found.",
-        ));
+        return Err(FsError::new("Couldn't save the new file because it could no longer be found."));
     }
     let Err(e) = rename_with_retry(rename, temp, final_path) else {
         return Ok(());
@@ -286,12 +270,10 @@ pub fn move_to_raw(original: &Path) -> Result<Option<PathBuf>, FsError> {
         return Ok(None);
     }
     let raw = original.parent().unwrap_or_else(|| Path::new("")).join(RAW_FOLDER);
-    std::fs::create_dir_all(&raw)
-        .map_err(|e| FsError::with_source("Couldn't create the Raw folder.", e))?;
+    std::fs::create_dir_all(&raw).map_err(|e| FsError::with_source("Couldn't create the Raw folder.", e))?;
     let target = unique_path(&raw.join(original.file_name().unwrap_or_default()), None);
-    rename_with_retry(&rename_no_replace, original, &target).map_err(|e| {
-        FsError::with_source("Couldn't move the original into the Raw folder.", e)
-    })?;
+    rename_with_retry(&rename_no_replace, original, &target)
+        .map_err(|e| FsError::with_source("Couldn't move the original into the Raw folder.", e))?;
     Ok(Some(target))
 }
 
@@ -365,8 +347,7 @@ fn replace_in_place(
         }
         // The original is gone (or going) anyway; finish the replacement,
         // without claiming to know it is in the Recycle Bin.
-        return rename_with_retry(rename, temp, final_path)
-            .map_err(|e| FsError::stranded_unsure(temp, Some(e)));
+        return rename_with_retry(rename, temp, final_path).map_err(|e| FsError::stranded_unsure(temp, Some(e)));
     }
     if presence(original) == Presence::Present {
         // Recycling reported success, yet something is still at the path. A
@@ -433,8 +414,8 @@ fn presence(path: &Path) -> Presence {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_STANDARD_INFO, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+        OPEN_EXISTING,
     };
 
     let Ok(wide) = verbatim_wide(path) else {
@@ -510,8 +491,7 @@ fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
 
     let (from, to) = (verbatim_wide(from)?, verbatim_wide(to)?);
-    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }
-        .map_err(win32_io_error)
+    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }.map_err(win32_io_error)
 }
 
 /// Win32 errors arrive as HRESULTs (0x8007xxxx); hand back the plain Windows
@@ -622,17 +602,16 @@ fn recycle_impl(path: &Path) -> windows::core::Result<()> {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{
-        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE,
-        FOF_ALLOWUNDO, FOF_NO_UI,
+        FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO,
+        FOF_NO_UI,
     };
 
     if !path.exists() {
         return Err(Error::from(ERROR_FILE_NOT_FOUND));
     }
-    let absolute = std::path::absolute(path).map_err(|e| Error::new(
-        windows::core::HRESULT::from_win32(e.raw_os_error().unwrap_or(0) as u32),
-        "could not resolve path",
-    ))?;
+    let absolute = std::path::absolute(path).map_err(|e| {
+        Error::new(windows::core::HRESULT::from_win32(e.raw_os_error().unwrap_or(0) as u32), "could not resolve path")
+    })?;
     let wide: Vec<u16> = absolute.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
 
     // Initialise COM for this call; undo it only if we are the ones who did.
@@ -660,10 +639,7 @@ fn recycle_impl(path: &Path) -> windows::core::Result<()> {
         op.DeleteItem(&item, None)?;
         op.PerformOperations()?;
         if op.GetAnyOperationsAborted()?.as_bool() {
-            return Err(Error::new(
-                windows::Win32::Foundation::E_ABORT,
-                "the operation was aborted",
-            ));
+            return Err(Error::new(windows::Win32::Foundation::E_ABORT, "the operation was aborted"));
         }
     }
     Ok(())
@@ -682,7 +658,11 @@ mod tests {
     fn recycler(fails: u32, calls: &std::cell::Cell<u32>) -> impl Fn(&Path) -> Result<(), FsError> + '_ {
         move |_| {
             calls.set(calls.get() + 1);
-            if calls.get() <= fails { Err(FsError::new(RECYCLE_FAILED)) } else { Ok(()) }
+            if calls.get() <= fails {
+                Err(FsError::new(RECYCLE_FAILED))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -764,18 +744,13 @@ mod tests {
 
     #[test]
     fn with_extension_swaps_ext() {
-        assert_eq!(
-            with_extension(Path::new(r"C:\d\a.mkv"), "mp4"),
-            Path::new(r"C:\d\a.mp4")
-        );
+        assert_eq!(with_extension(Path::new(r"C:\d\a.mkv"), "mp4"), Path::new(r"C:\d\a.mp4"));
     }
 
     /// Every name in `dir`, sorted.
     fn names(dir: &Path) -> Vec<String> {
-        let mut v: Vec<String> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
+        let mut v: Vec<String> =
+            fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         v.sort();
         v
     }
@@ -840,11 +815,7 @@ mod tests {
         fs::write(&original, b"precious").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        let _lock = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(&original)
-            .unwrap();
+        let _lock = fs::OpenOptions::new().read(true).share_mode(0).open(&original).unwrap();
 
         let err = commit_replace(&temp, &original, &original).unwrap_err();
         assert!(err.message.contains("another program"), "{}", err.message);
@@ -867,11 +838,7 @@ mod tests {
         fs::write(&original, b"precious").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(&original)
-            .unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&original).unwrap();
 
         let err = commit_replace(&temp, &original, &final_path).unwrap_err();
         assert!(err.message.contains("another program"), "{}", err.message);
@@ -930,8 +897,8 @@ mod tests {
         fs::write(&original, b"precious").unwrap();
 
         let recycle_called = |_: &Path| -> Result<(), FsError> { panic!("must not recycle") };
-        let err = commit_replace_with(&temp, &original, &original, &recycle_called, &never_rename, &presence)
-            .unwrap_err();
+        let err =
+            commit_replace_with(&temp, &original, &original, &recycle_called, &never_rename, &presence).unwrap_err();
         assert!(err.original_intact);
 
         assert_eq!(fs::read(&original).unwrap(), b"precious");
@@ -946,8 +913,8 @@ mod tests {
         fs::write(&original, b"precious").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        let err = commit_replace_with(&temp, &original, &original, &failing_recycle, &never_rename, &presence)
-            .unwrap_err();
+        let err =
+            commit_replace_with(&temp, &original, &original, &failing_recycle, &never_rename, &presence).unwrap_err();
         assert!(err.message.contains("Recycle Bin"), "{}", err.message);
         assert!(err.original_intact);
 
@@ -963,8 +930,7 @@ mod tests {
         fs::write(&original, b"old").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        commit_replace_with(&temp, &original, &original, &delete_then_fail, &rename_no_replace, &presence)
-            .unwrap();
+        commit_replace_with(&temp, &original, &original, &delete_then_fail, &rename_no_replace, &presence).unwrap();
 
         assert_eq!(fs::read(&original).unwrap(), b"new");
         assert!(!temp.exists());
@@ -980,8 +946,7 @@ mod tests {
 
         // Reports success but leaves the file: a rename now could overwrite it.
         let pretend = |_: &Path| -> Result<(), FsError> { Ok(()) };
-        let err = commit_replace_with(&temp, &original, &original, &pretend, &never_rename, &presence)
-            .unwrap_err();
+        let err = commit_replace_with(&temp, &original, &original, &pretend, &never_rename, &presence).unwrap_err();
         // Recycling claimed success, so the original may well be in the Bin: keep the new file.
         assert!(!err.original_intact);
         assert_eq!(err.kept_new_file.as_deref(), Some(temp.as_path()));
@@ -1028,8 +993,7 @@ mod tests {
             calls.set(calls.get() + 1);
             Err(io::Error::from_raw_os_error(5)) // ERROR_ACCESS_DENIED
         };
-        let err = commit_replace_with(&temp, &original, &original, &delete_ok, &always_denied, &presence)
-            .unwrap_err();
+        let err = commit_replace_with(&temp, &original, &original, &delete_ok, &always_denied, &presence).unwrap_err();
 
         assert_eq!(calls.get(), RENAME_ATTEMPTS, "retried before giving up");
         assert!(!err.original_intact);
@@ -1073,8 +1037,7 @@ mod tests {
         fs::write(&original, b"old").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        commit_replace_with(&temp, &original, &final_path, &delete_then_fail, &rename_no_replace, &presence)
-            .unwrap();
+        commit_replace_with(&temp, &original, &final_path, &delete_then_fail, &rename_no_replace, &presence).unwrap();
 
         assert_eq!(fs::read(&final_path).unwrap(), b"new");
         assert!(!original.exists());
@@ -1091,8 +1054,7 @@ mod tests {
 
         let recycle_called = |_: &Path| -> Result<(), FsError> { panic!("must not recycle") };
         let refuse = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(183)); // ERROR_ALREADY_EXISTS
-        let err = commit_replace_with(&temp, &original, &final_path, &recycle_called, &refuse, &presence)
-            .unwrap_err();
+        let err = commit_replace_with(&temp, &original, &final_path, &recycle_called, &refuse, &presence).unwrap_err();
         assert!(err.message.contains("already exists"), "{}", err.message);
         assert!(err.original_intact);
         assert!(err.kept_new_file.is_none());
@@ -1116,8 +1078,7 @@ mod tests {
         fs::write(&temp, b"new").unwrap();
 
         // Delete-pending original: recycling fails, then the path can't be looked at.
-        commit_replace_with(&temp, &original, &original, &delete_then_fail, &rename_no_replace, &unreadable)
-            .unwrap();
+        commit_replace_with(&temp, &original, &original, &delete_then_fail, &rename_no_replace, &unreadable).unwrap();
         assert_eq!(fs::read(&original).unwrap(), b"new");
 
         // If the original was in fact still there, the non-replacing rename can't
@@ -1138,8 +1099,7 @@ mod tests {
         fs::write(&original, b"old").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        commit_replace_with(&temp, &original, &original, &delete_ok, &rename_no_replace, &unreadable)
-            .unwrap();
+        commit_replace_with(&temp, &original, &original, &delete_ok, &rename_no_replace, &unreadable).unwrap();
 
         assert_eq!(fs::read(&original).unwrap(), b"new");
         assert_eq!(names(dir.path()), vec!["hasami-test-u2.mp4"]);
@@ -1154,8 +1114,7 @@ mod tests {
         fs::write(&original, b"old").unwrap();
         fs::write(&temp, b"new").unwrap();
 
-        commit_replace_with(&temp, &original, &final_path, &failing_recycle, &rename_no_replace, &unreadable)
-            .unwrap();
+        commit_replace_with(&temp, &original, &final_path, &failing_recycle, &rename_no_replace, &unreadable).unwrap();
 
         assert_eq!(fs::read(&final_path).unwrap(), b"new");
         assert!(!temp.exists());
@@ -1177,11 +1136,7 @@ mod tests {
         const DELETE: u32 = 0x0001_0000;
 
         let holder = fs::OpenOptions::new().read(true).share_mode(SHARE_ALL).open(path).unwrap();
-        let deleter = fs::OpenOptions::new()
-            .access_mode(DELETE)
-            .share_mode(SHARE_ALL)
-            .open(path)
-            .unwrap();
+        let deleter = fs::OpenOptions::new().access_mode(DELETE).share_mode(SHARE_ALL).open(path).unwrap();
         let info = FILE_DISPOSITION_INFO { DeleteFile: true };
         unsafe {
             SetFileInformationByHandle(
@@ -1277,10 +1232,7 @@ mod tests {
 
     #[test]
     fn clipped_path_prefixes_and_keeps_ext() {
-        assert_eq!(
-            clipped_path(Path::new(r"C:\d\Replay 1.mp4"), "mp4"),
-            Path::new(r"C:\d\[CLIPPED] Replay 1.mp4")
-        );
+        assert_eq!(clipped_path(Path::new(r"C:\d\Replay 1.mp4"), "mp4"), Path::new(r"C:\d\[CLIPPED] Replay 1.mp4"));
     }
 
     #[test]
@@ -1296,19 +1248,13 @@ mod tests {
     fn clipped_path_counts_collisions() {
         let dir = test_dir();
         fs::write(dir.path().join("[CLIPPED] a.mp4"), b"1").unwrap();
-        assert_eq!(
-            clipped_path(&dir.path().join("a.mp4"), "mp4"),
-            dir.path().join("[CLIPPED] a (2).mp4")
-        );
+        assert_eq!(clipped_path(&dir.path().join("a.mp4"), "mp4"), dir.path().join("[CLIPPED] a (2).mp4"));
     }
 
     #[test]
     fn clipped_path_from_raw_folder_goes_to_parent() {
         let dir = test_dir();
-        assert_eq!(
-            clipped_path(&dir.path().join("raw").join("a.mov"), "mp4"),
-            dir.path().join("[CLIPPED] a.mp4")
-        );
+        assert_eq!(clipped_path(&dir.path().join("raw").join("a.mov"), "mp4"), dir.path().join("[CLIPPED] a.mp4"));
     }
 
     #[test]

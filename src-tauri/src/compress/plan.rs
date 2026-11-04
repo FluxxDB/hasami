@@ -15,8 +15,7 @@ const MIN_BITS_PER_PIXEL: f64 = 0.05;
 const AUDIO_BUDGET_SHARE: f64 = 0.10;
 
 /// `(bits per second, mono)` audio options, best first.
-const AUDIO_OPTIONS: [(u32, bool); 4] =
-    [(128_000, false), (96_000, false), (64_000, false), (32_000, true)];
+const AUDIO_OPTIONS: [(u32, bool); 4] = [(128_000, false), (96_000, false), (64_000, false), (32_000, true)];
 const AUDIO_FALLBACK: (u32, bool) = (32_000, true);
 
 /// `(height, fps)` ladder, best first.
@@ -195,13 +194,7 @@ mod tests {
     }
 
     fn src_1080p60(duration_s: f64, audio_tracks: usize) -> MediaInfo {
-        info(
-            "mp4",
-            duration_s,
-            412_000_000,
-            Some((1920, 1080, 60.0, "h264", Some(35_000_000))),
-            audio_tracks,
-        )
+        info("mp4", duration_s, 412_000_000, Some((1920, 1080, 60.0, "h264", Some(35_000_000))), audio_tracks)
     }
 
     fn encode(decision: Result<CompressDecision, CompressError>) -> CompressPlan {
@@ -258,9 +251,8 @@ mod tests {
 
     #[test]
     fn plan_already_small() {
-        let small = |container: &str| {
-            info(container, 10.0, 2_000_000, Some((1280, 720, 30.0, "h264", Some(1_200_000))), 1)
-        };
+        let small =
+            |container: &str| info(container, 10.0, 2_000_000, Some((1280, 720, 30.0, "h264", Some(1_200_000))), 1);
         assert_eq!(plan_compress(&small("mp4")).unwrap(), CompressDecision::AlreadySmall);
 
         let plan = encode(plan_compress(&small("mkv")));

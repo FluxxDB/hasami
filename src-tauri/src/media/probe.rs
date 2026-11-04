@@ -118,8 +118,7 @@ struct RawDisposition {
 }
 
 fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
-    let raw: RawProbe =
-        serde_json::from_slice(json).map_err(|e| MediaError::ProbeParse(e.to_string()))?;
+    let raw: RawProbe = serde_json::from_slice(json).map_err(|e| MediaError::ProbeParse(e.to_string()))?;
 
     let duration_s = raw
         .format
@@ -165,10 +164,7 @@ fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
 
     Ok(MediaInfo {
         path: file.to_path_buf(),
-        container: file
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default(),
+        container: file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default(),
         duration_s,
         size_bytes,
         bit_rate: raw.format.bit_rate.as_deref().and_then(|b| b.parse().ok()),
@@ -211,7 +207,9 @@ mod tests {
     #[test]
     fn a_quarter_turned_video_reports_its_display_size() {
         let matrix = |deg: &str| {
-            format!(r#","side_data_list":[{{"side_data_type":"Display Matrix","displaymatrix":"...","rotation":{deg}}}]"#)
+            format!(
+                r#","side_data_list":[{{"side_data_type":"Display Matrix","displaymatrix":"...","rotation":{deg}}}]"#
+            )
         };
         assert_eq!(size(&matrix("-90")), (1080, 1920));
         assert_eq!(size(&matrix("90")), (1080, 1920));

@@ -32,36 +32,11 @@ struct Verb {
 }
 
 const VERBS: [Verb; 5] = [
-    Verb {
-        key: "01trim",
-        label: "Quick Trim",
-        command: "trim",
-        skip_for: None,
-    },
-    Verb {
-        key: "02compress",
-        label: "Compress",
-        command: "compress",
-        skip_for: None,
-    },
-    Verb {
-        key: "03mp4",
-        label: "Convert to .mp4",
-        command: "convert-mp4",
-        skip_for: Some("mp4"),
-    },
-    Verb {
-        key: "04mov",
-        label: "Convert to .mov",
-        command: "convert-mov",
-        skip_for: Some("mov"),
-    },
-    Verb {
-        key: "05mp3",
-        label: "Convert to .mp3",
-        command: "convert-mp3",
-        skip_for: None,
-    },
+    Verb { key: "01trim", label: "Quick Trim", command: "trim", skip_for: None },
+    Verb { key: "02compress", label: "Compress", command: "compress", skip_for: None },
+    Verb { key: "03mp4", label: "Convert to .mp4", command: "convert-mp4", skip_for: Some("mp4") },
+    Verb { key: "04mov", label: "Convert to .mov", command: "convert-mov", skip_for: Some("mov") },
+    Verb { key: "05mp3", label: "Convert to .mp3", command: "convert-mp3", skip_for: None },
 ];
 
 /// Path of the `shell\Hasami` key for one extension, relative to HKCU.
@@ -99,16 +74,10 @@ pub fn register(exe: &Path, classes_root: &str) -> Result<(), MenuError> {
 /// Runs `register`/`unregister` for the matching CLI action and returns the process exit code
 /// (0 on success, 1 on failure). Returns `None` for any other action so the caller starts the app.
 /// A failure is reported on stderr; the installer only looks at the exit code.
-pub fn handle_action(
-    action: &crate::cli::Action,
-    current_exe: io::Result<PathBuf>,
-    classes_root: &str,
-) -> Option<i32> {
+pub fn handle_action(action: &crate::cli::Action, current_exe: io::Result<PathBuf>, classes_root: &str) -> Option<i32> {
     use crate::cli::Action;
     let result = match action {
-        Action::Register => current_exe
-            .map_err(MenuError::from)
-            .and_then(|exe| register(&exe, classes_root)),
+        Action::Register => current_exe.map_err(MenuError::from).and_then(|exe| register(&exe, classes_root)),
         Action::Unregister => unregister(classes_root),
         _ => return None,
     };
@@ -159,9 +128,7 @@ mod tests {
 
     impl TestGuard {
         fn new() -> Self {
-            let lock = TEST_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             wipe_test_hive().expect("could not clear HKCU\\Software\\HasamiTest before the test");
             TestGuard { _lock: lock }
         }
@@ -192,21 +159,12 @@ mod tests {
     }
 
     fn has_verb(ext: &str, verb: &str) -> bool {
-        open(&format!(
-            r"{}\shell\{verb}",
-            menu_path(TEST_CLASSES_ROOT, ext)
-        ))
-        .is_ok()
+        open(&format!(r"{}\shell\{verb}", menu_path(TEST_CLASSES_ROOT, ext))).is_ok()
     }
 
     fn command_of(ext: &str, verb: &str) -> String {
-        let path = format!(
-            r"{}\shell\{verb}\command",
-            menu_path(TEST_CLASSES_ROOT, ext)
-        );
-        open(&path)
-            .and_then(|key| key.get_value::<String, _>(""))
-            .expect("command default value should be readable")
+        let path = format!(r"{}\shell\{verb}\command", menu_path(TEST_CLASSES_ROOT, ext));
+        open(&path).and_then(|key| key.get_value::<String, _>("")).expect("command default value should be readable")
     }
 
     #[test]
@@ -222,10 +180,7 @@ mod tests {
             "Player",
             "the cascade itself must allow large selections"
         );
-        assert_eq!(
-            menu.get_value::<String, _>("Icon").unwrap(),
-            format!(r"{EXE},0")
-        );
+        assert_eq!(menu.get_value::<String, _>("Icon").unwrap(), format!(r"{EXE},0"));
 
         let expected = [
             ("01trim", "Quick Trim", "trim"),
@@ -235,22 +190,11 @@ mod tests {
             ("05mp3", "Convert to .mp3", "convert-mp3"),
         ];
         for (verb, label, command) in expected {
-            let key = open(&format!(
-                r"{}\shell\{verb}",
-                menu_path(TEST_CLASSES_ROOT, "mkv")
-            ))
-            .unwrap_or_else(|_| panic!("mkv is missing verb {verb}"));
+            let key = open(&format!(r"{}\shell\{verb}", menu_path(TEST_CLASSES_ROOT, "mkv")))
+                .unwrap_or_else(|_| panic!("mkv is missing verb {verb}"));
             assert_eq!(key.get_value::<String, _>("MUIVerb").unwrap(), label);
-            assert_eq!(
-                key.get_value::<String, _>("MultiSelectModel").unwrap(),
-                "Player",
-                "{verb} MultiSelectModel"
-            );
-            assert_eq!(
-                command_of("mkv", verb),
-                format!(r#""{EXE}" {command} "%1""#),
-                "{verb} command"
-            );
+            assert_eq!(key.get_value::<String, _>("MultiSelectModel").unwrap(), "Player", "{verb} MultiSelectModel");
+            assert_eq!(command_of("mkv", verb), format!(r#""{EXE}" {command} "%1""#), "{verb} command");
         }
     }
 
@@ -260,13 +204,8 @@ mod tests {
         register(Path::new(EXE), TEST_CLASSES_ROOT).unwrap();
 
         // Pretend an older version registered a verb this version no longer has.
-        let stale = format!(
-            r"{}\shell\00old\command",
-            menu_path(TEST_CLASSES_ROOT, "mkv")
-        );
-        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
-            .create_subkey(&stale)
-            .unwrap();
+        let stale = format!(r"{}\shell\00old\command", menu_path(TEST_CLASSES_ROOT, "mkv"));
+        let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(&stale).unwrap();
         key.set_value("", &"old.exe").unwrap();
         assert!(has_verb("mkv", "00old"));
 
@@ -281,29 +220,17 @@ mod tests {
         let _guard = TestGuard::new();
         let exe = || Ok(PathBuf::from(EXE));
 
-        assert_eq!(
-            handle_action(&Action::Register, exe(), TEST_CLASSES_ROOT),
-            Some(0)
-        );
+        assert_eq!(handle_action(&Action::Register, exe(), TEST_CLASSES_ROOT), Some(0));
         assert!(has_verb("mkv", "02compress"));
-        assert_eq!(
-            handle_action(&Action::Unregister, exe(), TEST_CLASSES_ROOT),
-            Some(0)
-        );
+        assert_eq!(handle_action(&Action::Unregister, exe(), TEST_CLASSES_ROOT), Some(0));
         assert!(!has_verb("mkv", "02compress"));
 
         // Failure to locate the exe is a nonzero exit, not a panic.
         let err = Err(io::Error::new(io::ErrorKind::Other, "no exe"));
-        assert_eq!(
-            handle_action(&Action::Register, err, TEST_CLASSES_ROOT),
-            Some(1)
-        );
+        assert_eq!(handle_action(&Action::Register, err, TEST_CLASSES_ROOT), Some(1));
 
         // Anything else is not a menu action; the caller starts the app.
-        assert_eq!(
-            handle_action(&Action::Compress(vec![]), exe(), TEST_CLASSES_ROOT),
-            None
-        );
+        assert_eq!(handle_action(&Action::Compress(vec![]), exe(), TEST_CLASSES_ROOT), None);
     }
 
     #[test]
@@ -311,16 +238,10 @@ mod tests {
         let _guard = TestGuard::new();
         register(Path::new(EXE), TEST_CLASSES_ROOT).unwrap();
 
-        assert!(
-            !has_verb("mp4", "03mp4"),
-            "mp4 menu must not offer convert-mp4"
-        );
+        assert!(!has_verb("mp4", "03mp4"), "mp4 menu must not offer convert-mp4");
         assert!(has_verb("mp4", "04mov"));
 
-        assert!(
-            !has_verb("mov", "04mov"),
-            "mov menu must not offer convert-mov"
-        );
+        assert!(!has_verb("mov", "04mov"), "mov menu must not offer convert-mov");
         assert!(has_verb("mov", "03mp4"));
     }
 
@@ -331,10 +252,7 @@ mod tests {
 
         unregister(TEST_CLASSES_ROOT).unwrap();
         for ext in ["mp4", "mov", "mkv", "webm"] {
-            assert!(
-                open(&menu_path(TEST_CLASSES_ROOT, ext)).is_err(),
-                "{ext} menu should be gone after unregister"
-            );
+            assert!(open(&menu_path(TEST_CLASSES_ROOT, ext)).is_err(), "{ext} menu should be gone after unregister");
         }
 
         unregister(TEST_CLASSES_ROOT).unwrap();

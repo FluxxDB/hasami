@@ -334,10 +334,7 @@ impl State {
 
     fn emit_snapshot(&self) {
         (self.emit)(JobEvent::Queued {
-            snapshot: QueueSnapshot {
-                current_index: self.batch_started.max(1),
-                total: self.batch_total,
-            },
+            snapshot: QueueSnapshot { current_index: self.batch_started.max(1), total: self.batch_total },
         });
     }
 
@@ -432,7 +429,9 @@ impl Shared {
                     cancelled()
                 }
                 Ok(JobOutcome::NeedsConfirm { .. }) if cancel.is_cancelled() => cancelled(),
-                Ok(JobOutcome::NeedsConfirm { .. }) => JobEvent::Failed { id, message: UNEXPECTED.into(), original_intact: true },
+                Ok(JobOutcome::NeedsConfirm { .. }) => {
+                    JobEvent::Failed { id, message: UNEXPECTED.into(), original_intact: true }
+                }
                 Ok(JobOutcome::Done { output, bytes, note }) => {
                     JobEvent::Done { id, output: output.display().to_string(), bytes, note }
                 }
@@ -560,9 +559,8 @@ mod tests {
         names.iter().map(PathBuf::from).collect()
     }
 
-    type Script = dyn Fn(&JobSpec, bool, &CancelToken, &mut dyn FnMut(JobProgress)) -> Result<JobOutcome, JobError>
-        + Send
-        + Sync;
+    type Script =
+        dyn Fn(&JobSpec, bool, &CancelToken, &mut dyn FnMut(JobProgress)) -> Result<JobOutcome, JobError> + Send + Sync;
 
     /// One entry per `run` call: (job id, confirmed, start, stop).
     type RunLog = Arc<Mutex<Vec<(u64, bool, Instant, Instant)>>>;
@@ -670,9 +668,8 @@ mod tests {
         queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
         events.wait_for("Started 1", started(1));
         queue.enqueue(JobKind::Convert(Target::Mov), paths(&["b.mkv"]));
-        let grown = events.wait_for("Queued total 2", |e| {
-            matches!(e, JobEvent::Queued { snapshot } if snapshot.total == 2)
-        });
+        let grown =
+            events.wait_for("Queued total 2", |e| matches!(e, JobEvent::Queued { snapshot } if snapshot.total == 2));
         assert!(
             grown.contains(&JobEvent::Queued { snapshot: QueueSnapshot { current_index: 1, total: 2 } }),
             "{grown:?}"
@@ -695,13 +692,8 @@ mod tests {
 
     #[test]
     fn cancel_current_moves_on() {
-        let (queue, events, _log) = queue_with(|spec, _, cancel, _| {
-            if spec.id == 1 {
-                until_cancelled(cancel)
-            } else {
-                done_outcome(spec)
-            }
-        });
+        let (queue, events, _log) =
+            queue_with(|spec, _, cancel, _| if spec.id == 1 { until_cancelled(cancel) } else { done_outcome(spec) });
         queue.enqueue(JobKind::Compress, paths(&["a.mp4", "b.mp4"]));
         events.wait_for("Started 1", started(1));
         queue.cancel(1);
@@ -714,13 +706,8 @@ mod tests {
 
     #[test]
     fn cancel_waiting_job_drops_it() {
-        let (queue, events, log) = queue_with(|spec, _, cancel, _| {
-            if spec.id == 1 {
-                until_cancelled(cancel)
-            } else {
-                done_outcome(spec)
-            }
-        });
+        let (queue, events, log) =
+            queue_with(|spec, _, cancel, _| if spec.id == 1 { until_cancelled(cancel) } else { done_outcome(spec) });
         queue.enqueue(JobKind::Compress, paths(&["a.mp4", "b.mp4", "c.mp4"]));
         events.wait_for("Started 1", started(1));
         queue.cancel(2);
@@ -781,8 +768,7 @@ mod tests {
 
     #[test]
     fn cancel_while_awaiting_confirm_is_cancelled() {
-        let (queue, events, _log) =
-            queue_with(|_, _, _, _| Ok(JobOutcome::NeedsConfirm { plan: low_res_plan() }));
+        let (queue, events, _log) = queue_with(|_, _, _, _| Ok(JobOutcome::NeedsConfirm { plan: low_res_plan() }));
         queue.enqueue(JobKind::Compress, paths(&["tiny.mp4"]));
         events.wait_for("NeedsConfirm", |e| matches!(e, JobEvent::NeedsConfirm { .. }));
         queue.cancel(1);
@@ -810,16 +796,12 @@ mod tests {
         queue.enqueue(JobKind::Compress, paths(&["c.mp4"]));
         let all = events.wait_for("Done 3", done(3));
         let after_drain: Vec<_> = all.iter().skip_while(|e| **e != JobEvent::Drained).skip(1).collect();
-        assert_eq!(
-            after_drain[0],
-            &JobEvent::Queued { snapshot: QueueSnapshot { current_index: 1, total: 1 } }
-        );
+        assert_eq!(after_drain[0], &JobEvent::Queued { snapshot: QueueSnapshot { current_index: 1, total: 1 } });
     }
 
     #[test]
     fn errors_become_failed_with_display_message() {
-        let (queue, events, _log) =
-            queue_with(|_, _, _, _| Err(JobError::Message("Not wired yet".into())));
+        let (queue, events, _log) = queue_with(|_, _, _, _| Err(JobError::Message("Not wired yet".into())));
         queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
         let all = events.wait_drained();
         assert!(all.contains(&JobEvent::Failed { id: 1, message: "Not wired yet".into(), original_intact: true }));
@@ -932,7 +914,8 @@ mod tests {
         let (queue, events, _log) = queue_with(|spec, _, _, _| {
             Ok(JobOutcome::Done { output: spec.input.clone(), bytes: 1, note: Some("but".into()) })
         });
-        let id = queue.enqueue_one(JobKind::Export(ExportJob(Arc::new(export_request("c.mp4")))), PathBuf::from("c.mp4"));
+        let id =
+            queue.enqueue_one(JobKind::Export(ExportJob(Arc::new(export_request("c.mp4")))), PathBuf::from("c.mp4"));
         let all = events.wait_drained();
         assert!(
             all.iter().any(|e| matches!(e, JobEvent::Done { id: i, note: Some(n), .. } if *i == id && n == "but")),
@@ -970,16 +953,12 @@ mod tests {
 
     #[test]
     fn a_cancelled_waiting_export_emits_no_snapshot() {
-        let (queue, events, _log) = queue_with(|spec, _, cancel, _| {
-            if spec.id == 1 {
-                until_cancelled(cancel)
-            } else {
-                done_outcome(spec)
-            }
-        });
+        let (queue, events, _log) =
+            queue_with(|spec, _, cancel, _| if spec.id == 1 { until_cancelled(cancel) } else { done_outcome(spec) });
         queue.enqueue(JobKind::Compress, paths(&["a.mp4"]));
         events.wait_for("Started 1", started(1));
-        let id = queue.enqueue_one(JobKind::Export(ExportJob(Arc::new(export_request("clip.mp4")))), PathBuf::from("clip.mp4"));
+        let id = queue
+            .enqueue_one(JobKind::Export(ExportJob(Arc::new(export_request("clip.mp4")))), PathBuf::from("clip.mp4"));
         queue.cancel(id);
         queue.cancel(1);
         let all = events.wait_drained();

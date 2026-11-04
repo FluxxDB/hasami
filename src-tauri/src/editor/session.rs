@@ -74,7 +74,8 @@ impl EditorSessions {
         // A folder from an earlier process that had the same id would mix its files into ours.
         let _ = std::fs::remove_dir_all(&work_dir);
         let cancel = CancelToken::new();
-        let session = Session { input: input.to_path_buf(), work_dir: work_dir.clone(), media: None, cancel: cancel.clone() };
+        let session =
+            Session { input: input.to_path_buf(), work_dir: work_dir.clone(), media: None, cancel: cancel.clone() };
         self.open.insert(id, session);
         Reservation { id, work_dir, cancel }
     }

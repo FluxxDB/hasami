@@ -75,7 +75,11 @@ fn num(n: f64) -> String {
     let s = format!("{n:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     // "-0.000000" trims to "-0"; ffmpeg reads that fine, but keep the graph tidy.
-    if s == "-0" { "0".to_owned() } else { s.to_owned() }
+    if s == "-0" {
+        "0".to_owned()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`, then,
@@ -148,11 +152,7 @@ pub fn build_graph(req: &ExportRequest, source_size: (u32, u32)) -> Graph {
         } else {
             String::new()
         };
-        let master = if req.master_db != 0.0 {
-            format!("volume={:.2}dB,", req.master_db)
-        } else {
-            String::new()
-        };
+        let master = if req.master_db != 0.0 { format!("volume={:.2}dB,", req.master_db) } else { String::new() };
         let dur = num(req.duration_s);
         parts.push(format!(
             "{}{mix}{master}apad=whole_dur={dur},atrim=end={dur},aformat=channel_layouts=stereo[aout]",
@@ -190,7 +190,9 @@ pub fn crop_filter(crop: Crop, source_size: (u32, u32)) -> String {
 
 /// Whether a `size` picture has the `source_size` frame's aspect ratio, within 1%.
 fn same_aspect((w, h): (u32, u32), (sw, sh): (u32, u32)) -> bool {
-    h > 0 && sh > 0 && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE
+    h > 0
+        && sh > 0
+        && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE
 }
 
 /// The width and height a video export comes out at: the source's, or with a crop of another
@@ -247,7 +249,10 @@ pub fn h264_encoder(bitrate: u64, size: (u32, u32), hw: &dyn Fn(&str) -> bool) -
     if fits_amf && hw("h264_amf") {
         let b = bitrate;
         let rate = args(&["-b:v", &b.to_string(), "-maxrate", &(b + b / 2).to_string()]);
-        VideoEncoder { codec: "h264_amf", args: [args(&["-rc", "vbr_peak"]), rate, args(&["-pix_fmt", "yuv420p"])].concat() }
+        VideoEncoder {
+            codec: "h264_amf",
+            args: [args(&["-rc", "vbr_peak"]), rate, args(&["-pix_fmt", "yuv420p"])].concat(),
+        }
     } else {
         software_h264(bitrate)
     }
@@ -255,6 +260,7 @@ pub fn h264_encoder(bitrate: u64, size: (u32, u32), hw: &dyn Fn(&str) -> bool) -
 
 /// libx264 at `bitrate` bits/s (average; peak 1.5×), 8-bit 4:2:0: the encoder that works
 /// everywhere, and what a failed hardware render is retried with.
+#[rustfmt::skip] // one option and its value per pair
 pub fn software_h264(bitrate: u64) -> VideoEncoder {
     let b = bitrate;
     VideoEncoder {
@@ -371,7 +377,10 @@ mod tests {
 
         let single = ExportRequest { master_db: -2.5, ..req(vec![vp(0.0, 3.0)], vec![track(0)], 3.0) };
         let f = build_graph(&single, FRAME).filter;
-        assert!(f.ends_with("[t0]volume=-2.50dB,apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"), "{f}");
+        assert!(
+            f.ends_with("[t0]volume=-2.50dB,apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"),
+            "{f}"
+        );
 
         let unity = build_graph(&req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0), FRAME).filter;
         assert_eq!(unity.matches("volume=").count(), 2, "only the two track gains: {unity}");
@@ -380,7 +389,8 @@ mod tests {
 
     #[test]
     fn master_db_defaults_to_zero() {
-        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
+        let json =
+            r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
         let req: ExportRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.master_db, 0.0);
     }
@@ -448,7 +458,8 @@ mod tests {
 
     #[test]
     fn crop_defaults_to_none_and_parses() {
-        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
+        let json =
+            r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
         assert_eq!(serde_json::from_str::<ExportRequest>(json).unwrap().crop, None);
         let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[],
                        "crop":{"x":0,"y":0,"w":1440,"h":810}}"#;
@@ -505,8 +516,8 @@ mod tests {
         assert_eq!(
             e.args,
             [
-                "-preset", "medium", "-b:v", "10000000", "-maxrate", "15000000", "-bufsize", "20000000",
-                "-pix_fmt", "yuv420p"
+                "-preset", "medium", "-b:v", "10000000", "-maxrate", "15000000", "-bufsize", "20000000", "-pix_fmt",
+                "yuv420p"
             ]
         );
     }
@@ -531,7 +542,13 @@ mod tests {
                 bit_rate: video_bps,
             }),
             audio: (0..tracks)
-                .map(|i| AudioStream { index: i + 1, codec: "aac".into(), channels: 2, sample_rate: 48000, bit_rate: None })
+                .map(|i| AudioStream {
+                    index: i + 1,
+                    codec: "aac".into(),
+                    channels: 2,
+                    sample_rate: 48000,
+                    bit_rate: None,
+                })
                 .collect(),
         }
     }

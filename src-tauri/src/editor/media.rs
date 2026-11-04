@@ -148,7 +148,12 @@ fn run_checked(paths: &FfmpegPaths, what: &str, args: &[OsString], cancel: &Canc
 /// Probe `input`, find its empty audio tracks and extract the others into `work_dir` as
 /// `a<N>.m4a`, and look for a black border. Stops with [`JobError::Cancelled`] when `cancel` is
 /// set.
-pub fn prepare(paths: &FfmpegPaths, input: &Path, work_dir: &Path, cancel: &CancelToken) -> Result<PreparedMedia, JobError> {
+pub fn prepare(
+    paths: &FfmpegPaths,
+    input: &Path,
+    work_dir: &Path,
+    cancel: &CancelToken,
+) -> Result<PreparedMedia, JobError> {
     let info = probe(paths, input).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
     if cancel.is_cancelled() {
         return Err(JobError::Cancelled);

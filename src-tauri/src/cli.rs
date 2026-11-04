@@ -58,11 +58,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             if !rest.is_empty() {
                 return Err(CliError::UnexpectedFiles(verb.to_string()));
             }
-            Ok(if verb == "register" {
-                Action::Register
-            } else {
-                Action::Unregister
-            })
+            Ok(if verb == "register" { Action::Register } else { Action::Unregister })
         }
         other => Err(CliError::UnknownVerb(other.to_string())),
     }
@@ -79,36 +75,21 @@ mod tests {
     #[test]
     fn parse_compress_multiple() {
         let action = parse_args(&args(&["compress", "C:\\a b\\x.mp4", "C:\\y.mkv"])).unwrap();
-        assert_eq!(
-            action,
-            Action::Compress(vec![
-                PathBuf::from("C:\\a b\\x.mp4"),
-                PathBuf::from("C:\\y.mkv")
-            ])
-        );
+        assert_eq!(action, Action::Compress(vec![PathBuf::from("C:\\a b\\x.mp4"), PathBuf::from("C:\\y.mkv")]));
     }
 
     #[test]
     fn parse_convert_mp3() {
         let action = parse_args(&args(&["convert-mp3", "C:\\y.mkv"])).unwrap();
-        assert_eq!(
-            action,
-            Action::Convert(Target::Mp3, vec![PathBuf::from("C:\\y.mkv")])
-        );
+        assert_eq!(action, Action::Convert(Target::Mp3, vec![PathBuf::from("C:\\y.mkv")]));
     }
 
     #[test]
     fn parse_convert_mp4_and_mov() {
         let mp4 = parse_args(&args(&["convert-mp4", "a.webm"])).unwrap();
-        assert_eq!(
-            mp4,
-            Action::Convert(Target::Mp4, vec![PathBuf::from("a.webm")])
-        );
+        assert_eq!(mp4, Action::Convert(Target::Mp4, vec![PathBuf::from("a.webm")]));
         let mov = parse_args(&args(&["convert-mov", "a.mkv"])).unwrap();
-        assert_eq!(
-            mov,
-            Action::Convert(Target::Mov, vec![PathBuf::from("a.mkv")])
-        );
+        assert_eq!(mov, Action::Convert(Target::Mov, vec![PathBuf::from("a.mkv")]));
     }
 
     #[test]
@@ -124,26 +105,17 @@ mod tests {
 
     #[test]
     fn parse_unregister() {
-        assert_eq!(
-            parse_args(&args(&["unregister"])).unwrap(),
-            Action::Unregister
-        );
+        assert_eq!(parse_args(&args(&["unregister"])).unwrap(), Action::Unregister);
     }
 
     #[test]
     fn unknown_verb_errors() {
-        assert_eq!(
-            parse_args(&args(&["explode"])),
-            Err(CliError::UnknownVerb("explode".to_string()))
-        );
+        assert_eq!(parse_args(&args(&["explode"])), Err(CliError::UnknownVerb("explode".to_string())));
     }
 
     #[test]
     fn file_verb_without_files_errors() {
-        assert_eq!(
-            parse_args(&args(&["compress"])),
-            Err(CliError::NoFiles("compress".to_string()))
-        );
+        assert_eq!(parse_args(&args(&["compress"])), Err(CliError::NoFiles("compress".to_string())));
     }
 
     #[test]
@@ -153,9 +125,6 @@ mod tests {
 
     #[test]
     fn register_with_files_errors() {
-        assert_eq!(
-            parse_args(&args(&["register", "a.mp4"])),
-            Err(CliError::UnexpectedFiles("register".to_string()))
-        );
+        assert_eq!(parse_args(&args(&["register", "a.mp4"])), Err(CliError::UnexpectedFiles("register".to_string())));
     }
 }
