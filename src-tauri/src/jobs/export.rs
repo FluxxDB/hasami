@@ -21,7 +21,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::compress::{claim_new_file, commit_claimed, encode_to_limit, RemoveOnDrop, VideosDirFn};
+use super::compress::encode_to_limit;
+use super::output::{claim_new_file, commit_claimed, RemoveOnDrop, VideosDirFn};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, SIZE_LIMIT_BYTES};
 use crate::editor::media::Crop;
@@ -29,9 +30,7 @@ use crate::editor::request::{
     build_graph, encoder_available, export_bitrate, h264_encoder, output_size, software_h264, ExportMode,
     ExportRequest, Graph, VideoEncoder,
 };
-use crate::fsops::{
-    clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir,
-};
+use crate::fsops::{clipped_path, commit_new, commit_replace, compressed_path, move_to_raw, temp_path_for, videos_dir};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
 use crate::verify::{verify_output, VerifyError};
@@ -40,6 +39,8 @@ use crate::verify::{verify_output, VerifyError};
 const NO_AUDIO: &str = "This clip has no audio to export.";
 /// Shown for a video export whose timeline has no video left in it.
 const NO_VIDEO: &str = "Couldn't export this clip: there's no video left in it.";
+/// Shown for a video export of a source that has no video stream at all.
+const SOURCE_HAS_NO_VIDEO: &str = "This clip has no video to export.";
 /// Shown when the area to keep doesn't fit inside the source's picture.
 const CROP_DOESNT_FIT: &str = "Couldn't export this clip: the border to remove doesn't fit the picture.";
 /// Shown when the rendered result fails verification for a reason other than its size.
@@ -117,6 +118,8 @@ fn export_with(
         (Render::Mp3, graph)
     } else if req.video.is_empty() {
         return Err(JobError::Message(NO_VIDEO.to_owned()));
+    } else if info.video.is_none() {
+        return Err(JobError::Message(SOURCE_HAS_NO_VIDEO.to_owned()));
     } else if req.crop.is_some_and(|c| !fits(c, source_size)) {
         return Err(JobError::Message(CROP_DOESNT_FIT.to_owned()));
     } else {
@@ -170,8 +173,7 @@ fn save_20mb_copy(
     match plan_compress(&info)? {
         CompressDecision::AlreadySmall => {
             fs::copy(clipped, temp.path()).map_err(|_| JobError::Message(COPY_FAILED.to_owned()))?;
-            verify_output(paths, temp.path(), info.duration_s, Some(SIZE_LIMIT_BYTES))
-                .map_err(plain_verify_error)?;
+            verify_output(paths, temp.path(), info.duration_s, Some(SIZE_LIMIT_BYTES)).map_err(plain_verify_error)?;
             on_progress(JobProgress { pass: 2, passes: 2, fraction: 1.0 });
         }
         CompressDecision::Encode(plan) => {
@@ -250,8 +252,8 @@ impl Job<'_> {
                 let software = software_h264(bitrate);
                 match self.attempt(&h264_args(input, self.graph, &first, self.temp), cancel, on_progress) {
                     // Nothing is committed yet: a failed hardware render is done once more in
-                    // software, from a clean temp file.
-                    Err(e) if first.codec != software.codec && !matches!(e, JobError::Cancelled) => {
+                    // software, from a clean temp file, unless the user cancelled meanwhile.
+                    Err(e) if retry_in_software(&first, &software, &e, cancel) => {
                         eprintln!("hasami: {} export failed, retrying with {}: {e}", first.codec, software.codec);
                         let _ = fs::remove_file(self.temp);
                         self.attempt(&h264_args(input, self.graph, &software, self.temp), cancel, on_progress)?
@@ -270,8 +272,7 @@ impl Job<'_> {
             ExportMode::SaveRaw => {
                 commit_new(self.temp, final_path)?;
                 // The new file is saved either way; only the original's move can still fail.
-                move_to_raw(input)
-                    .map_err(|_| JobError::Message(raw_move_failed(final_path, self.req.fit_20mb)))?;
+                move_to_raw(input).map_err(|_| JobError::Message(raw_move_failed(final_path, self.req.fit_20mb)))?;
             }
             ExportMode::Audio => commit_new(self.temp, final_path)?,
         }
@@ -288,10 +289,15 @@ impl Job<'_> {
         run_ffmpeg(self.paths, args, self.req.duration_s, cancel, &mut |fraction| {
             on_progress(JobProgress { pass: 1, passes: self.passes, fraction })
         })?;
-        let verified =
-            verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
+        let verified = verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
         Ok(verified.size_bytes)
     }
+}
+
+/// Whether a render with `first` that failed with `error` is done once more with `software`: only
+/// when `first` was a hardware encoder and the user hasn't cancelled meanwhile.
+fn retry_in_software(first: &VideoEncoder, software: &VideoEncoder, error: &JobError, cancel: &CancelToken) -> bool {
+    first.codec != software.codec && !matches!(error, JobError::Cancelled) && !cancel.is_cancelled()
 }
 
 /// `Saved "<name>", but couldn't move the original into the Raw folder.`, plus that the 20 MB
@@ -357,7 +363,7 @@ mod tests {
     use super::*;
     use crate::editor::request::{AudioPiece, AudioTrackRequest, VideoPiece};
     use crate::fsops::{FsError, NO_VIDEOS_FOLDER};
-    use crate::media::hidden_command;
+    use crate::jobs::test_clips;
 
     fn text(args: &[OsString]) -> String {
         args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
@@ -443,38 +449,6 @@ mod tests {
         );
     }
 
-    /// 2 s of small H.264 + AAC in an `.mkv` inside `dir`.
-    fn small_clip(paths: &FfmpegPaths, dir: &Path) -> PathBuf {
-        let out = dir.join("clip.mkv");
-        let status = hidden_command(&paths.ffmpeg)
-            .args(["-y", "-hide_banner", "-loglevel", "error"])
-            .args(["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac"])
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        out
-    }
-
-    /// 4 s of noisy 1080p H.264 at 60 Mbit/s + AAC in an `.mkv` inside `dir`: its export is over
-    /// 20 MB, so the 20 MB copy has to be encoded.
-    fn big_clip(paths: &FfmpegPaths, dir: &Path) -> PathBuf {
-        let out = dir.join("clip.mkv");
-        let status = hidden_command(&paths.ffmpeg)
-            .args(["-y", "-hide_banner", "-loglevel", "error"])
-            .args(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=4"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4"])
-            .args(["-vf", "noise=alls=60:allf=t"])
-            .args(["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "60M", "-pix_fmt", "yuv420p", "-c:a", "aac"])
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        out
-    }
-
     fn fit_request(input: &Path) -> ExportRequest {
         ExportRequest {
             session: 1,
@@ -507,7 +481,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let videos = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         let lookup = || Ok(videos.path().to_path_buf());
 
         let cancel = CancelToken::new();
@@ -529,7 +503,7 @@ mod tests {
         // Cancelled during the copy: the [CLIPPED] file is saved and the original moved already,
         // so the export is still done, with a note.
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         let cancel = CancelToken::new();
         let mut cancel_in_copy = |p: JobProgress| {
             if p.pass >= 2 {
@@ -549,7 +523,7 @@ mod tests {
 
         // An export over 20 MB isn't Discord-ready, so the copy is encoded, as passes 2 and 3 of 3.
         let dir = tempfile::tempdir().unwrap();
-        let input = big_clip(&paths, dir.path());
+        let input = test_clips::big(&paths, dir.path(), "clip.mkv");
         let whole = ExportRequest {
             duration_s: 4.0,
             video: vec![VideoPiece { src_start: 0.0, src_end: 4.0 }],
@@ -578,7 +552,7 @@ mod tests {
     fn a_missing_videos_folder_is_a_note() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         let lookup = || Err(FsError::new(NO_VIDEOS_FOLDER));
 
         let outcome = export_work(&paths, &fit_request(&input), &lookup, &CancelToken::new(), &mut |_| {}, dir.path());
@@ -594,7 +568,7 @@ mod tests {
     fn an_audio_export_ignores_the_20mb_copy_toggle() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         let req = ExportRequest { mode: ExportMode::Audio, ..fit_request(&input) };
         let lookup = || -> Result<PathBuf, FsError> { panic!("an audio export makes no 20 MB copy") };
 
@@ -616,7 +590,7 @@ mod tests {
     fn a_failed_hardware_render_is_done_again_in_software() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         let req = ExportRequest { fit_20mb: false, ..fit_request(&input) };
         let lookup = || -> Result<PathBuf, FsError> { panic!("no 20 MB copy was asked for") };
         // A hardware encoder this ffmpeg doesn't have fails the first render outright.
@@ -633,10 +607,26 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_hardware_render_is_retried_only_while_not_cancelled() {
+        let hardware = VideoEncoder { codec: "h264_amf", args: Vec::new() };
+        let software = software_h264(1_000_000);
+        let failed = JobError::Message(DIDNT_CHECK_OUT.to_owned());
+        let running = CancelToken::new();
+        assert!(retry_in_software(&hardware, &software, &failed, &running));
+        // Cancelled while the hardware render was failing: its error isn't `Cancelled`, but no
+        // retry starts.
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(!retry_in_software(&hardware, &software, &failed, &cancelled));
+        assert!(!retry_in_software(&hardware, &software, &JobError::Cancelled, &running));
+        assert!(!retry_in_software(&software, &software, &failed, &running), "software isn't retried");
+    }
+
+    #[test]
     fn a_failed_software_render_is_not_retried() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         let req = ExportRequest { fit_20mb: false, ..fit_request(&input) };
         let lookup = || -> Result<PathBuf, FsError> { panic!("no 20 MB copy was asked for") };
         // libx264 with a bad preset fails; a retry, with the usual libx264 settings, would succeed.
@@ -654,13 +644,13 @@ mod tests {
     fn video_export_without_video_is_refused() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         for (mode, fit) in [(ExportMode::Quick, false), (ExportMode::SaveRaw, true)] {
             let req = ExportRequest { mode, fit_20mb: fit, video: Vec::new(), ..fit_request(&input) };
             let mut ran = false;
             let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
-            let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path())
-                .unwrap_err();
+            let err =
+                export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
             assert_eq!(err.to_string(), NO_VIDEO);
             assert!(!ran, "ffmpeg must not run");
         }
@@ -669,16 +659,29 @@ mod tests {
     }
 
     #[test]
+    fn a_video_export_of_a_source_without_video_is_refused() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = test_clips::audio_only(&paths, dir.path(), "sound.mkv");
+        let req = ExportRequest { input: input.clone(), fit_20mb: false, ..fit_request(&input) };
+        let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
+        let mut ran = false;
+        let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+        assert_eq!(err.to_string(), SOURCE_HAS_NO_VIDEO);
+        assert!(!ran, "ffmpeg must not run");
+        assert_eq!(names(dir.path()), ["sound.mkv"]);
+    }
+
+    #[test]
     fn a_crop_outside_the_picture_is_refused() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let input = small_clip(&paths, dir.path());
+        let input = test_clips::small(&paths, dir.path(), "clip.mkv", true);
         // The clip is 320x180.
         let req = ExportRequest { crop: Some(Crop { x: 0, y: 0, w: 320, h: 182 }), ..fit_request(&input) };
         let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
         let mut ran = false;
-        let err =
-            export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+        let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
         assert_eq!(err.to_string(), CROP_DOESNT_FIT);
         assert!(!ran, "ffmpeg must not run");
         assert_eq!(names(dir.path()), ["clip.mkv"]);

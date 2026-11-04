@@ -1,4 +1,6 @@
-//! Pure ladder/bitrate planner (Task 5).
+//! The Compress planner: picks the resolution and frame rate from a ladder and splits the bit
+//! budget between video and audio so the result fits in [`SIZE_LIMIT_BYTES`] (spec §7). Pure, so
+//! it is tested without ffmpeg.
 
 use crate::media::MediaInfo;
 
@@ -15,8 +17,7 @@ const MIN_BITS_PER_PIXEL: f64 = 0.05;
 const AUDIO_BUDGET_SHARE: f64 = 0.10;
 
 /// `(bits per second, mono)` audio options, best first.
-const AUDIO_OPTIONS: [(u32, bool); 4] =
-    [(128_000, false), (96_000, false), (64_000, false), (32_000, true)];
+const AUDIO_OPTIONS: [(u32, bool); 4] = [(128_000, false), (96_000, false), (64_000, false), (32_000, true)];
 const AUDIO_FALLBACK: (u32, bool) = (32_000, true);
 
 /// `(height, fps)` ladder, best first.
@@ -37,18 +38,23 @@ pub struct CompressPlan {
     pub warn_low_res: bool,
 }
 
+/// What [`plan_compress`] decided.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompressDecision {
     /// The input already meets the limit in a compatible format; nothing to do.
     AlreadySmall,
+    /// Re-encode with this plan.
     Encode(CompressPlan),
 }
 
+/// Why a file can't be compressed to the limit. `Display` is shown to the user.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
+    /// Even the lowest rung of the ladder would be over 20 MB.
     #[error("This video is too long to fit in 20 MB at any watchable quality.")]
     TooLong,
 
+    /// ffprobe reported no usable duration.
     #[error("The video's length could not be determined, so it can't be compressed.")]
     UnknownDuration,
 }
@@ -59,7 +65,7 @@ pub fn plan_compress(info: &MediaInfo) -> Result<CompressDecision, CompressError
 
     if within_limit
         && info.container == "mp4"
-        && info.video.as_ref().map_or(true, |v| v.codec == "h264")
+        && info.video.as_ref().is_none_or(|v| v.codec == "h264")
         && info.audio.len() <= 1
         && info.audio.iter().all(|a| a.codec == "aac")
     {
@@ -195,13 +201,7 @@ mod tests {
     }
 
     fn src_1080p60(duration_s: f64, audio_tracks: usize) -> MediaInfo {
-        info(
-            "mp4",
-            duration_s,
-            412_000_000,
-            Some((1920, 1080, 60.0, "h264", Some(35_000_000))),
-            audio_tracks,
-        )
+        info("mp4", duration_s, 412_000_000, Some((1920, 1080, 60.0, "h264", Some(35_000_000))), audio_tracks)
     }
 
     fn encode(decision: Result<CompressDecision, CompressError>) -> CompressPlan {
@@ -258,9 +258,8 @@ mod tests {
 
     #[test]
     fn plan_already_small() {
-        let small = |container: &str| {
-            info(container, 10.0, 2_000_000, Some((1280, 720, 30.0, "h264", Some(1_200_000))), 1)
-        };
+        let small =
+            |container: &str| info(container, 10.0, 2_000_000, Some((1280, 720, 30.0, "h264", Some(1_200_000))), 1);
         assert_eq!(plan_compress(&small("mp4")).unwrap(), CompressDecision::AlreadySmall);
 
         let plan = encode(plan_compress(&small("mkv")));

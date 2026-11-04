@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::output::{claim_new_file, commit_claimed, RemoveOnDrop, VideosDirFn};
 use super::{JobError, JobOutcome, JobProgress, UNREADABLE};
 use crate::compress::{plan_compress, CompressDecision, CompressPlan, SIZE_LIMIT_BYTES};
-use crate::fsops::{commit_new, compressed_path, temp_path_for, videos_dir, FsError, NO_VIDEOS_FOLDER};
+use crate::fsops::{compressed_path, videos_dir};
 use crate::media::run::{run_ffmpeg, CancelToken};
 use crate::media::{probe, FfmpegPaths, MediaInfo};
 use crate::verify::{verify_output, VerifyError};
@@ -31,11 +32,6 @@ const NEVER_FIT: &str = "Couldn't get this video under 20 MB.";
 const DIDNT_CHECK_OUT: &str = "Couldn't compress this video: the result didn't check out.";
 /// Where pass 1 writes its (discarded) output. The crate is Windows-only.
 const NULL_OUTPUT: &str = "NUL";
-/// Shown when the Videos folder is there but a new file can't be written in it.
-const NO_WRITE_VIDEOS: &str = "Couldn't write the new file in your Videos folder.";
-
-/// Finds the folder a `[20MB]` file goes into; only called once something will be written.
-pub(super) type VideosDirFn<'a> = &'a dyn Fn() -> Result<PathBuf, FsError>;
 
 /// Compress `input` to a new `.mp4` of at most [`SIZE_LIMIT_BYTES`] in the Windows Videos
 /// folder (see [`compress_in`]).
@@ -57,7 +53,7 @@ pub fn compress(
 /// - The plan drops the video below 480p (and below the source's own height) and
 ///   `confirmed_low_res` is false: [`JobOutcome::NeedsConfirm`], nothing is written.
 /// - Otherwise a two-pass libx264 encode (one AAC pass for audio-only input), retried at a
-///   lower bitrate up to [`MAX_RETRIES`] times if it comes out too big.
+///   lower bitrate up to three times if it comes out too big.
 pub fn compress_in(
     paths: &FfmpegPaths,
     input: &Path,
@@ -67,15 +63,7 @@ pub fn compress_in(
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<JobOutcome, JobError> {
     let out_dir = || Ok(out_dir.to_path_buf());
-    compress_work(
-        paths,
-        input,
-        &out_dir,
-        confirmed_low_res,
-        cancel,
-        on_progress,
-        &std::env::temp_dir(),
-    )
+    compress_work(paths, input, &out_dir, confirmed_low_res, cancel, on_progress, &std::env::temp_dir())
 }
 
 /// [`compress_in`] with the output folder looked up by `out_dir` (only once there is something
@@ -92,11 +80,7 @@ fn compress_work(
 ) -> Result<JobOutcome, JobError> {
     let info = probe(paths, input).map_err(|_| JobError::Message(UNREADABLE.to_owned()))?;
     let plan = match plan_compress(&info)? {
-        CompressDecision::AlreadySmall => {
-            return Ok(JobOutcome::Unchanged {
-                reason: ALREADY_SMALL.to_owned(),
-            })
-        }
+        CompressDecision::AlreadySmall => return Ok(JobOutcome::Unchanged { reason: ALREADY_SMALL.to_owned() }),
         CompressDecision::Encode(plan) => plan,
     };
 
@@ -109,61 +93,17 @@ fn compress_work(
 
     let final_path = compressed_path(input, &out_dir()?);
     let mut temp = claim_new_file(&final_path)?;
-    let verified = encode_to_limit(
-        paths,
-        input,
-        &info,
-        &plan,
-        temp.path(),
-        work_root,
-        cancel,
-        on_progress,
-    )?;
+    let verified = encode_to_limit(paths, input, &info, &plan, temp.path(), work_root, cancel, on_progress)?;
 
     commit_claimed(&mut temp, &final_path, cancel)?;
-    Ok(JobOutcome::Done {
-        output: final_path,
-        bytes: verified.size_bytes,
-        note: None,
-    })
-}
-
-/// Start a new file that will be named `final_path` (in the Videos folder): create its hidden
-/// temp file now, which proves the folder is there and writable before any encode runs. The
-/// temp file is deleted when the guard drops, unless [`commit_claimed`] keeps it.
-pub(super) fn claim_new_file(final_path: &Path) -> Result<RemoveOnDrop, JobError> {
-    if !final_path.parent().is_some_and(Path::is_dir) {
-        return Err(JobError::Message(NO_VIDEOS_FOLDER.to_owned()));
-    }
-    let temp = temp_path_for(final_path);
-    fs::File::create(&temp).map_err(|_| JobError::Message(NO_WRITE_VIDEOS.to_owned()))?;
-    Ok(RemoveOnDrop::file(temp))
-}
-
-/// Give a finished, verified [`claim_new_file`] temp file its name, never replacing anything.
-/// Checks `cancel` one last time first. If the rename may have happened after all, the temp
-/// file is kept, since it may be the only copy.
-pub(super) fn commit_claimed(
-    temp: &mut RemoveOnDrop,
-    final_path: &Path,
-    cancel: &CancelToken,
-) -> Result<(), JobError> {
-    if cancel.is_cancelled() {
-        return Err(JobError::Cancelled);
-    }
-    if let Err(e) = commit_new(temp.path(), final_path) {
-        if e.kept_new_file.is_some() {
-            temp.keep();
-        }
-        return Err(e.into());
-    }
-    Ok(())
+    Ok(JobOutcome::Done { output: final_path, bytes: verified.size_bytes, note: None })
 }
 
 /// Two-pass encode of `input` per `plan` into `output`, retried smaller until it verifies at
 /// ≤ [`SIZE_LIMIT_BYTES`]. Creates and removes its own pass-log folder under `work_root`.
-/// Errors are already plain-language (`UNREADABLE` / `DIDNT_CHECK_OUT` / `NEVER_FIT` / encode).
-#[allow(clippy::too_many_arguments)] // the shape the editor export is specified against
+/// Errors are already plain language (`DIDNT_CHECK_OUT`, `NEVER_FIT`, or ffmpeg's). On failure
+/// `output` may be left half-written: the caller owns it and deletes it.
+#[allow(clippy::too_many_arguments)] // Compress and the editor's 20 MB copy both call it with all of these
 pub(crate) fn encode_to_limit(
     paths: &FfmpegPaths,
     input: &Path,
@@ -174,25 +114,13 @@ pub(crate) fn encode_to_limit(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<MediaInfo, JobError> {
-    let work = RemoveOnDrop::dir(create_work_dir(work_root, "hasami-2pass")?);
+    let work = RemoveOnDrop::dir(create_work_dir(work_root)?);
     let passlog = work.path().join("x264");
 
     encode_until_fits(|scale| {
-        let job = Encode {
-            input,
-            info,
-            plan,
-            scale,
-            passlog: &passlog,
-            output,
-        };
+        let job = Encode { input, info, plan, scale, passlog: &passlog, output };
         job.run(paths, cancel, on_progress)?;
-        Ok(verify_output(
-            paths,
-            output,
-            info.duration_s,
-            Some(SIZE_LIMIT_BYTES),
-        )?)
+        Ok(verify_output(paths, output, info.duration_s, Some(SIZE_LIMIT_BYTES))?)
     })
     .map_err(plain_verify_error)
 }
@@ -200,9 +128,7 @@ pub(crate) fn encode_to_limit(
 /// Call `attempt` with a bitrate scale of 1.0, then, while the result is over the size limit,
 /// up to [`MAX_RETRIES`] more times with the scale multiplied by [`RETRY_FACTOR`] each time.
 /// Any other error is returned at once.
-fn encode_until_fits<T>(
-    mut attempt: impl FnMut(f64) -> Result<T, JobError>,
-) -> Result<T, JobError> {
+fn encode_until_fits<T>(mut attempt: impl FnMut(f64) -> Result<T, JobError>) -> Result<T, JobError> {
     let mut scale = 1.0;
     let mut retries = 0;
     loop {
@@ -211,9 +137,7 @@ fn encode_until_fits<T>(
                 retries += 1;
                 scale *= RETRY_FACTOR;
             }
-            Err(JobError::Verify(VerifyError::TooLarge { .. })) => {
-                return Err(JobError::Message(NEVER_FIT.to_owned()))
-            }
+            Err(JobError::Verify(VerifyError::TooLarge { .. })) => return Err(JobError::Message(NEVER_FIT.to_owned())),
             other => return other,
         }
     }
@@ -256,29 +180,12 @@ impl Encode<'_> {
         cancel: &CancelToken,
         on_progress: &mut dyn FnMut(JobProgress),
     ) -> Result<(), JobError> {
-        let passes: &[Pass] = if self.info.video.is_some() {
-            &[Pass::First, Pass::Final]
-        } else {
-            &[Pass::Final]
-        };
+        let passes: &[Pass] = if self.info.video.is_some() { &[Pass::First, Pass::Final] } else { &[Pass::Final] };
         for (i, &pass) in passes.iter().enumerate() {
-            let progress = JobProgress {
-                pass: i as u8 + 1,
-                passes: passes.len() as u8,
-                fraction: 0.0,
-            };
-            run_ffmpeg(
-                paths,
-                &self.args(pass),
-                self.info.duration_s,
-                cancel,
-                &mut |fraction| {
-                    on_progress(JobProgress {
-                        fraction,
-                        ..progress
-                    })
-                },
-            )?;
+            let progress = JobProgress { pass: i as u8 + 1, passes: passes.len() as u8, fraction: 0.0 };
+            run_ffmpeg(paths, &self.args(pass), self.info.duration_s, cancel, &mut |fraction| {
+                on_progress(JobProgress { fraction, ..progress })
+            })?;
         }
         Ok(())
     }
@@ -317,25 +224,10 @@ impl Encode<'_> {
         if let Some(video) = &self.info.video {
             let plan = self.plan;
             a.add(["-map", &format!("0:{}", video.index)]);
-            a.add([
-                "-vf",
-                &format!("scale={}:{},fps={}", plan.width, plan.height, plan.fps),
-            ]);
-            a.add([
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-b:v",
-                &self.video_bps().to_string(),
-            ]);
+            a.add(["-vf", &format!("scale={}:{},fps={}", plan.width, plan.height, plan.fps)]);
+            a.add(["-c:v", "libx264", "-preset", "medium", "-b:v", &self.video_bps().to_string()]);
             a.add(["-pix_fmt", "yuv420p"]);
-            a.add([
-                "-pass",
-                if pass == Pass::First { "1" } else { "2" },
-                "-passlogfile",
-            ])
-            .path(self.passlog);
+            a.add(["-pass", if pass == Pass::First { "1" } else { "2" }, "-passlogfile"]).path(self.passlog);
         }
 
         if pass == Pass::First {
@@ -363,8 +255,7 @@ impl Encode<'_> {
             }
         }
 
-        a.add(["-movflags", "+faststart", "-f", "mp4"])
-            .path(self.output);
+        a.add(["-movflags", "+faststart", "-f", "mp4"]).path(self.output);
         a.0
     }
 }
@@ -385,85 +276,35 @@ impl Args {
     }
 }
 
-/// Create a new, uniquely named folder `<prefix>-…` under `root` for an encode's scratch files.
-pub(super) fn create_work_dir(root: &Path, prefix: &str) -> Result<PathBuf, JobError> {
+/// Name prefix of the two-pass log folders, `hasami-2pass-<pid>-<nanos>-<n>`. One left behind by
+/// a crash is removed on a later start (see [`crate::editor::session::sweep_stale`]).
+pub(crate) const PASSLOG_DIR_PREFIX: &str = "hasami-2pass-";
+
+/// Create a new, uniquely named pass-log folder (see [`PASSLOG_DIR_PREFIX`]) under `root`.
+fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
     for _ in 0..100 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = root.join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+        let dir = root.join(format!("{PASSLOG_DIR_PREFIX}{}-{nanos}-{n}", std::process::id()));
         match fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(_) => break,
         }
     }
-    Err(JobError::Message(
-        "Couldn't create a temporary folder for the encode.".to_owned(),
-    ))
-}
-
-/// Deletes a file or folder when dropped, so every exit path (error, cancel, panic) cleans up.
-/// Deleting something that is already gone (e.g. a temp file that was committed) is a no-op.
-pub(super) struct RemoveOnDrop {
-    path: PathBuf,
-    is_dir: bool,
-    kept: bool,
-}
-
-impl RemoveOnDrop {
-    pub(super) fn file(path: PathBuf) -> Self {
-        Self {
-            path,
-            is_dir: false,
-            kept: false,
-        }
-    }
-
-    pub(super) fn dir(path: PathBuf) -> Self {
-        Self {
-            path,
-            is_dir: true,
-            kept: false,
-        }
-    }
-
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Don't delete it after all.
-    pub(super) fn keep(&mut self) {
-        self.kept = true;
-    }
-}
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        if self.kept {
-            return;
-        }
-        let _ = if self.is_dir {
-            fs::remove_dir_all(&self.path)
-        } else {
-            fs::remove_file(&self.path)
-        };
-    }
+    Err(JobError::Message("Couldn't create a temporary folder for the encode.".to_owned()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::hidden_command;
+    use crate::fsops::FsError;
+    use crate::jobs::test_clips;
     use crate::media::{AudioStream, VideoStream};
 
     fn too_large() -> JobError {
-        JobError::Verify(VerifyError::TooLarge {
-            size_bytes: 21_000_000,
-            max_bytes: SIZE_LIMIT_BYTES,
-        })
+        JobError::Verify(VerifyError::TooLarge { size_bytes: 21_000_000, max_bytes: SIZE_LIMIT_BYTES })
     }
 
     #[test]
@@ -555,11 +396,7 @@ mod tests {
             passlog: Path::new("logs/x264"),
             output: Path::new(".out.mp4.hasami-tmp"),
         };
-        job.args(pass)
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ")
+        job.args(pass).iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
     }
 
     #[test]
@@ -577,16 +414,8 @@ mod tests {
         let a = args(&info(true, 3), &plan(false), 0.9, Pass::Final);
         assert!(a.contains("-b:v 900000 "), "{a}");
         assert!(a.contains("-pass 2 -passlogfile logs/x264"), "{a}");
-        assert!(
-            a.contains("-filter_complex [0:1][0:2][0:3]amix=inputs=3:normalize=0[mix] -map [mix]"),
-            "{a}"
-        );
-        assert!(
-            a.ends_with(
-                "-c:a aac -b:a 128000 -ac 2 -movflags +faststart -f mp4 .out.mp4.hasami-tmp"
-            ),
-            "{a}"
-        );
+        assert!(a.contains("-filter_complex [0:1][0:2][0:3]amix=inputs=3:normalize=0[mix] -map [mix]"), "{a}");
+        assert!(a.ends_with("-c:a aac -b:a 128000 -ac 2 -movflags +faststart -f mp4 .out.mp4.hasami-tmp"), "{a}");
     }
 
     #[test]
@@ -607,10 +436,7 @@ mod tests {
     #[test]
     fn audio_only_is_one_aac_pass_scaled_on_retry() {
         let a = args(&info(false, 1), &plan(false), 0.9, Pass::Final);
-        assert_eq!(
-            a,
-            "-i in.mkv -map 0:1 -c:a aac -b:a 115200 -movflags +faststart -f mp4 .out.mp4.hasami-tmp"
-        );
+        assert_eq!(a, "-i in.mkv -map 0:1 -c:a aac -b:a 115200 -movflags +faststart -f mp4 .out.mp4.hasami-tmp");
     }
 
     #[test]
@@ -626,58 +452,9 @@ mod tests {
 
     #[test]
     fn verify_failures_other_than_size_read_as_plain_language() {
-        let wrong = JobError::Verify(VerifyError::WrongDuration {
-            expected_s: 13.0,
-            actual_s: 12.34,
-        });
+        let wrong = JobError::Verify(VerifyError::WrongDuration { expected_s: 13.0, actual_s: 12.34 });
         assert_eq!(plain_verify_error(wrong).to_string(), DIDNT_CHECK_OUT);
-        assert!(matches!(
-            plain_verify_error(JobError::Cancelled),
-            JobError::Cancelled
-        ));
-    }
-
-    #[test]
-    fn remove_on_drop_deletes_unless_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let (gone, kept) = (dir.path().join("gone"), dir.path().join("kept"));
-        fs::write(&gone, b"x").unwrap();
-        fs::write(&kept, b"x").unwrap();
-        drop(RemoveOnDrop::file(gone.clone()));
-        let mut guard = RemoveOnDrop::file(kept.clone());
-        guard.keep();
-        drop(guard);
-        assert!(!gone.exists());
-        assert!(kept.exists());
-    }
-
-    /// Write a small `.mkv` (so it is never "already small") into `dir`.
-    fn small_mkv(paths: &FfmpegPaths, dir: &Path, name: &str) -> PathBuf {
-        let out = dir.join(name);
-        let status = hidden_command(&paths.ffmpeg)
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-            ])
-            .arg("testsrc2=size=320x180:rate=30:duration=2")
-            .args([
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        out
+        assert!(matches!(plain_verify_error(JobError::Cancelled), JobError::Cancelled));
     }
 
     #[test]
@@ -685,7 +462,7 @@ mod tests {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
         // H.264 in an .mp4 with no audio, well under 20 MB: already Discord-ready.
-        let input = small_mkv(&paths, dir.path(), "small.mp4");
+        let input = test_clips::small(&paths, dir.path(), "small.mp4", false);
         let lookup = || -> Result<PathBuf, FsError> { panic!("nothing is written, so no folder is needed") };
 
         let outcome = compress_work(
@@ -697,24 +474,7 @@ mod tests {
             &mut |_| panic!("nothing is encoded"),
             dir.path(),
         );
-        assert!(
-            matches!(&outcome, Ok(JobOutcome::Unchanged { reason }) if reason == ALREADY_SMALL),
-            "{outcome:?}"
-        );
-    }
-
-    #[test]
-    fn claim_new_file_needs_the_folder_and_cleans_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("gone").join("[20MB] a.mp4");
-        let err = claim_new_file(&missing).err().unwrap();
-        assert_eq!(err.to_string(), NO_VIDEOS_FOLDER);
-
-        let final_path = dir.path().join("[20MB] a.mp4");
-        let claim = claim_new_file(&final_path).unwrap();
-        assert!(claim.path().is_file(), "the temp file is created up front");
-        drop(claim);
-        assert!(fs::read_dir(dir.path()).unwrap().next().is_none(), "and deleted when dropped");
+        assert!(matches!(&outcome, Ok(JobOutcome::Unchanged { reason }) if reason == ALREADY_SMALL), "{outcome:?}");
     }
 
     #[test]
@@ -725,7 +485,7 @@ mod tests {
         let empty = |root: &Path| fs::read_dir(root).unwrap().next().is_none();
 
         let out_dir = || Ok(dir.path().to_path_buf());
-        let input = small_mkv(&paths, dir.path(), "ok.mkv");
+        let input = test_clips::small(&paths, dir.path(), "ok.mkv", false);
         let mut saw_log = false;
         let mut watch = |p: JobProgress| {
             if p.pass == 2 {
@@ -733,59 +493,17 @@ mod tests {
                 saw_log |= !empty(root.path());
             }
         };
-        let outcome = compress_work(
-            &paths,
-            &input,
-            &out_dir,
-            false,
-            &CancelToken::new(),
-            &mut watch,
-            root.path(),
-        );
-        assert!(
-            matches!(outcome, Ok(JobOutcome::Done { .. })),
-            "{outcome:?}"
-        );
+        let outcome = compress_work(&paths, &input, &out_dir, false, &CancelToken::new(), &mut watch, root.path());
+        assert!(matches!(outcome, Ok(JobOutcome::Done { .. })), "{outcome:?}");
         assert!(saw_log, "the passlog should live under the work root");
-        assert!(
-            empty(root.path()),
-            "passlog folder left behind after success"
-        );
+        assert!(empty(root.path()), "passlog folder left behind after success");
 
-        let input = small_mkv(&paths, dir.path(), "cancel.mkv");
+        let input = test_clips::small(&paths, dir.path(), "cancel.mkv", false);
         let cancel = CancelToken::new();
-        let outcome = compress_work(
-            &paths,
-            &input,
-            &out_dir,
-            false,
-            &cancel,
-            &mut |_| cancel.cancel(),
-            root.path(),
-        );
+        let outcome = compress_work(&paths, &input, &out_dir, false, &cancel, &mut |_| cancel.cancel(), root.path());
         assert!(matches!(outcome, Err(JobError::Cancelled)), "{outcome:?}");
-        assert!(
-            empty(root.path()),
-            "passlog folder left behind after cancel"
-        );
+        assert!(empty(root.path()), "passlog folder left behind after cancel");
         assert!(input.exists());
-    }
-
-    /// 4 s of noisy 1080p30 H.264 at 60 Mbit/s plus AAC (over 20 MB), like `fixture_big_h264`.
-    fn big_h264(paths: &FfmpegPaths, dir: &Path) -> PathBuf {
-        let out = dir.join("big_h264.mp4");
-        let status = hidden_command(&paths.ffmpeg)
-            .args(["-y", "-hide_banner", "-loglevel", "error"])
-            .args(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
-            .args(["-vf", "noise=alls=60:allf=t"])
-            .args(["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "60M"])
-            .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-t", "4"])
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        out
     }
 
     #[test]
@@ -793,7 +511,7 @@ mod tests {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let input = big_h264(&paths, dir.path());
+        let input = test_clips::big(&paths, dir.path(), "big_h264.mp4");
         let before = fs::read(&input).unwrap();
         let info = probe(&paths, &input).unwrap();
         let CompressDecision::Encode(plan) = plan_compress(&info).unwrap() else {
@@ -801,29 +519,14 @@ mod tests {
         };
         let output = dir.path().join("out.mp4");
 
-        let verified = encode_to_limit(
-            &paths,
-            &input,
-            &info,
-            &plan,
-            &output,
-            root.path(),
-            &CancelToken::new(),
-            &mut |_| {},
-        )
-        .unwrap();
+        let verified =
+            encode_to_limit(&paths, &input, &info, &plan, &output, root.path(), &CancelToken::new(), &mut |_| {})
+                .unwrap();
 
         let size = fs::metadata(&output).unwrap().len();
         assert!(size <= SIZE_LIMIT_BYTES, "{size} bytes");
         assert_eq!(verified.size_bytes, size);
-        assert_eq!(
-            fs::read(&input).unwrap(),
-            before,
-            "the input must be untouched"
-        );
-        assert!(
-            fs::read_dir(root.path()).unwrap().next().is_none(),
-            "pass-log folder left behind under the work root"
-        );
+        assert_eq!(fs::read(&input).unwrap(), before, "the input must be untouched");
+        assert!(fs::read_dir(root.path()).unwrap().next().is_none(), "pass-log folder left behind under the work root");
     }
 }

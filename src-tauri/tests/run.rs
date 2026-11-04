@@ -1,4 +1,4 @@
-//! Integration tests for the ffmpeg runner: progress, cancellation and failure reporting (Task 6).
+//! Integration tests for the ffmpeg runner: progress, cancellation and failure reporting.
 
 mod common;
 
@@ -12,11 +12,7 @@ use hasami_lib::media::FfmpegPaths;
 fn transcode_args(input: &Path, output: &Path, preset: &str) -> Vec<OsString> {
     let mut a: Vec<OsString> = vec!["-i".into()];
     a.push(input.into());
-    a.extend(
-        ["-c:v", "libx264", "-preset", preset, "-c:a", "aac"]
-            .iter()
-            .map(OsString::from),
-    );
+    a.extend(["-c:v", "libx264", "-preset", preset, "-c:a", "aac"].iter().map(OsString::from));
     a.push(output.into());
     a
 }
@@ -29,14 +25,8 @@ fn run_reports_monotonic_progress_to_one() {
     let paths = FfmpegPaths::resolve().unwrap();
 
     let mut seen: Vec<f64> = Vec::new();
-    run_ffmpeg(
-        &paths,
-        &transcode_args(&input, &output, "ultrafast"),
-        5.0,
-        &CancelToken::new(),
-        &mut |p| seen.push(p),
-    )
-    .expect("transcode should succeed");
+    run_ffmpeg(&paths, &transcode_args(&input, &output, "ultrafast"), 5.0, &CancelToken::new(), &mut |p| seen.push(p))
+        .expect("transcode should succeed");
 
     assert!(!seen.is_empty(), "no progress reported");
     assert!(seen.windows(2).all(|w| w[0] <= w[1]), "not monotonic: {seen:?}");
@@ -54,26 +44,16 @@ fn run_cancel_kills() {
 
     let cancel = CancelToken::new();
     let mut cancelled_at: Option<Instant> = None;
-    let result = run_ffmpeg(
-        &paths,
-        &transcode_args(&input, &output, "medium"),
-        20.0,
-        &cancel,
-        &mut |_| {
-            if cancelled_at.is_none() {
-                cancelled_at = Some(Instant::now());
-                cancel.cancel();
-            }
-        },
-    );
+    let result = run_ffmpeg(&paths, &transcode_args(&input, &output, "medium"), 20.0, &cancel, &mut |_| {
+        if cancelled_at.is_none() {
+            cancelled_at = Some(Instant::now());
+            cancel.cancel();
+        }
+    });
     let started = cancelled_at.expect("no progress callback before the run ended");
 
     assert!(matches!(result, Err(RunError::Cancelled)), "got {result:?}");
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "took {:?} to return after cancel",
-        started.elapsed()
-    );
+    assert!(started.elapsed() < Duration::from_secs(2), "took {:?} to return after cancel", started.elapsed());
 
     // The child must be dead and reaped: the output file stops growing.
     let size = output.metadata().map(|m| m.len()).unwrap_or(0);
@@ -89,13 +69,8 @@ fn run_failure_has_stderr() {
     let output = dir.path().join("out.mp4");
     let paths = FfmpegPaths::resolve().unwrap();
 
-    let result = run_ffmpeg(
-        &paths,
-        &transcode_args(&missing, &output, "ultrafast"),
-        5.0,
-        &CancelToken::new(),
-        &mut |_| {},
-    );
+    let result =
+        run_ffmpeg(&paths, &transcode_args(&missing, &output, "ultrafast"), 5.0, &CancelToken::new(), &mut |_| {});
     match result {
         Err(RunError::Failed { stderr_tail }) => {
             assert!(!stderr_tail.trim().is_empty(), "empty stderr_tail");
@@ -115,14 +90,8 @@ fn run_progress_comes_from_out_time_not_just_end_marker() {
     // Claim the clip is twice as long as it is: parsed out_time values top out near 0.5, so a
     // value around 0.5 can only come from out_time_us parsing; 1.0 then comes from progress=end.
     let mut seen: Vec<f64> = Vec::new();
-    run_ffmpeg(
-        &paths,
-        &transcode_args(&input, &output, "ultrafast"),
-        10.0,
-        &CancelToken::new(),
-        &mut |p| seen.push(p),
-    )
-    .expect("transcode should succeed");
+    run_ffmpeg(&paths, &transcode_args(&input, &output, "ultrafast"), 10.0, &CancelToken::new(), &mut |p| seen.push(p))
+        .expect("transcode should succeed");
 
     let parsed_max = seen.iter().copied().filter(|p| *p < 1.0).fold(0.0, f64::max);
     assert!(

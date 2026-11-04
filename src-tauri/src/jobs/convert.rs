@@ -1,4 +1,4 @@
-//! Convert plan and job (Task 8).
+//! Convert job: replace a file with the same video in another format.
 //!
 //! Converting replaces a file with the target format: remuxing (`-c copy`) when the codecs fit
 //! the target container, re-encoding otherwise. The original goes to the Recycle Bin only after
@@ -73,6 +73,7 @@ fn os(s: &str) -> OsString {
 }
 
 /// ffmpeg arguments (after the runner's own flags) writing `info`'s file to `temp`.
+#[rustfmt::skip] // the re-encode settings are grouped by stream
 fn build_args(info: &MediaInfo, input: &Path, temp: &Path, target: &Target, plan: ConvertPlan) -> Vec<OsString> {
     let mut args = vec![os("-i"), input.as_os_str().to_os_string()];
     let video_map = info.video.as_ref().map(|v| format!("0:{}", v.index));
@@ -140,7 +141,7 @@ pub fn convert(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // the one step of `convert` that can fail after the temp exists
 fn encode_and_commit(
     paths: &FfmpegPaths,
     input: &Path,
@@ -233,10 +234,7 @@ mod tests {
 
     #[test]
     fn plan_mp4_remuxes_allowed_codecs_and_audio_only() {
-        assert_eq!(
-            plan_convert(&info("mov", Some("h264"), &["aac", "ac3"]), Target::Mp4).unwrap(),
-            ConvertPlan::Remux
-        );
+        assert_eq!(plan_convert(&info("mov", Some("h264"), &["aac", "ac3"]), Target::Mp4).unwrap(), ConvertPlan::Remux);
         assert_eq!(plan_convert(&info("mkv", None, &["opus"]), Target::Mp4).unwrap(), ConvertPlan::Remux);
     }
 
@@ -248,19 +246,13 @@ mod tests {
 
     #[test]
     fn plan_mov_rules() {
-        assert_eq!(
-            plan_convert(&info("mp4", Some("h264"), &["aac"]), Target::Mov).unwrap(),
-            ConvertPlan::Remux
-        );
+        assert_eq!(plan_convert(&info("mp4", Some("h264"), &["aac"]), Target::Mov).unwrap(), ConvertPlan::Remux);
         assert_eq!(
             plan_convert(&info("mkv", Some("prores"), &["pcm_s24le"]), Target::Mov).unwrap(),
             ConvertPlan::Remux
         );
         // av1 is fine in mp4 but not in mov; opus/mp3 audio likewise.
-        assert_eq!(
-            plan_convert(&info("mp4", Some("av1"), &["aac"]), Target::Mov).unwrap(),
-            ConvertPlan::ReencodeVideo
-        );
+        assert_eq!(plan_convert(&info("mp4", Some("av1"), &["aac"]), Target::Mov).unwrap(), ConvertPlan::ReencodeVideo);
         assert_eq!(
             plan_convert(&info("mp4", Some("h264"), &["mp3"]), Target::Mov).unwrap(),
             ConvertPlan::ReencodeVideo

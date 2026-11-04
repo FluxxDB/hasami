@@ -3,18 +3,25 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use super::media::Crop;
 use crate::media::{hidden_command, FfmpegPaths, MediaInfo};
 
+/// Which export button was pressed (spec §5.7).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportMode {
+    /// Quick export: `[CLIPPED] <name>.mp4`; the original goes to the Recycle Bin.
     Quick,
+    /// Export + save raw: `[CLIPPED] <name>.mp4`; the original moves into `Raw\`.
     SaveRaw,
+    /// Export audio: `[CLIPPED] <name>.mp3`; the original is untouched.
     Audio,
 }
 
@@ -34,6 +41,7 @@ pub struct AudioPiece {
     pub src_end: f64,
 }
 
+/// One audio track of the edit, with its volume and kept pieces.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AudioTrackRequest {
     /// Index among the source's audio streams (`0:a:<index>`).
@@ -42,8 +50,10 @@ pub struct AudioTrackRequest {
     pub pieces: Vec<AudioPiece>,
 }
 
+/// An edit to render, as the editor sends it to `editor_export`. Mirrored in `src/editor/api.ts`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ExportRequest {
+    /// The editor session the edit was made in (part of the UI contract; rendering doesn't need it).
     pub session: u64,
     pub input: PathBuf,
     pub mode: ExportMode,
@@ -75,7 +85,11 @@ fn num(n: f64) -> String {
     let s = format!("{n:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     // "-0.000000" trims to "-0"; ffmpeg reads that fine, but keep the graph tidy.
-    if s == "-0" { "0".to_owned() } else { s.to_owned() }
+    if s == "-0" {
+        "0".to_owned()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Build the filter graph for `req`: video pieces trimmed and concatenated into `[vout]`, then,
@@ -148,11 +162,7 @@ pub fn build_graph(req: &ExportRequest, source_size: (u32, u32)) -> Graph {
         } else {
             String::new()
         };
-        let master = if req.master_db != 0.0 {
-            format!("volume={:.2}dB,", req.master_db)
-        } else {
-            String::new()
-        };
+        let master = if req.master_db != 0.0 { format!("volume={:.2}dB,", req.master_db) } else { String::new() };
         let dur = num(req.duration_s);
         parts.push(format!(
             "{}{mix}{master}apad=whole_dur={dur},atrim=end={dur},aformat=channel_layouts=stereo[aout]",
@@ -190,7 +200,9 @@ pub fn crop_filter(crop: Crop, source_size: (u32, u32)) -> String {
 
 /// Whether a `size` picture has the `source_size` frame's aspect ratio, within 1%.
 fn same_aspect((w, h): (u32, u32), (sw, sh): (u32, u32)) -> bool {
-    h > 0 && sh > 0 && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE
+    h > 0
+        && sh > 0
+        && ((f64::from(w) / f64::from(h)) / (f64::from(sw) / f64::from(sh)) - 1.0).abs() <= SAME_ASPECT_TOLERANCE
 }
 
 /// The width and height a video export comes out at: the source's, or with a crop of another
@@ -210,23 +222,75 @@ pub struct VideoEncoder {
     pub args: Vec<String>,
 }
 
+/// How long the one-frame test encode in [`encoder_available`] may take. A stuck hardware driver
+/// would otherwise hold up the export, and every job queued behind it, for good.
+const ENCODER_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Whether the bundled ffmpeg can encode with `name` on this machine: a one-frame test encode,
-/// remembered per encoder name for the life of the process.
+/// remembered per encoder name for the life of the process. A test that is given up after 15 s
+/// counts as "no" for this export but isn't remembered, so one slow first start of a hardware
+/// driver doesn't send every later export to software.
 pub fn encoder_available(paths: &FfmpegPaths, name: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(&known) = cache.lock().unwrap().get(name) {
+    remembered(CACHE.get_or_init(Default::default), name, || {
+        let mut test = hidden_command(&paths.ffmpeg);
+        test.args(["-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"])
+            .args(["-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", name])
+            .args(["-f", "null", "-"]);
+        run_within(test, ENCODER_TEST_TIMEOUT)
+    })
+}
+
+/// How a bounded test run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestRun {
+    Succeeded,
+    Failed,
+    /// Still running at the deadline, so it was killed. Says nothing lasting about the encoder.
+    TimedOut,
+}
+
+/// The answer for `name` in `cache`, or `test`'s, which is remembered unless the test timed out.
+/// The lock isn't held while `test` runs; two threads racing just both run it.
+fn remembered(cache: &Mutex<HashMap<String, bool>>, name: &str, test: impl FnOnce() -> TestRun) -> bool {
+    let lock = || cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(&known) = lock().get(name) {
         return known;
     }
-    // Not holding the lock while ffmpeg runs; two threads racing just both run the test.
-    let ok = hidden_command(&paths.ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=1"])
-        .args(["-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", name, "-f", "null", "-"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    cache.lock().unwrap().insert(name.to_owned(), ok);
+    let outcome = test();
+    let ok = outcome == TestRun::Succeeded;
+    if outcome != TestRun::TimedOut {
+        lock().insert(name.to_owned(), ok);
+    }
     ok
+}
+
+/// Run `command` (its output discarded) for at most `limit`; one still running then is killed.
+/// This covers a run that hangs in user mode: a process stuck inside a kernel driver call only
+/// finishes dying once that call returns.
+fn run_within(mut command: Command, limit: Duration) -> TestRun {
+    let spawned = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = spawned else {
+        return TestRun::Failed;
+    };
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return if status.success() { TestRun::Succeeded } else { TestRun::Failed },
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return TestRun::TimedOut;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return TestRun::Failed;
+            }
+        }
+    }
 }
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -247,7 +311,10 @@ pub fn h264_encoder(bitrate: u64, size: (u32, u32), hw: &dyn Fn(&str) -> bool) -
     if fits_amf && hw("h264_amf") {
         let b = bitrate;
         let rate = args(&["-b:v", &b.to_string(), "-maxrate", &(b + b / 2).to_string()]);
-        VideoEncoder { codec: "h264_amf", args: [args(&["-rc", "vbr_peak"]), rate, args(&["-pix_fmt", "yuv420p"])].concat() }
+        VideoEncoder {
+            codec: "h264_amf",
+            args: [args(&["-rc", "vbr_peak"]), rate, args(&["-pix_fmt", "yuv420p"])].concat(),
+        }
     } else {
         software_h264(bitrate)
     }
@@ -255,6 +322,7 @@ pub fn h264_encoder(bitrate: u64, size: (u32, u32), hw: &dyn Fn(&str) -> bool) -
 
 /// libx264 at `bitrate` bits/s (average; peak 1.5×), 8-bit 4:2:0: the encoder that works
 /// everywhere, and what a failed hardware render is retried with.
+#[rustfmt::skip] // one option and its value per pair
 pub fn software_h264(bitrate: u64) -> VideoEncoder {
     let b = bitrate;
     VideoEncoder {
@@ -371,7 +439,10 @@ mod tests {
 
         let single = ExportRequest { master_db: -2.5, ..req(vec![vp(0.0, 3.0)], vec![track(0)], 3.0) };
         let f = build_graph(&single, FRAME).filter;
-        assert!(f.ends_with("[t0]volume=-2.50dB,apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"), "{f}");
+        assert!(
+            f.ends_with("[t0]volume=-2.50dB,apad=whole_dur=3,atrim=end=3,aformat=channel_layouts=stereo[aout]"),
+            "{f}"
+        );
 
         let unity = build_graph(&req(vec![vp(0.0, 3.0)], vec![track(0), track(1)], 3.0), FRAME).filter;
         assert_eq!(unity.matches("volume=").count(), 2, "only the two track gains: {unity}");
@@ -380,7 +451,8 @@ mod tests {
 
     #[test]
     fn master_db_defaults_to_zero() {
-        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
+        let json =
+            r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
         let req: ExportRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.master_db, 0.0);
     }
@@ -448,12 +520,51 @@ mod tests {
 
     #[test]
     fn crop_defaults_to_none_and_parses() {
-        let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
+        let json =
+            r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[]}"#;
         assert_eq!(serde_json::from_str::<ExportRequest>(json).unwrap().crop, None);
         let json = r#"{"session":1,"input":"in.mp4","mode":"quick","fit_20mb":false,"duration_s":1,"video":[],"audio":[],
                        "crop":{"x":0,"y":0,"w":1440,"h":810}}"#;
         let crop = serde_json::from_str::<ExportRequest>(json).unwrap().crop;
         assert_eq!(crop, Some(Crop { x: 0, y: 0, w: 1440, h: 810 }));
+    }
+
+    #[test]
+    fn a_test_encode_that_hangs_is_given_up() {
+        let paths = FfmpegPaths::resolve().unwrap();
+        // Ten seconds of real-time input stands in for a stuck driver.
+        let mut slow = hidden_command(&paths.ffmpeg);
+        slow.args(["-hide_banner", "-loglevel", "error", "-re"]).args(["-f", "lavfi", "-i", "color=s=64x64:d=10"]);
+        slow.args(["-f", "null", "-"]);
+        let started = std::time::Instant::now();
+        assert_eq!(run_within(slow, Duration::from_millis(300)), TestRun::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+
+        let mut quick = hidden_command(&paths.ffmpeg);
+        quick.args(["-hide_banner", "-loglevel", "error"]).args(["-f", "lavfi", "-i", "color=s=64x64:d=0.1"]);
+        quick.args(["-f", "null", "-"]);
+        assert_eq!(run_within(quick, ENCODER_TEST_TIMEOUT), TestRun::Succeeded);
+
+        let mut broken = hidden_command(&paths.ffmpeg);
+        broken.args(["-hide_banner", "-loglevel", "error", "-i", "no such input"]);
+        assert_eq!(run_within(broken, ENCODER_TEST_TIMEOUT), TestRun::Failed);
+    }
+
+    #[test]
+    fn a_timed_out_encoder_test_is_tried_again_next_time() {
+        let cache = Mutex::new(HashMap::new());
+        let runs = std::cell::Cell::new(0);
+        let test = |outcome| {
+            runs.set(runs.get() + 1);
+            outcome
+        };
+        assert!(!remembered(&cache, "h264_amf", || test(TestRun::TimedOut)));
+        assert!(remembered(&cache, "h264_amf", || test(TestRun::Succeeded)), "the next export tests again");
+        assert!(remembered(&cache, "h264_amf", || panic!("a real answer is remembered")));
+        assert_eq!(runs.get(), 2);
+
+        assert!(!remembered(&cache, "hevc_amf", || TestRun::Failed));
+        assert!(!remembered(&cache, "hevc_amf", || panic!("a failure is remembered too")));
     }
 
     #[test]
@@ -505,8 +616,8 @@ mod tests {
         assert_eq!(
             e.args,
             [
-                "-preset", "medium", "-b:v", "10000000", "-maxrate", "15000000", "-bufsize", "20000000",
-                "-pix_fmt", "yuv420p"
+                "-preset", "medium", "-b:v", "10000000", "-maxrate", "15000000", "-bufsize", "20000000", "-pix_fmt",
+                "yuv420p"
             ]
         );
     }
@@ -531,7 +642,13 @@ mod tests {
                 bit_rate: video_bps,
             }),
             audio: (0..tracks)
-                .map(|i| AudioStream { index: i + 1, codec: "aac".into(), channels: 2, sample_rate: 48000, bit_rate: None })
+                .map(|i| AudioStream {
+                    index: i + 1,
+                    codec: "aac".into(),
+                    channels: 2,
+                    sample_rate: 48000,
+                    bit_rate: None,
+                })
                 .collect(),
         }
     }

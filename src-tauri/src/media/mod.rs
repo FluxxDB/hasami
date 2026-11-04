@@ -1,10 +1,15 @@
-//! ffmpeg/ffprobe location, probing and process running.
+//! The bundled ffmpeg and ffprobe: finding them ([`ffmpeg`]), reading a file's streams
+//! ([`probe`](mod@probe)) and running an encode with progress and cancel ([`run`]).
 
 pub mod ffmpeg;
 pub mod probe;
 pub mod run;
 
 use std::path::PathBuf;
+
+/// The file extensions Hasami handles as videos: its right-click menu is registered for these, and
+/// the editor's Prev / Next step through them.
+pub const VIDEO_EXTENSIONS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
 
 pub use ffmpeg::{hidden_command, FfmpegPaths};
 pub use probe::{probe, AudioStream, MediaInfo, VideoStream};

@@ -1,3 +1,5 @@
+//! Integration tests for probing media and for the shared fixtures themselves.
+
 mod common;
 
 use hasami_lib::media::{probe, FfmpegPaths};

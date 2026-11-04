@@ -1,3 +1,6 @@
+//! Integration tests for preparing a clip for the editor: empty-track detection, black borders,
+//! waveform peaks, thumbnails and the preview proxy.
+
 mod common;
 
 use std::path::Path;
@@ -153,7 +156,8 @@ fn peaks_of_silence_are_flat() {
     let dir = tempfile::tempdir().unwrap();
     let silent = dir.path().join("silent.m4a");
     let out = hidden_command(&paths().ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:a", "aac"])
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:a", "aac"])
         .arg(&silent)
         .output()
         .unwrap();
@@ -181,6 +185,23 @@ fn thumbnails_cover_the_clip() {
 }
 
 #[test]
+fn thumbnails_clear_an_earlier_runs_pictures_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_multitrack_hevc(dir.path());
+    let out_dir = dir.path().join("thumbs");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    // A longer clip's run left more pictures here; they must not join this clip's.
+    std::fs::write(out_dir.join("thumb_00099.jpg"), b"stale").unwrap();
+    std::fs::write(out_dir.join("proxy.mp4"), b"not a thumbnail").unwrap();
+
+    let thumbs = thumbnails(&paths(), &input, 5.0, &out_dir, &CancelToken::new()).unwrap();
+
+    assert_eq!(thumbs.len(), 5);
+    assert!(!out_dir.join("thumb_00099.jpg").exists());
+    assert!(out_dir.join("proxy.mp4").exists(), "other files are left alone");
+}
+
+#[test]
 fn proxy_is_h264_720p() {
     let dir = tempfile::tempdir().unwrap();
     let input = common::fixture_multitrack_hevc(dir.path());
@@ -204,7 +225,7 @@ fn prepare_unreadable_is_plain() {
     let input = dir.path().join("not_a_video.mp4");
     std::fs::write(&input, "this is just text").unwrap();
 
-    let err = prepare(&paths(), &input, &dir.path().join("work"), &CancelToken::new()).err().expect("should fail");
+    let err = prepare(&paths(), &input, &dir.path().join("work"), &CancelToken::new()).expect_err("should fail");
 
     assert!(matches!(err, JobError::Message(_)));
     assert_eq!(err.to_string(), "Hasami couldn't read this video.");

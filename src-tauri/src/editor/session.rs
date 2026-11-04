@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::media::{prepare, PreparedMedia};
+use crate::jobs::compress::PASSLOG_DIR_PREFIX;
 use crate::jobs::JobError;
 use crate::media::run::CancelToken;
 use crate::media::FfmpegPaths;
@@ -55,6 +56,7 @@ impl Default for EditorSessions {
 }
 
 impl EditorSessions {
+    /// No sessions open.
     pub fn new() -> Self {
         Self { open: HashMap::new() }
     }
@@ -74,7 +76,8 @@ impl EditorSessions {
         // A folder from an earlier process that had the same id would mix its files into ours.
         let _ = std::fs::remove_dir_all(&work_dir);
         let cancel = CancelToken::new();
-        let session = Session { input: input.to_path_buf(), work_dir: work_dir.clone(), media: None, cancel: cancel.clone() };
+        let session =
+            Session { input: input.to_path_buf(), work_dir: work_dir.clone(), media: None, cancel: cancel.clone() };
         self.open.insert(id, session);
         Reservation { id, work_dir, cancel }
     }
@@ -182,15 +185,18 @@ fn remove_dirs(mut dirs: Vec<PathBuf>, deadline: Instant) {
     }
 }
 
-/// The pid in a work folder's name, `hasami-editor-<pid>-<id>`.
+/// The pid in the name of a Hasami scratch folder: an editor work folder,
+/// `hasami-editor-<pid>-<id>`, or a Compress pass-log folder, `hasami-2pass-<pid>-<nanos>-<n>`.
 fn work_dir_pid(name: &str) -> Option<u32> {
-    let (pid, id) = name.strip_prefix(WORK_DIR_PREFIX)?.split_once('-')?;
-    id.parse::<u64>().ok()?;
+    let rest = [WORK_DIR_PREFIX, PASSLOG_DIR_PREFIX].iter().find_map(|prefix| name.strip_prefix(prefix))?;
+    let (pid, ids) = rest.split_once('-')?;
+    ids.split('-').all(|id| id.parse::<u64>().is_ok()).then_some(())?;
     pid.parse().ok()
 }
 
-/// Delete the work folders in `temp` left by Hasami processes that are no longer running (a
-/// crash, or an exit that couldn't wait for ffmpeg). This process's own folders are left alone.
+/// Delete the scratch folders in `temp` (editor work folders and Compress pass logs) left by Hasami
+/// processes that are no longer running (a crash, or an exit that couldn't wait for ffmpeg). This
+/// process's own folders are left alone.
 pub fn sweep_stale(temp: &Path, is_running: impl Fn(u32) -> bool) {
     let Ok(entries) = std::fs::read_dir(temp) else {
         return;
@@ -336,13 +342,15 @@ mod tests {
             format!("hasami-editor-{me}-1"),      // ours
             "hasami-editor-notapid-1".to_owned(), // not a work folder
             "hasami-export-111".to_owned(),       // someone else's
+            "hasami-2pass-111-5-0".to_owned(),    // a dead Compress's pass log
+            "hasami-2pass-222-5-1".to_owned(),    // a running one's
         ];
         for name in &names {
             std::fs::create_dir(temp.path().join(name)).unwrap();
         }
         sweep_stale(temp.path(), |pid| pid == 222);
         let left: Vec<bool> = names.iter().map(|n| temp.path().join(n).exists()).collect();
-        assert_eq!(left, [false, true, true, true, true]);
+        assert_eq!(left, [false, true, true, true, true, false, true]);
     }
 
     #[test]

@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fsops::{CLIPPED_PREFIX, COMPRESSED_PREFIX};
-
-/// The extensions Hasami treats as videos (the same ones its right-click menu is registered for).
-pub const VIDEO_EXTS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
-
+use crate::media::VIDEO_EXTENSIONS;
 
 /// The video next to `current` in the folder's date order: siblings in the same folder with a video extension,
 /// ordered by modified time (oldest first), ties by file name (case-insensitive); `[CLIPPED] ` and `[20MB] `
@@ -40,7 +37,7 @@ pub fn adjacent_video(current: &Path, current_modified_ms: u64, newer: bool) -> 
             continue;
         }
         // The nearest one on that side: the smallest key going newer, the largest going older.
-        let nearer = nearest.as_ref().map_or(true, |(best, _)| if newer { key < *best } else { key > *best });
+        let nearer = nearest.as_ref().is_none_or(|(best, _)| if newer { key < *best } else { key > *best });
         if nearer {
             nearest = Some((key, path));
         }
@@ -69,7 +66,7 @@ fn lower_name(path: &Path) -> String {
 fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| VIDEO_EXTS.iter().any(|v| v.eq_ignore_ascii_case(e)))
+        .is_some_and(|e| VIDEO_EXTENSIONS.iter().any(|v| v.eq_ignore_ascii_case(e)))
 }
 
 /// Milliseconds since the Unix epoch; `None` for times before it.
@@ -110,6 +107,17 @@ mod tests {
         let a = make(dir.path(), "a.mp4", 300_000);
         make(dir.path(), "[CLIPPED] x.mp4", 250_000);
         make(dir.path(), "[20mb] y.mp4", 225_000);
+        let b = make(dir.path(), "b.mp4", 200_000);
+        assert_eq!(adjacent_video(&a, 300_000, false).unwrap(), Some(b.clone()));
+        assert_eq!(adjacent_video(&b, 200_000, true).unwrap(), Some(a));
+    }
+
+    #[test]
+    fn skips_an_export_still_being_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = make(dir.path(), "a.mp4", 300_000);
+        // A hidden temp file a running export writes next to its clip.
+        make(dir.path(), ".[CLIPPED] a.mp4.hasami-tmp", 250_000);
         let b = make(dir.path(), "b.mp4", 200_000);
         assert_eq!(adjacent_video(&a, 300_000, false).unwrap(), Some(b.clone()));
         assert_eq!(adjacent_video(&b, 200_000, true).unwrap(), Some(a));

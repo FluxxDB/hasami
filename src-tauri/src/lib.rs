@@ -14,16 +14,15 @@ pub mod verify;
 /// Entry point. Explorer launches `hasami.exe <verb> <files…>`; the first launch becomes the app
 /// and later launches join it (see [`app`]).
 pub fn run() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`, not `args`: `args` panics on a file name that isn't valid Unicode.
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
     match cli::parse_args(&args) {
         Ok(action) => {
             // The installer runs `register`/`unregister`; they must exit without starting Tauri
             // (no window, and nothing joins a running instance).
-            if let Some(code) = shell_menu::handle_action(
-                &action,
-                std::env::current_exe(),
-                shell_menu::DEFAULT_CLASSES_ROOT,
-            ) {
+            if let Some(code) =
+                shell_menu::handle_action(&action, std::env::current_exe(), shell_menu::DEFAULT_CLASSES_ROOT)
+            {
                 std::process::exit(code);
             }
             app::run(action)

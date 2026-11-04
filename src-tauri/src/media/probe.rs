@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{hidden_command, FfmpegPaths, MediaError};
 
+/// A file's video stream, as ffprobe reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoStream {
     pub index: usize,
@@ -19,6 +20,7 @@ pub struct VideoStream {
     pub bit_rate: Option<u64>,
 }
 
+/// One of a file's audio streams, as ffprobe reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioStream {
     pub index: usize,
@@ -28,6 +30,7 @@ pub struct AudioStream {
     pub bit_rate: Option<u64>,
 }
 
+/// What ffprobe says about a file. Stream `index`es are ffmpeg's absolute `0:<index>`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MediaInfo {
     pub path: PathBuf,
@@ -118,8 +121,7 @@ struct RawDisposition {
 }
 
 fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
-    let raw: RawProbe =
-        serde_json::from_slice(json).map_err(|e| MediaError::ProbeParse(e.to_string()))?;
+    let raw: RawProbe = serde_json::from_slice(json).map_err(|e| MediaError::ProbeParse(e.to_string()))?;
 
     let duration_s = raw
         .format
@@ -138,7 +140,8 @@ fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
         let codec = s.codec_name.clone().unwrap_or_default();
         let bit_rate = s.bit_rate.as_deref().and_then(|b| b.parse().ok());
         match s.codec_type.as_deref() {
-            Some("video") if video.is_none() && !s.disposition.as_ref().is_some_and(|d| d.attached_pic == 1) => {
+            // Cover art shows up as a one-picture "video" stream; skip it.
+            Some("video") if video.is_none() && s.disposition.as_ref().is_none_or(|d| d.attached_pic != 1) => {
                 let (mut width, mut height) = (s.width.unwrap_or(0), s.height.unwrap_or(0));
                 if s.quarter_turned() {
                     std::mem::swap(&mut width, &mut height);
@@ -165,10 +168,7 @@ fn parse(file: &Path, json: &[u8]) -> Result<MediaInfo, MediaError> {
 
     Ok(MediaInfo {
         path: file.to_path_buf(),
-        container: file
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default(),
+        container: file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default(),
         duration_s,
         size_bytes,
         bit_rate: raw.format.bit_rate.as_deref().and_then(|b| b.parse().ok()),
@@ -211,7 +211,9 @@ mod tests {
     #[test]
     fn a_quarter_turned_video_reports_its_display_size() {
         let matrix = |deg: &str| {
-            format!(r#","side_data_list":[{{"side_data_type":"Display Matrix","displaymatrix":"...","rotation":{deg}}}]"#)
+            format!(
+                r#","side_data_list":[{{"side_data_type":"Display Matrix","displaymatrix":"...","rotation":{deg}}}]"#
+            )
         };
         assert_eq!(size(&matrix("-90")), (1080, 1920));
         assert_eq!(size(&matrix("90")), (1080, 1920));

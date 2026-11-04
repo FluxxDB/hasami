@@ -1,3 +1,6 @@
+//! Integration tests for the Compress job: the 20 MB copy in a stand-in Videos folder, the
+//! low-resolution question, cancelling, and the original never being touched.
+
 mod common;
 
 use std::fs;
@@ -21,10 +24,7 @@ struct Dirs {
 }
 
 fn dirs() -> Dirs {
-    Dirs {
-        src: tempfile::tempdir().unwrap(),
-        videos: tempfile::tempdir().unwrap(),
-    }
+    Dirs { src: tempfile::tempdir().unwrap(), videos: tempfile::tempdir().unwrap() }
 }
 
 impl Dirs {
@@ -38,20 +38,10 @@ impl Dirs {
 
     /// Run Compress on `input` into the stand-in Videos folder, without cancellation,
     /// collecting every progress report.
-    fn run(
-        &self,
-        input: &Path,
-        confirmed_low_res: bool,
-    ) -> (Result<JobOutcome, JobError>, Vec<JobProgress>) {
+    fn run(&self, input: &Path, confirmed_low_res: bool) -> (Result<JobOutcome, JobError>, Vec<JobProgress>) {
         let mut seen = Vec::new();
-        let result = compress_in(
-            &paths(),
-            input,
-            self.videos(),
-            confirmed_low_res,
-            &CancelToken::new(),
-            &mut |p| seen.push(p),
-        );
+        let result =
+            compress_in(&paths(), input, self.videos(), confirmed_low_res, &CancelToken::new(), &mut |p| seen.push(p));
         (result, seen)
     }
 
@@ -72,11 +62,7 @@ fn done(result: Result<JobOutcome, JobError>) -> (PathBuf, MediaInfo) {
         Ok(JobOutcome::Done { output, bytes, note }) => {
             assert_eq!(note, None);
             let info = probe(&paths(), &output).unwrap();
-            assert_eq!(
-                bytes,
-                fs::metadata(&output).unwrap().len(),
-                "reported size is the file's size"
-            );
+            assert_eq!(bytes, fs::metadata(&output).unwrap().len(), "reported size is the file's size");
             (output, info)
         }
         other => panic!("expected Done, got {other:?}"),
@@ -85,28 +71,19 @@ fn done(result: Result<JobOutcome, JobError>) -> (PathBuf, MediaInfo) {
 
 /// File names in `dir`, sorted.
 fn names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut names: Vec<String> =
+        fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
     names
 }
 
 fn assert_no_leftovers(dir: &Path) {
-    let leftovers: Vec<String> = names(dir)
-        .into_iter()
-        .filter(|n| n.contains(".hasami-"))
-        .collect();
+    let leftovers: Vec<String> = names(dir).into_iter().filter(|n| n.contains(".hasami-")).collect();
     assert!(leftovers.is_empty(), "leftover work files: {leftovers:?}");
 }
 
 fn assert_compress_output(info: &MediaInfo) {
-    assert!(
-        info.size_bytes <= SIZE_LIMIT_BYTES,
-        "output is {} bytes",
-        info.size_bytes
-    );
+    assert!(info.size_bytes <= SIZE_LIMIT_BYTES, "output is {} bytes", info.size_bytes);
     assert_eq!(info.container, "mp4");
 }
 
@@ -125,10 +102,7 @@ fn compress_big_file_under_limit() {
     let d = dirs();
     let input = common::fixture_big_h264(d.src(), 8);
     let original = fs::read(&input).unwrap();
-    assert!(
-        original.len() as u64 > SIZE_LIMIT_BYTES,
-        "fixture must start over the limit"
-    );
+    assert!(original.len() as u64 > SIZE_LIMIT_BYTES, "fixture must start over the limit");
 
     let (result, progress) = d.run(&input, false);
     let (output, info) = done(result);
@@ -142,20 +116,9 @@ fn compress_big_file_under_limit() {
     assert_eq!(names(d.videos()), vec!["[20MB] big_h264.mp4"]);
     assert_no_leftovers(d.videos());
 
-    assert!(
-        progress
-            .iter()
-            .all(|p| p.passes == 2 && (0.0..=1.0).contains(&p.fraction)),
-        "{progress:?}"
-    );
-    assert!(
-        progress.iter().any(|p| p.pass == 1),
-        "no pass 1 progress: {progress:?}"
-    );
-    assert!(
-        progress.iter().any(|p| p.pass == 2),
-        "no pass 2 progress: {progress:?}"
-    );
+    assert!(progress.iter().all(|p| p.passes == 2 && (0.0..=1.0).contains(&p.fraction)), "{progress:?}");
+    assert!(progress.iter().any(|p| p.pass == 1), "no pass 1 progress: {progress:?}");
+    assert!(progress.iter().any(|p| p.pass == 2), "no pass 2 progress: {progress:?}");
 }
 
 #[test]
@@ -204,15 +167,8 @@ fn compress_never_overwrites_an_earlier_copy() {
     let (output, _) = done(d.run(&input, false).0);
 
     assert_eq!(output, d.videos().join("[20MB] a (2).mp4"));
-    assert_eq!(
-        fs::read(&earlier).unwrap(),
-        b"an earlier copy",
-        "existing [20MB] a.mp4 untouched"
-    );
-    assert_eq!(
-        names(d.videos()),
-        vec!["[20MB] a (2).mp4", "[20MB] a.mp4"]
-    );
+    assert_eq!(fs::read(&earlier).unwrap(), b"an earlier copy", "existing [20MB] a.mp4 untouched");
+    assert_eq!(names(d.videos()), vec!["[20MB] a (2).mp4", "[20MB] a.mp4"]);
 }
 
 #[test]
@@ -225,11 +181,7 @@ fn compress_awkward_name() {
 
     let (output, info) = done(d.run(&input, false).0);
 
-    assert_eq!(
-        output,
-        d.videos().join("[20MB] Ráplay 'x' (2).mp4"),
-        "[CLIPPED] is dropped from the name"
-    );
+    assert_eq!(output, d.videos().join("[20MB] Ráplay 'x' (2).mp4"), "[CLIPPED] is dropped from the name");
     assert_compress_output(&info);
     assert_original_kept(&d, &input, &original);
 }
@@ -265,10 +217,7 @@ fn compress_audio_only() {
     assert!(info.video.is_none());
     assert_eq!(info.audio.len(), 1);
     assert_eq!(info.audio[0].codec, "aac");
-    assert!(
-        progress.iter().all(|p| p.pass == 1 && p.passes == 1),
-        "{progress:?}"
-    );
+    assert!(progress.iter().all(|p| p.pass == 1 && p.passes == 1), "{progress:?}");
     assert!(input.exists());
     assert_no_leftovers(d.videos());
 }
@@ -307,10 +256,7 @@ fn compress_low_res_needs_confirm() {
         }
         other => panic!("expected NeedsConfirm, got {other:?}"),
     }
-    assert!(
-        progress.is_empty(),
-        "nothing should be encoded before confirming"
-    );
+    assert!(progress.is_empty(), "nothing should be encoded before confirming");
     assert!(names(d.videos()).is_empty(), "nothing is written");
     assert_original_kept(&d, &input, &bytes);
 
@@ -353,11 +299,7 @@ fn compress_native_360p_does_not_ask() {
 
     assert_eq!(output, d.videos().join("[20MB] native360.mp4"));
     let video = info.video.as_ref().unwrap();
-    assert_eq!(
-        (video.width, video.height),
-        (640, 360),
-        "already below 480p, so kept as is"
-    );
+    assert_eq!((video.width, video.height), (640, 360), "already below 480p, so kept as is");
 }
 
 #[test]
@@ -413,12 +355,7 @@ fn compress_keeps_a_rotated_video_upright_and_unsquashed() {
 
     let video = info.video.expect("video stream");
     let aspect = video.width as f64 / video.height as f64;
-    assert!(
-        (aspect - 360.0 / 640.0).abs() < 0.02,
-        "output {}x{} should be portrait 9:16",
-        video.width,
-        video.height
-    );
+    assert!((aspect - 360.0 / 640.0).abs() < 0.02, "output {}x{} should be portrait 9:16", video.width, video.height);
 }
 
 #[test]
@@ -447,8 +384,5 @@ fn six_track_mix_keeps_level() {
 
     assert_eq!(info.audio.len(), 1);
     let mixed = common::mean_volume_db(&output, 0);
-    assert!(
-        (mixed - source_loud).abs() <= 1.0,
-        "mixed mean {mixed} dB vs source loud track {source_loud} dB"
-    );
+    assert!((mixed - source_loud).abs() <= 1.0, "mixed mean {mixed} dB vs source loud track {source_loud} dB");
 }

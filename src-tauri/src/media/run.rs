@@ -49,6 +49,7 @@ impl Drop for RunGuard {
 const RUNS_POLL: Duration = Duration::from_millis(5);
 
 impl CancelToken {
+    /// A token that isn't cancelled.
     pub fn new() -> Self {
         Self::default()
     }
@@ -58,6 +59,7 @@ impl CancelToken {
         self.0.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Whether [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::SeqCst)
     }
@@ -233,7 +235,8 @@ fn parse_progress_line(line: &str, total_s: f64) -> Option<f64> {
         return Some(1.0);
     }
     let micros: f64 = line.strip_prefix("out_time_us=")?.trim().parse::<i64>().ok()? as f64;
-    if !(total_s > 0.0) {
+    // Also rejects NaN.
+    if total_s.is_nan() || total_s <= 0.0 {
         return None;
     }
     Some((micros / 1_000_000.0 / total_s).clamp(0.0, 1.0))

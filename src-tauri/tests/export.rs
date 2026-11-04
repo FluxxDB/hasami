@@ -1,3 +1,6 @@
+//! Integration tests for the editor's exports: the filter graph, Quick / Save raw / Audio, the
+//! 20 MB copy, border crops and master gain.
+
 mod common;
 
 use std::fs;
@@ -17,9 +20,7 @@ use hasami_lib::media::{hidden_command, probe, FfmpegPaths};
 fn render_graph(paths: &FfmpegPaths, input: &Path, req: &ExportRequest, out: &Path) {
     let graph = build_graph(req, (1920, 1080));
     let mut cmd = hidden_command(&paths.ffmpeg);
-    cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-        .arg(input)
-        .args(["-filter_complex", &graph.filter]);
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]).arg(input).args(["-filter_complex", &graph.filter]);
     if let Some(v) = &graph.video_out {
         cmd.args(["-map", v, "-c:v", "libx264", "-pix_fmt", "yuv420p"]);
     }
@@ -47,10 +48,7 @@ fn render_graph_cuts_duration() {
         mode: ExportMode::Quick,
         fit_20mb: false,
         duration_s: 3.0,
-        video: vec![
-            VideoPiece { src_start: 0.0, src_end: 1.0 },
-            VideoPiece { src_start: 2.0, src_end: 4.0 },
-        ],
+        video: vec![VideoPiece { src_start: 0.0, src_end: 1.0 }, VideoPiece { src_start: 2.0, src_end: 4.0 }],
         audio: vec![AudioTrackRequest {
             index: 0,
             gain_db: 0.0,
@@ -98,10 +96,7 @@ fn cut_request(input: &Path, mode: ExportMode) -> ExportRequest {
         mode,
         fit_20mb: false,
         duration_s: 3.0,
-        video: vec![
-            VideoPiece { src_start: 0.0, src_end: 1.0 },
-            VideoPiece { src_start: 2.0, src_end: 4.0 },
-        ],
+        video: vec![VideoPiece { src_start: 0.0, src_end: 1.0 }, VideoPiece { src_start: 2.0, src_end: 4.0 }],
         audio: vec![
             AudioTrackRequest {
                 index: 0,
@@ -163,10 +158,8 @@ fn assert_three_passes(passes: &[(u8, u8)]) {
 }
 
 fn names_in(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let mut names: Vec<String> =
+        fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
     names
 }
@@ -352,10 +345,7 @@ fn fit_export_whose_copy_fails_is_still_done_with_a_note() {
 
     assert_eq!(output, dir.path().join("[CLIPPED] clip.mp4"));
     let note = note.expect("a note about the copy");
-    assert!(
-        note.starts_with("Saved \"[CLIPPED] clip.mp4\", but couldn't make the 20 MB copy: "),
-        "{note}"
-    );
+    assert!(note.starts_with("Saved \"[CLIPPED] clip.mp4\", but couldn't make the 20 MB copy: "), "{note}");
     assert_eq!(fs::read(dir.path().join("Raw").join("clip.mp4")).unwrap(), original);
     assert!(leftover_temp_files(dir.path()).is_empty());
     assert!(names_in(videos.path()).is_empty(), "{:?}", names_in(videos.path()));

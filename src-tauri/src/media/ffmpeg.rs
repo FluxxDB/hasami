@@ -44,11 +44,9 @@ impl FfmpegPaths {
         #[cfg(debug_assertions)]
         {
             let dev_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
-            if let Some(found) = Self::in_dir(
-                &dev_dir,
-                "ffmpeg-x86_64-pc-windows-msvc.exe",
-                "ffprobe-x86_64-pc-windows-msvc.exe",
-            ) {
+            if let Some(found) =
+                Self::in_dir(&dev_dir, "ffmpeg-x86_64-pc-windows-msvc.exe", "ffprobe-x86_64-pc-windows-msvc.exe")
+            {
                 return Ok(found);
             }
             searched.push(dev_dir);
@@ -66,7 +64,7 @@ impl FfmpegPaths {
 /// A [`Command`] for `program` that does not flash a console window on Windows.
 /// Every child process Hasami starts must be built through this.
 pub fn hidden_command(program: &Path) -> Command {
-    #[allow(unused_mut)]
+    #[allow(unused_mut)] // only changed on Windows
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
