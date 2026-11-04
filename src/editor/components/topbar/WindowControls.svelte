@@ -36,51 +36,10 @@
     gap: 2px;
     margin-left: 6px;
   }
-  button {
-    flex: none;
-    white-space: nowrap;
-    color: var(--bone);
-    background: transparent;
-    border: 0;
-    padding: 0;
-    transition:
-      border-color 0.12s ease-out,
-      background-color 0.12s ease-out,
-      color 0.12s ease-out,
-      text-decoration-color 0.12s ease-out;
-  }
-  .ctl {
-    width: 34px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    color: var(--pebble);
-    border-radius: 3px;
-  }
-  .ctl:hover {
-    background: var(--charcoal);
-    color: var(--bone);
-  }
 
   @media (max-width: 1440px) {
     .winctl {
       margin-left: 0;
-    }
-  }
-  @media (max-width: 1180px) {
-    .ctl {
-      width: 30px;
-    }
-  }
-  @media (max-width: 1100px) {
-    .ctl {
-      width: 28px;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    button {
-      transition: none;
     }
   }
 </style>

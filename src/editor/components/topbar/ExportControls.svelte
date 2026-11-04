@@ -109,27 +109,6 @@
 {/if}
 
 <style>
-  button {
-    flex: none;
-    white-space: nowrap;
-    color: var(--bone);
-    background: transparent;
-    border: 0;
-    padding: 0;
-    transition:
-      border-color 0.12s ease-out,
-      background-color 0.12s ease-out,
-      color 0.12s ease-out,
-      text-decoration-color 0.12s ease-out;
-  }
-  button:disabled,
-  button[aria-disabled='true'] {
-    opacity: 0.4;
-  }
-  button[aria-disabled='true'] {
-    cursor: default;
-  }
-
   /* An export's progress: a thin bone fill on a neutral track, with its percentage. */
   .progress {
     flex: none;
@@ -229,61 +208,13 @@
     transform: translateX(12px);
   }
 
-  .link {
-    padding: 6px 4px;
-    text-decoration: underline;
-    text-decoration-color: var(--iron);
-    text-underline-offset: 4px;
-  }
-  .link:hover:not(:disabled, [aria-disabled='true']) {
-    text-decoration-color: var(--bone);
-  }
-
-  /* 8px outline buttons; Quick export's border is the red. */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 16px;
-    border-radius: 8px;
-    border: 1px solid var(--ash);
-  }
-  .btn:hover:not(:disabled, [aria-disabled='true']) {
-    border-color: var(--bone);
-    background: var(--charcoal);
-  }
-  .btn:active:not(:disabled, [aria-disabled='true']) {
-    background: var(--smoke);
-  }
-  .btn.primary {
-    border-color: var(--red);
-  }
-  .btn.primary:hover:not(:disabled, [aria-disabled='true']) {
-    border-color: var(--red);
-  }
-
-  @media (max-width: 1440px) {
-    .btn {
-      padding: 10px 12px;
-      gap: 8px;
-    }
-    .link {
-      padding: 6px 2px;
-    }
-  }
   @media (max-width: 1180px) {
     .bar {
       width: 120px;
     }
   }
-  @media (max-width: 1100px) {
-    .btn {
-      padding: 10px 10px;
-    }
-  }
 
   @media (prefers-reduced-motion: reduce) {
-    button,
     .bar i,
     .switch,
     .switch::after {

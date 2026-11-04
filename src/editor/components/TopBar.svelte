@@ -6,6 +6,8 @@
 
   import { inFlight } from '../exportLog.svelte';
   import type { EditorStore } from '../store.svelte';
+  // The bar's shared button styles (link, outline, window-control): see the file's comment.
+  import './topbar/buttons.css';
   import ExportControls from './topbar/ExportControls.svelte';
   import FileTitle from './topbar/FileTitle.svelte';
   import OutcomeRow from './topbar/OutcomeRow.svelte';

@@ -1,0 +1,111 @@
+/*
+ * The top bar's buttons, shared by the components in this folder (TopBar.svelte imports it once):
+ * no chrome of their own, the underlined link, the 8px outline button (Quick export's border is
+ * the red) and the window-control square, which the outcome row's dismiss button also is.
+ *
+ * Each selector carries one ancestor class (`.topbar`, or `.outcome` for the row under the bar),
+ * so it weighs exactly what the same rule did when it was scoped to one component: the
+ * components' own rules (`.toggle`, `.strip`, `.steps .btn`…) still win where they did.
+ */
+
+.topbar button,
+.outcome button {
+  flex: none;
+  white-space: nowrap;
+  color: var(--bone);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  transition:
+    border-color 0.12s ease-out,
+    background-color 0.12s ease-out,
+    color 0.12s ease-out,
+    text-decoration-color 0.12s ease-out;
+}
+.topbar button:disabled,
+.topbar button[aria-disabled='true'] {
+  opacity: 0.4;
+}
+.topbar button[aria-disabled='true'] {
+  cursor: default;
+}
+
+.topbar .link {
+  padding: 6px 4px;
+  text-decoration: underline;
+  text-decoration-color: var(--iron);
+  text-underline-offset: 4px;
+}
+.topbar .link:hover:not(:disabled, [aria-disabled='true']) {
+  text-decoration-color: var(--bone);
+}
+
+.topbar .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--ash);
+}
+.topbar .btn:hover:not(:disabled, [aria-disabled='true']) {
+  border-color: var(--bone);
+  background: var(--charcoal);
+}
+.topbar .btn:active:not(:disabled, [aria-disabled='true']) {
+  background: var(--smoke);
+}
+.topbar .btn.primary {
+  border-color: var(--red);
+}
+.topbar .btn.primary:hover:not(:disabled, [aria-disabled='true']) {
+  border-color: var(--red);
+}
+
+.topbar .ctl,
+.outcome .ctl {
+  width: 34px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  color: var(--pebble);
+  border-radius: 3px;
+}
+.topbar .ctl:hover,
+.outcome .ctl:hover {
+  background: var(--charcoal);
+  color: var(--bone);
+}
+
+/* Below a wide window the bar tightens, so the file name keeps some room. */
+@media (max-width: 1440px) {
+  .topbar .btn {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .topbar .link {
+    padding: 6px 2px;
+  }
+}
+@media (max-width: 1180px) {
+  .topbar .ctl,
+  .outcome .ctl {
+    width: 30px;
+  }
+}
+@media (max-width: 1100px) {
+  .topbar .btn {
+    padding: 10px 10px;
+  }
+  .topbar .ctl,
+  .outcome .ctl {
+    width: 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topbar button,
+  .outcome button {
+    transition: none;
+  }
+}

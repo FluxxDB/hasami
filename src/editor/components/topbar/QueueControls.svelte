@@ -62,23 +62,6 @@
     white-space: nowrap;
   }
 
-  button {
-    flex: none;
-    white-space: nowrap;
-    color: var(--bone);
-    background: transparent;
-    border: 0;
-    padding: 0;
-    transition:
-      border-color 0.12s ease-out,
-      background-color 0.12s ease-out,
-      color 0.12s ease-out,
-      text-decoration-color 0.12s ease-out;
-  }
-  button:disabled {
-    opacity: 0.4;
-  }
-
   /* The export strip: a quiet button that opens the results list. */
   .strip {
     display: flex;
@@ -112,27 +95,13 @@
     transition: width 0.2s ease-out;
   }
 
-  .link {
-    padding: 6px 4px;
-    text-decoration: underline;
-    text-decoration-color: var(--iron);
-    text-underline-offset: 4px;
-  }
-  .link:hover:not(:disabled) {
-    text-decoration-color: var(--bone);
-  }
-
   @media (max-width: 1440px) {
-    .link {
-      padding: 6px 2px;
-    }
     .queue {
       gap: 8px;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    button,
     .rail i {
       transition: none;
     }

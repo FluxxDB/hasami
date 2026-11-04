@@ -69,48 +69,6 @@
     gap: 6px;
   }
 
-  button {
-    flex: none;
-    white-space: nowrap;
-    color: var(--bone);
-    background: transparent;
-    border: 0;
-    padding: 0;
-    transition:
-      border-color 0.12s ease-out,
-      background-color 0.12s ease-out,
-      color 0.12s ease-out,
-      text-decoration-color 0.12s ease-out;
-  }
-  button[aria-disabled='true'] {
-    opacity: 0.4;
-    cursor: default;
-  }
-
-  /* 8px outline buttons. */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 16px;
-    border-radius: 8px;
-    border: 1px solid var(--ash);
-  }
-  .btn:hover:not(:disabled, [aria-disabled='true']) {
-    border-color: var(--bone);
-    background: var(--charcoal);
-  }
-  .btn:active:not(:disabled, [aria-disabled='true']) {
-    background: var(--smoke);
-  }
-
-  @media (max-width: 1440px) {
-    .btn {
-      padding: 10px 12px;
-      gap: 8px;
-    }
-  }
-
   /* Next video's second word goes first (its tooltip names where it goes). */
   @media (max-width: 1360px) {
     .next .more {
@@ -121,20 +79,11 @@
   /* Near the 960px minimum, Prev and Next become a pair of arrows; their names stay in
      aria-label and the tooltip. */
   @media (max-width: 1100px) {
-    .btn {
-      padding: 10px 10px;
-    }
     .steps .word {
       display: none;
     }
     .steps .btn {
       padding: 10px 11px;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    button {
-      transition: none;
     }
   }
 </style>
