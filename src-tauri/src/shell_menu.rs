@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
+use crate::media::VIDEO_EXTENSIONS;
+
 /// Errors from writing or removing the context menu registry keys.
 #[derive(Debug, thiserror::Error)]
 pub enum MenuError {
@@ -20,9 +22,6 @@ pub enum MenuError {
 
 /// Registry root used by the installer. Tests pass a throwaway root instead.
 pub const DEFAULT_CLASSES_ROOT: &str = r"Software\Classes";
-
-/// Video extensions that get the Hasami cascade.
-const EXTENSIONS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
 
 /// One entry in the Hasami submenu. `skip_for` omits a convert verb from its own container type.
 struct Verb {
@@ -49,7 +48,7 @@ fn menu_path(classes_root: &str, ext: &str) -> String {
 pub fn register(exe: &Path, classes_root: &str) -> Result<(), MenuError> {
     let exe = exe.to_string_lossy();
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    for ext in EXTENSIONS {
+    for ext in VIDEO_EXTENSIONS {
         // Start clean so verbs from an older layout don't survive an upgrade.
         delete_menu(&hkcu, classes_root, ext)?;
         let (menu, _) = hkcu.create_subkey(menu_path(classes_root, ext))?;
@@ -94,7 +93,7 @@ pub fn handle_action(action: &crate::cli::Action, current_exe: io::Result<PathBu
 /// Removes the Hasami cascade for every supported video extension. Missing keys are not an error.
 pub fn unregister(classes_root: &str) -> Result<(), MenuError> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    for ext in EXTENSIONS {
+    for ext in VIDEO_EXTENSIONS {
         delete_menu(&hkcu, classes_root, ext)?;
     }
     Ok(())

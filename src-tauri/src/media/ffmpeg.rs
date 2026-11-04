@@ -64,7 +64,7 @@ impl FfmpegPaths {
 /// A [`Command`] for `program` that does not flash a console window on Windows.
 /// Every child process Hasami starts must be built through this.
 pub fn hidden_command(program: &Path) -> Command {
-    #[allow(unused_mut)]
+    #[allow(unused_mut)] // only changed on Windows
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {

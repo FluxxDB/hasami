@@ -7,6 +7,10 @@ pub mod run;
 
 use std::path::PathBuf;
 
+/// The file extensions Hasami handles as videos: its right-click menu is registered for these, and
+/// the editor's Prev / Next step through them.
+pub const VIDEO_EXTENSIONS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
+
 pub use ffmpeg::{hidden_command, FfmpegPaths};
 pub use probe::{probe, AudioStream, MediaInfo, VideoStream};
 

@@ -141,7 +141,7 @@ pub fn convert(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // the one step of `convert` that can fail after the temp exists
 fn encode_and_commit(
     paths: &FfmpegPaths,
     input: &Path,
