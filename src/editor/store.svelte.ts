@@ -11,6 +11,7 @@
 // either end. Leaving a clip (Prev, Next, Discard) closes its editor session on the Rust side.
 
 import { api, type EditorEvent, type EditorMedia, type Peaks, type Thumb } from './api';
+import { estimateExportBytes } from './estimate';
 import { SNAP_PX, zoomAround } from './geometry';
 import { initHistory, isEdited, push, redo, undo, type History } from './history';
 import type { Command } from './keys';
@@ -93,17 +94,6 @@ const LOOK_FAILED: Record<Direction, string> = {
 
 /** The Rust commands answer failures with a plain-language string. */
 const plain = (err: unknown, fallback: string): string => (typeof err === 'string' && err ? err : fallback);
-
-// How a video export's bitrate is chosen, mirrored from `export_bitrate` and
-// `source_video_bitrate` in src-tauri/src/editor/request.rs (keep them in step) for the estimate.
-/** Source codecs that get more bitrate when re-encoded as H.264 (request.rs `DENSER_CODECS`). */
-const DENSER_CODECS = ['hevc', 'av1', 'vp9'];
-/** How much more (request.rs `DENSER_CODEC_FACTOR`). */
-const DENSER_CODEC_FACTOR = 1.3;
-/** Assumed per source audio track (request.rs `AUDIO_TRACK_BPS`); also the export's one AAC track. */
-const AUDIO_TRACK_BPS = 192_000;
-/** The lowest video bitrate an export uses (request.rs `source_video_bitrate`). */
-const MIN_VIDEO_BPS = 1_000_000;
 
 /** Keyboard commands that change the timeline, refused while the clip is locked. */
 const EDITS = new Set<Command>(['cut', 'delete', 'undo', 'redo']);
@@ -338,20 +328,9 @@ export class EditorStore {
     return border && !this.keepBorder ? border : null;
   }
 
-  /**
-   * Quick export at source quality, × the kept video length: the source's video rate (its average
-   * rate less 192 kbit/s per audio track), ×1.3 for HEVC, AV1 and VP9 as the export encodes it,
-   * plus one 192 kbit/s AAC track when any audio is heard. A crop doesn't change it: the rate is
-   * the source's whatever the picture size.
-   */
+  /** What a Quick export of the edit will weigh, for the status bar (estimate.ts). */
   get estimateBytes(): number {
-    const m = this.media;
-    if (!m || !(m.duration_s > 0)) return 0;
-    const sourceBps = (m.size_bytes * 8) / m.duration_s;
-    const videoBps = Math.max(MIN_VIDEO_BPS, sourceBps - AUDIO_TRACK_BPS * m.tracks.length);
-    const factor = DENSER_CODECS.includes(m.video?.codec ?? '') ? DENSER_CODEC_FACTOR : 1;
-    const audioBps = hasAudibleAudio(this.timeline) ? AUDIO_TRACK_BPS : 0;
-    return ((videoBps * factor + audioBps) / 8) * videoEnd(this.timeline);
+    return estimateExportBytes(this.media, this.timeline);
   }
 
   /** Starts a fresh edit of `media`: one segment per track, nothing selected, no undo. */
