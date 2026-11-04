@@ -1,3 +1,5 @@
+//! Integration tests for editor sessions: work folders, and closing letting go of the clip.
+
 mod common;
 
 use hasami_lib::editor::session::EditorSessions;

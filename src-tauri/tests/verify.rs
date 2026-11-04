@@ -1,3 +1,5 @@
+//! Integration tests for verifying a finished encode.
+
 mod common;
 
 use hasami_lib::media::FfmpegPaths;

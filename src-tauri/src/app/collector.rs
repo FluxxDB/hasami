@@ -33,7 +33,7 @@ impl Collector {
             Action::Compress(files) => self.add(JobKind::Compress, files),
             Action::Convert(target, files) => self.add(JobKind::Convert(target), files),
             Action::Trim(files) => self.batch.trims.extend(files),
-            // Handled in `lib::run` before Tauri starts (Task 10), so they never reach the batch.
+            // Handled in `lib::run` before Tauri starts, so they never reach the batch.
             Action::Register | Action::Unregister => return,
         }
         self.last = Some(now);

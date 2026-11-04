@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{hidden_command, FfmpegPaths, MediaError};
 
+/// A file's video stream, as ffprobe reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoStream {
     pub index: usize,
@@ -19,6 +20,7 @@ pub struct VideoStream {
     pub bit_rate: Option<u64>,
 }
 
+/// One of a file's audio streams, as ffprobe reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioStream {
     pub index: usize,
@@ -28,6 +30,7 @@ pub struct AudioStream {
     pub bit_rate: Option<u64>,
 }
 
+/// What ffprobe says about a file. Stream `index`es are ffmpeg's absolute `0:<index>`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MediaInfo {
     pub path: PathBuf,

@@ -1,4 +1,4 @@
-//! Convert plan and job (Task 8).
+//! Convert job: replace a file with the same video in another format.
 //!
 //! Converting replaces a file with the target format: remuxing (`-c copy`) when the codecs fit
 //! the target container, re-encoding otherwise. The original goes to the Recycle Bin only after

@@ -1,4 +1,5 @@
-//! Post-encode output verification (Task 5).
+//! Checking a finished encode before it replaces anything: ffprobe can read it, its duration
+//! matches the edit, and (for Compress) it is within the size limit (spec §8, rule 2).
 
 use std::path::Path;
 

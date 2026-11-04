@@ -13,11 +13,15 @@ use serde::Deserialize;
 use super::media::Crop;
 use crate::media::{hidden_command, FfmpegPaths, MediaInfo};
 
+/// Which export button was pressed (spec §5.7).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportMode {
+    /// Quick export: `[CLIPPED] <name>.mp4`; the original goes to the Recycle Bin.
     Quick,
+    /// Export + save raw: `[CLIPPED] <name>.mp4`; the original moves into `Raw\`.
     SaveRaw,
+    /// Export audio: `[CLIPPED] <name>.mp3`; the original is untouched.
     Audio,
 }
 
@@ -37,6 +41,7 @@ pub struct AudioPiece {
     pub src_end: f64,
 }
 
+/// One audio track of the edit, with its volume and kept pieces.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AudioTrackRequest {
     /// Index among the source's audio streams (`0:a:<index>`).
@@ -45,8 +50,10 @@ pub struct AudioTrackRequest {
     pub pieces: Vec<AudioPiece>,
 }
 
+/// An edit to render, as the editor sends it to `editor_export`. Mirrored in `src/editor/api.ts`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ExportRequest {
+    /// The editor session the edit was made in (part of the UI contract; rendering doesn't need it).
     pub session: u64,
     pub input: PathBuf,
     pub mode: ExportMode,

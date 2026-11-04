@@ -56,6 +56,7 @@ impl Default for EditorSessions {
 }
 
 impl EditorSessions {
+    /// No sessions open.
     pub fn new() -> Self {
         Self { open: HashMap::new() }
     }

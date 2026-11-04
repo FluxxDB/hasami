@@ -22,6 +22,7 @@ pub const MAX_PEAKS: usize = 200_000;
 /// Sample rate peaks are computed at. 8 kHz keeps the decode cheap and is plenty for a waveform.
 const PEAKS_SAMPLE_RATE: u32 = 8000;
 
+/// An audio track's waveform: the loudest sample of each window, `rate` windows per second.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Peaks {
     /// Values per second.

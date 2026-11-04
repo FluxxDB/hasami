@@ -1,3 +1,6 @@
+//! Integration tests for the Compress job: the 20 MB copy in a stand-in Videos folder, the
+//! low-resolution question, cancelling, and the original never being touched.
+
 mod common;
 
 use std::fs;

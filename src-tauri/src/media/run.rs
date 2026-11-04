@@ -49,6 +49,7 @@ impl Drop for RunGuard {
 const RUNS_POLL: Duration = Duration::from_millis(5);
 
 impl CancelToken {
+    /// A token that isn't cancelled.
     pub fn new() -> Self {
         Self::default()
     }
@@ -58,6 +59,7 @@ impl CancelToken {
         self.0.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Whether [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::SeqCst)
     }

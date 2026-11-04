@@ -18,18 +18,12 @@ pub const EDITOR_EVENT: &str = "hasami://editor";
 #[serde(tag = "type")]
 pub enum EditorEvent {
     /// More files from a later Trim launch, to add to the editor's queue.
-    Files {
-        paths: Vec<String>,
-    },
-    ExportStarted {
-        id: u64,
-        input: String,
-    },
+    Files { paths: Vec<String> },
+    /// Export `id` of `input` began rendering.
+    ExportStarted { id: u64, input: String },
     /// `fraction` covers the whole export, across all its passes.
-    ExportProgress {
-        id: u64,
-        fraction: f64,
-    },
+    ExportProgress { id: u64, fraction: f64 },
+    /// Export `id` was saved as `output` (`bytes` long).
     ExportDone {
         id: u64,
         input: String,
@@ -39,26 +33,16 @@ pub enum EditorEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
-    ExportFailed {
-        id: u64,
-        input: String,
-        message: String,
-        original_intact: bool,
-    },
-    ProxyProgress {
-        session: u64,
-        fraction: f64,
-    },
+    /// Export `id` didn't finish; `message` is plain language, and `original_intact` says whether
+    /// the original is still at its own path.
+    ExportFailed { id: u64, input: String, message: String, original_intact: bool },
+    /// How far the preview proxy of `session` has got.
+    ProxyProgress { session: u64, fraction: f64 },
     /// A deferred discard sent the clip to the Recycle Bin.
-    DiscardDone {
-        path: String,
-    },
+    DiscardDone { path: String },
     /// A deferred discard left the clip where it was (an export it waited for didn't finish, or
     /// the recycle failed).
-    DiscardKept {
-        path: String,
-        message: String,
-    },
+    DiscardKept { path: String, message: String },
 }
 
 /// A clip opened in the editor, as `editor_open` returns it. Paths are absolute; the page turns
@@ -79,6 +63,7 @@ pub struct EditorMediaDto {
     pub border: Option<Crop>,
 }
 
+/// The video stream of a clip opened in the editor.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EditorVideoDto {
     pub width: u32,
@@ -87,6 +72,7 @@ pub struct EditorVideoDto {
     pub codec: String,
 }
 
+/// One audio track of a clip opened in the editor (`index` is ffmpeg's `0:a:<index>`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EditorTrackDto {
     pub index: usize,

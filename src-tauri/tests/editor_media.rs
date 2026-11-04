@@ -1,3 +1,6 @@
+//! Integration tests for preparing a clip for the editor: empty-track detection, black borders,
+//! waveform peaks, thumbnails and the preview proxy.
+
 mod common;
 
 use std::path::Path;

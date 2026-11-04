@@ -1,4 +1,10 @@
-//! Job types, job runners and the serial queue.
+//! The jobs Hasami runs, one at a time, and the queue that runs them.
+//!
+//! - [`compress`], [`convert`] and [`export`]: the three jobs. Each writes a hidden temp file,
+//!   verifies it, and only then gives it its name and moves the original (spec §8).
+//! - [`queue`]: the serial queue and the events it reports.
+//!
+//! [`JobError`]'s `Display` is what the user reads, so every message is plain language.
 
 pub mod compress;
 pub mod convert;
@@ -20,8 +26,11 @@ pub(crate) const UNREADABLE: &str = "Hasami couldn't read this video.";
 /// Progress of one job, reported to the queue.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JobProgress {
+    /// The current pass, from 1.
     pub pass: u8,
+    /// Passes in the whole job.
     pub passes: u8,
+    /// How far the current pass is, in `0..=1`.
     pub fraction: f64,
 }
 
@@ -30,32 +39,32 @@ pub struct JobProgress {
 pub enum JobOutcome {
     /// `note` says something went partly wrong although `output` was saved, e.g. the editor's
     /// extra 20 MB copy couldn't be made. Plain language, shown as is.
-    Done {
-        output: PathBuf,
-        bytes: u64,
-        note: Option<String>,
-    },
-    Unchanged {
-        reason: String,
-    },
-    NeedsConfirm {
-        plan: CompressPlan,
-    },
+    Done { output: PathBuf, bytes: u64, note: Option<String> },
+    /// Nothing was written; `reason` says why (e.g. already small enough).
+    Unchanged { reason: String },
+    /// The plan goes below 480p; the queue asks the user before running the job again.
+    NeedsConfirm { plan: CompressPlan },
 }
 
 /// Why a job failed. `Display` is shown to the user in the progress window.
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
+    /// The user cancelled.
     #[error("Cancelled")]
     Cancelled,
+    /// A plain-language message, shown as is.
     #[error("{0}")]
     Message(String),
+    /// A file operation failed (see [`FsError`]).
     #[error(transparent)]
     Fs(#[from] FsError),
+    /// Locating or running ffprobe failed.
     #[error(transparent)]
     Media(#[from] MediaError),
+    /// The result failed verification.
     #[error(transparent)]
     Verify(#[from] VerifyError),
+    /// The file can't be planned to fit 20 MB.
     #[error(transparent)]
     Compress(#[from] CompressError),
     /// ffmpeg failed or couldn't be started. `message` is for the user, `detail` (ffmpeg's last

@@ -1,4 +1,4 @@
-//! Serial job queue (Task 9).
+//! The serial job queue.
 //!
 //! One worker thread runs jobs one at a time, in enqueue order: compress and convert batches from
 //! the right-click menu, and exports from the Quick Trim editor. Everything about them is reported
@@ -30,7 +30,9 @@ const UNEXPECTED: &str = "Something went wrong while processing this file.";
 /// What a job does to its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobKind {
+    /// Make a `[20MB]` copy in the Videos folder.
     Compress,
+    /// Replace the file with the target format.
     Convert(Target),
     /// Render one Quick Trim edit.
     Export(ExportJob),
@@ -101,14 +103,14 @@ pub struct QueueSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type")]
 pub enum JobEvent {
-    Queued {
-        snapshot: QueueSnapshot,
-    },
+    /// The batch grew or moved on: "File `current_index` of `total`".
+    Queued { snapshot: QueueSnapshot },
+    /// Job `id` began.
     Started {
         id: u64,
         input: String,
         input_bytes: u64,
-        /// `"compress"` | `"convert"`.
+        /// `"compress"` | `"convert"` | `"export"`.
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
         /// Convert target extension without the dot, e.g. `"mov"`.
@@ -122,19 +124,11 @@ pub enum JobEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         fps: Option<f64>,
     },
-    Progress {
-        id: u64,
-        pass: u8,
-        passes: u8,
-        fraction: f64,
-        eta_s: Option<f64>,
-    },
-    NeedsConfirm {
-        id: u64,
-        width: u32,
-        height: u32,
-        fps: f64,
-    },
+    /// How far job `id` has got, with an estimate of the seconds left in this pass.
+    Progress { id: u64, pass: u8, passes: u8, fraction: f64, eta_s: Option<f64> },
+    /// Job `id` would go below 480p (to this size): it waits for `confirm_low_res`.
+    NeedsConfirm { id: u64, width: u32, height: u32, fps: f64 },
+    /// Job `id` saved `output`, `bytes` long.
     Done {
         id: u64,
         output: String,
@@ -143,10 +137,9 @@ pub enum JobEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
-    Unchanged {
-        id: u64,
-        reason: String,
-    },
+    /// Job `id` left its file alone; `reason` says why.
+    Unchanged { id: u64, reason: String },
+    /// Job `id` failed or was cancelled ([`CANCELLED`]); `message` is plain language.
     Failed {
         id: u64,
         message: String,
@@ -155,15 +148,17 @@ pub enum JobEvent {
         /// not changed." when this is true.
         original_intact: bool,
     },
+    /// Nothing is left running or waiting. Always the last event of a batch.
     Drained,
 }
 
-/// Runs one job. Implemented by the real compress/convert dispatcher and by test fakes.
+/// Runs one job. Implemented by the app's media runner and by test fakes.
 ///
 /// `confirmed` is false on the first attempt. A runner that needs the user's go-ahead (a
 /// low-resolution compress) returns `Ok(JobOutcome::NeedsConfirm)`; if the user agrees, the
 /// queue calls `run` again with `confirmed = true`.
 pub trait JobRunner: Send {
+    /// Run `spec` to its end, reporting progress; stop early once `cancel` is set.
     fn run(
         &self,
         spec: &JobSpec,
@@ -185,6 +180,7 @@ pub struct JobQueue {
 }
 
 impl JobQueue {
+    /// Start the worker thread. Every event goes through `emit`.
     pub fn new(runner: Box<dyn JobRunner>, emit: Box<dyn Fn(JobEvent) + Send>) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {

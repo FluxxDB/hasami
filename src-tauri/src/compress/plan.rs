@@ -1,4 +1,6 @@
-//! Pure ladder/bitrate planner (Task 5).
+//! The Compress planner: picks the resolution and frame rate from a ladder and splits the bit
+//! budget between video and audio so the result fits in [`SIZE_LIMIT_BYTES`] (spec §7). Pure, so
+//! it is tested without ffmpeg.
 
 use crate::media::MediaInfo;
 
@@ -36,18 +38,23 @@ pub struct CompressPlan {
     pub warn_low_res: bool,
 }
 
+/// What [`plan_compress`] decided.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompressDecision {
     /// The input already meets the limit in a compatible format; nothing to do.
     AlreadySmall,
+    /// Re-encode with this plan.
     Encode(CompressPlan),
 }
 
+/// Why a file can't be compressed to the limit. `Display` is shown to the user.
 #[derive(Debug, thiserror::Error)]
 pub enum CompressError {
+    /// Even the lowest rung of the ladder would be over 20 MB.
     #[error("This video is too long to fit in 20 MB at any watchable quality.")]
     TooLong,
 
+    /// ffprobe reported no usable duration.
     #[error("The video's length could not be determined, so it can't be compressed.")]
     UnknownDuration,
 }

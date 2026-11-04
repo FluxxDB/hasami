@@ -11,29 +11,42 @@ use thiserror::Error;
 /// Output format for a convert action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
+    /// `convert-mp4`
     Mp4,
+    /// `convert-mov`
     Mov,
+    /// `convert-mp3`: the audio alone.
     Mp3,
 }
 
 /// What the process was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// `trim <files…>`: open the files in the Quick Trim editor.
     Trim(Vec<PathBuf>),
+    /// `compress <files…>`: make a 20 MB copy of each.
     Compress(Vec<PathBuf>),
+    /// `convert-<ext> <files…>`: replace each with the target format.
     Convert(Target, Vec<PathBuf>),
+    /// `register`: add the right-click menu (run by the installer).
     Register,
+    /// `unregister`: remove the right-click menu (run by the uninstaller).
     Unregister,
 }
 
+/// Why the arguments don't make an [`Action`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CliError {
+    /// No arguments at all (started from the Start menu).
     #[error("no action given")]
     MissingVerb,
+    /// The first argument isn't a known verb.
     #[error("unknown action `{0}`")]
     UnknownVerb(String),
+    /// A file verb with no files after it.
     #[error("`{0}` needs at least one file")]
     NoFiles(String),
+    /// `register` or `unregister` followed by files.
     #[error("`{0}` takes no files")]
     UnexpectedFiles(String),
 }

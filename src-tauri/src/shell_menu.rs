@@ -1,4 +1,4 @@
-//! Explorer context menu registry layout (Task 10).
+//! The Explorer right-click menu: its registry layout, and registering or removing it.
 //!
 //! Writes a cascading "Hasami" submenu under `HKCU\<classes_root>\SystemFileAssociations\.<ext>\shell`
 //! for each supported video extension. `register` and `unregister` are called from the NSIS
@@ -13,6 +13,7 @@ use winreg::RegKey;
 /// Errors from writing or removing the context menu registry keys.
 #[derive(Debug, thiserror::Error)]
 pub enum MenuError {
+    /// Reading or writing a registry key failed.
     #[error("registry operation failed: {0}")]
     Registry(#[from] std::io::Error),
 }

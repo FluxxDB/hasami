@@ -1,3 +1,6 @@
+//! Integration tests for the editor's exports: the filter graph, Quick / Save raw / Audio, the
+//! 20 MB copy, border crops and master gain.
+
 mod common;
 
 use std::fs;

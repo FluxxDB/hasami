@@ -1,3 +1,6 @@
+//! Integration tests for the Convert job: remux or re-encode, the original recycled only after
+//! the new file is verified, and nothing left behind on failure or cancel.
+
 mod common;
 
 use std::path::Path;

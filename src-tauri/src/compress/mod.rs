@@ -1,4 +1,4 @@
-//! Compression planning.
+//! Planning a Compress encode (the job itself is [`crate::jobs::compress`]).
 
 pub mod plan;
 

@@ -1,4 +1,4 @@
-//! Integration tests for the ffmpeg runner: progress, cancellation and failure reporting (Task 6).
+//! Integration tests for the ffmpeg runner: progress, cancellation and failure reporting.
 
 mod common;
 

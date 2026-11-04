@@ -47,6 +47,7 @@ pub struct TrackMedia {
     pub file: Option<PathBuf>,
 }
 
+/// A clip ready for the editor: its probe, its audio tracks and any border.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreparedMedia {
     pub info: MediaInfo,
@@ -56,6 +57,7 @@ pub struct PreparedMedia {
     pub border: Option<Crop>,
 }
 
+/// One timeline thumbnail: a JPEG in the session's work folder.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Thumb {
     /// Seconds into the video.
