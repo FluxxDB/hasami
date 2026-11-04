@@ -2,6 +2,9 @@
 name = "hasami"
 version = "0.1.0"
 description = "Right-click video trim, compress and convert for Windows"
+authors = ["FluxxDB and Hasami contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/FluxxDB/hasami"
 edition = "2021"
 rust-version = "1.89"
 default-run = "hasami"

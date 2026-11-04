@@ -2,6 +2,12 @@
   "name": "hasami",
   "private": true,
   "version": "0.1.0",
+  "description": "Right-click video trim, compress and convert for Windows",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FluxxDB/hasami.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
