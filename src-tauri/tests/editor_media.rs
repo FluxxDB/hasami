@@ -185,6 +185,23 @@ fn thumbnails_cover_the_clip() {
 }
 
 #[test]
+fn thumbnails_clear_an_earlier_runs_pictures_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = common::fixture_multitrack_hevc(dir.path());
+    let out_dir = dir.path().join("thumbs");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    // A longer clip's run left more pictures here; they must not join this clip's.
+    std::fs::write(out_dir.join("thumb_00099.jpg"), b"stale").unwrap();
+    std::fs::write(out_dir.join("proxy.mp4"), b"not a thumbnail").unwrap();
+
+    let thumbs = thumbnails(&paths(), &input, 5.0, &out_dir, &CancelToken::new()).unwrap();
+
+    assert_eq!(thumbs.len(), 5);
+    assert!(!out_dir.join("thumb_00099.jpg").exists());
+    assert!(out_dir.join("proxy.mp4").exists(), "other files are left alone");
+}
+
+#[test]
 fn proxy_is_h264_720p() {
     let dir = tempfile::tempdir().unwrap();
     let input = common::fixture_multitrack_hevc(dir.path());

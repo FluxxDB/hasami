@@ -113,6 +113,17 @@ mod tests {
     }
 
     #[test]
+    fn skips_an_export_still_being_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = make(dir.path(), "a.mp4", 300_000);
+        // A hidden temp file a running export writes next to its clip.
+        make(dir.path(), ".[CLIPPED] a.mp4.hasami-tmp", 250_000);
+        let b = make(dir.path(), "b.mp4", 200_000);
+        assert_eq!(adjacent_video(&a, 300_000, false).unwrap(), Some(b.clone()));
+        assert_eq!(adjacent_video(&b, 200_000, true).unwrap(), Some(a));
+    }
+
+    #[test]
     fn ignores_other_files_and_subfolders() {
         let dir = tempfile::tempdir().unwrap();
         let a = make(dir.path(), "a.mp4", 300_000);
