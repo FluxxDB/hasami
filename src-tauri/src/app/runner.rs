@@ -1,5 +1,6 @@
 //! What runs each queued job: compress, convert and export with the bundled ffmpeg.
 
+use super::TOOLS_MISSING;
 use crate::compress::{plan_compress, CompressDecision};
 use crate::jobs::compress::compress;
 use crate::jobs::convert::convert;
@@ -8,8 +9,6 @@ use crate::jobs::queue::{JobKind, JobRunner, JobSpec};
 use crate::jobs::{JobError, JobOutcome, JobProgress};
 use crate::media::run::CancelToken;
 use crate::media::{probe, FfmpegPaths};
-
-use super::TOOLS_MISSING;
 
 /// The one place that decides what runs a job.
 pub(super) fn job_runner(paths: Option<FfmpegPaths>) -> Box<dyn JobRunner> {

@@ -159,8 +159,10 @@ fn resolve_paths(action: Action, cwd: &Path) -> Action {
     }
 }
 
+/// What the commands, the dispatcher and the exit handler share (managed by Tauri).
 struct AppState {
     queue: Arc<JobQueue>,
+    /// The dispatcher's inbox.
     tx: Sender<Msg>,
     /// `None` when the bundled tools are missing; every job and editor command then says so.
     paths: Option<FfmpegPaths>,
@@ -173,6 +175,7 @@ struct AppState {
 }
 
 impl AppState {
+    /// The bundled tools, or the message every command answers without them.
     fn tools(&self) -> Result<&FfmpegPaths, String> {
         self.paths.as_ref().ok_or_else(|| TOOLS_MISSING.to_owned())
     }
