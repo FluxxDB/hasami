@@ -67,6 +67,31 @@ The spec's §8 file-safety rules are non-negotiable: never move or recycle an
 original before its replacement is written and verified, and never delete anything
 permanently.
 
+## Third-party licenses
+
+The installer ships `THIRD_PARTY_LICENSES_RUST.md` (every crate compiled into
+`hasami.exe`) and `THIRD_PARTY_LICENSES_NPM.md` (every npm package bundled into the
+UI). When you add, remove or update a dependency, regenerate and commit them:
+
+```powershell
+cargo install cargo-about --locked --features cli   # once
+powershell -ExecutionPolicy Bypass -File scripts/licenses.ps1
+```
+
+If `cargo about` rejects a new license, add it to `accepted` in `scripts/about.toml`
+only if it's compatible with shipping Hasami as `MIT OR Apache-2.0`, and mention it
+in `THIRD_PARTY_NOTICES.md`.
+
+## Releasing
+
+1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
+2. Run `scripts/licenses.ps1` and the checks above.
+3. `npm run tauri build`, then smoke-test the installer from `src-tauri/target/release/bundle/nsis/`.
+4. Create the GitHub release with the installer **and** the FFmpeg source tarball
+   (`ffmpeg-9.0.2.tar.xz` from <https://ffmpeg.org/releases/>, or the version
+   `scripts/fetch-ffmpeg.ps1` pins). `THIRD_PARTY_NOTICES.md` promises that tarball
+   on every release.
+
 ## Commits and pull requests
 
 - Write plain, one-line summaries that say what changed for the user or the code,

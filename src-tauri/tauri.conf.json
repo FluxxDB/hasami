@@ -33,6 +33,8 @@
       "../LICENSE-MIT": "licenses/LICENSE-MIT.txt",
       "../LICENSE-APACHE": "licenses/LICENSE-APACHE.txt",
       "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "../THIRD_PARTY_LICENSES_RUST.md": "licenses/THIRD_PARTY_LICENSES_RUST.md",
+      "../THIRD_PARTY_LICENSES_NPM.md": "licenses/THIRD_PARTY_LICENSES_NPM.md",
       "binaries/ffmpeg-LICENSE.txt": "licenses/ffmpeg/LICENSE.txt",
       "binaries/ffmpeg-README.txt": "licenses/ffmpeg/README.txt",
       "../src/lib/fonts/Inter-OFL.txt": "licenses/fonts/Inter-OFL.txt",

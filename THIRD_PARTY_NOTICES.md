@@ -9,7 +9,7 @@ license texts it names into the `licenses` folder next to `hasami.exe`.
 
 | | |
 |---|---|
-| Software | FFmpeg 9.0.2, the gyan.dev "full" static build for Windows x64 (version string `9.0.2-full_build-www.gyan.dev`) |
+| Software | FFmpeg 9.0.2, the gyan.dev "full" static build for Windows x64 (version string `9.0.2-full_build-www.gyan.dev`), built by gyan.dev, not by Hasami |
 | Copyright | The FFmpeg developers and the authors of the libraries listed in the build's README |
 | License | **GNU General Public License, version 3**. The build enables GPL and version-3 components such as libx264 and libx265 |
 | Binary | `ffmpeg-9.0.2-full_build.zip` from <https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2>, SHA256 `759d0a9831c436a0eb331ad36f236c06cb04aaa0005da46571f0e9d3d9206f6b` |
@@ -25,14 +25,23 @@ tag `n9.0.2` (commit `946fcce07b6dcd0331c8cc609192aeff5e1924f8`):
 
 - release tarball: <https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz>
 - git: <https://git.ffmpeg.org/ffmpeg.git> (mirror: <https://github.com/FFmpeg/FFmpeg/tree/n9.0.2>)
-- the external libraries compiled into the build, with their exact versions, are
-  listed in `licenses\ffmpeg\README.txt`; the build page at
-  <https://www.gyan.dev/ffmpeg/builds/> links to each library's upstream source.
+- the external libraries compiled into the build (x264, x265, libvpx, LAME, Opus
+  and the others), with their exact versions, are listed in
+  `licenses\ffmpeg\README.txt`; gyan.dev's build page
+  <https://www.gyan.dev/ffmpeg/builds/> and <https://github.com/GyanD/codexffmpeg>
+  describe how the build is made and link to each library's upstream source.
 
 A copy of the FFmpeg source tarball is also attached to each Hasami release on
 GitHub (<https://github.com/FluxxDB/hasami/releases>). To get the same binaries
 for a build of your own, run `scripts/fetch-ffmpeg.ps1`, which downloads the
 archive above and checks its SHA256.
+
+**Written offer.** For at least three years after a Hasami release that includes
+these ffmpeg binaries was last distributed, the Hasami maintainers will give
+anyone who has a copy of those binaries the complete corresponding source code
+for them: FFmpeg and every library compiled into that build (x264, x265 and the
+others in `README.txt`), as a download at no charge. To ask for it, open an issue
+at <https://github.com/FluxxDB/hasami/issues>.
 
 ## Fonts
 
@@ -57,26 +66,30 @@ Hasami's direct dependencies:
 | `winreg` | MIT |
 
 Their transitive dependencies (see `src-tauri/Cargo.lock`) are almost all
-`MIT OR Apache-2.0` or `MIT`. The others are:
+`MIT OR Apache-2.0` or `MIT`. The full list of crates compiled into `hasami.exe`,
+with each license text and copyright notice, is in
+[`THIRD_PARTY_LICENSES_RUST.md`](THIRD_PARTY_LICENSES_RUST.md) (installed as
+`licenses\THIRD_PARTY_LICENSES_RUST.md`). The licenses other than MIT and Apache-2.0 are:
 
-- **Apache-2.0:** `tao`
-- **Unicode-3.0:** the ICU4X crates (`icu_*`, `zerovec`, `yoke`, `zerofrom`, `tinystr`, `litemap`, `writeable`, `potential_utf`, `zerotrie`)
-- **MPL-2.0:** `cssparser`, `selectors`, `dtoa-short`, `option-ext`, used unmodified; their source is on <https://crates.io>
-- **BSD-3-Clause:** `brotli`, `brotli-decompressor`, `alloc-no-stdlib`, `alloc-stdlib`
-- **Zlib:** `foldhash`, `zlib-rs`
+- **Apache-2.0:** `tao`, `dpi`, `dunce`
+- **Unicode-3.0:** `unicode-ident` and the ICU4X crates (`icu_*`, `zerovec`, `yoke`, `zerofrom`, `tinystr`, `litemap`, `writeable`, `potential_utf`, `zerotrie`)
+- **MPL-2.0:** `cssparser`, `cssparser-macros`, `selectors`, `dtoa-short`, `option-ext`, used unmodified; their source is on <https://crates.io>
+- **BSD-3-Clause:** `brotli`, `alloc-no-stdlib`, `alloc-stdlib`
+- **Zlib:** `foldhash`
 
-For a full per-crate list with license texts, run
-[`cargo about`](https://github.com/EmbarkStudios/cargo-about) or
-[`cargo license`](https://github.com/onur/cargo-license) in `src-tauri/`.
+`scripts/licenses.ps1` regenerates the list with
+[`cargo about`](https://github.com/EmbarkStudios/cargo-about).
 
 ## npm packages (bundled into the UI)
 
 | Package | License |
 |---|---|
-| `svelte` and its runtime helpers (`clsx`, `esm-env`, `devalue`) | MIT |
+| `svelte`, `esm-env` | MIT |
 | `@tauri-apps/api` | Apache-2.0 OR MIT |
 
-Build tools (Vite, TypeScript, svelte-check, Vitest, the Tauri CLI) are used to
+Their license texts are in [`THIRD_PARTY_LICENSES_NPM.md`](THIRD_PARTY_LICENSES_NPM.md)
+(installed as `licenses\THIRD_PARTY_LICENSES_NPM.md`), which `scripts/licenses.ps1`
+regenerates from a real build. Build tools (Vite, TypeScript, svelte-check, Vitest, the Tauri CLI) are used to
 build Hasami and aren't shipped.
 
 ## Microsoft Edge WebView2
