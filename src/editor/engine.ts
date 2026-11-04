@@ -270,7 +270,9 @@ export class PlaybackEngine {
       if (tr.el !== el) return;
       const t = performance.now();
       if (tr.seekStart !== null) {
-        const took = (t - tr.seekStart) / 1000;
+        // A sample counts for no more than a lead can be, so one cold first seek (seconds, while
+        // the file opens) doesn't keep the next few drift corrections aimed too far ahead.
+        const took = Math.min(MAX_SEEK_LEAD_S, (t - tr.seekStart) / 1000);
         tr.latency = tr.latency ? (tr.latency + took) / 2 : took;
         tr.seekStart = null;
       }
