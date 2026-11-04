@@ -300,7 +300,7 @@ fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
 mod tests {
     use super::*;
     use crate::fsops::FsError;
-    use crate::media::hidden_command;
+    use crate::jobs::test_clips;
     use crate::media::{AudioStream, VideoStream};
 
     fn too_large() -> JobError {
@@ -457,26 +457,12 @@ mod tests {
         assert!(matches!(plain_verify_error(JobError::Cancelled), JobError::Cancelled));
     }
 
-    /// Write a small `.mkv` (so it is never "already small") into `dir`.
-    fn small_mkv(paths: &FfmpegPaths, dir: &Path, name: &str) -> PathBuf {
-        let out = dir.join(name);
-        let status = hidden_command(&paths.ffmpeg)
-            .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
-            .arg("testsrc2=size=320x180:rate=30:duration=2")
-            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        out
-    }
-
     #[test]
     fn an_already_small_file_never_asks_for_the_videos_folder() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
         // H.264 in an .mp4 with no audio, well under 20 MB: already Discord-ready.
-        let input = small_mkv(&paths, dir.path(), "small.mp4");
+        let input = test_clips::small(&paths, dir.path(), "small.mp4", false);
         let lookup = || -> Result<PathBuf, FsError> { panic!("nothing is written, so no folder is needed") };
 
         let outcome = compress_work(
@@ -499,7 +485,7 @@ mod tests {
         let empty = |root: &Path| fs::read_dir(root).unwrap().next().is_none();
 
         let out_dir = || Ok(dir.path().to_path_buf());
-        let input = small_mkv(&paths, dir.path(), "ok.mkv");
+        let input = test_clips::small(&paths, dir.path(), "ok.mkv", false);
         let mut saw_log = false;
         let mut watch = |p: JobProgress| {
             if p.pass == 2 {
@@ -512,7 +498,7 @@ mod tests {
         assert!(saw_log, "the passlog should live under the work root");
         assert!(empty(root.path()), "passlog folder left behind after success");
 
-        let input = small_mkv(&paths, dir.path(), "cancel.mkv");
+        let input = test_clips::small(&paths, dir.path(), "cancel.mkv", false);
         let cancel = CancelToken::new();
         let outcome = compress_work(&paths, &input, &out_dir, false, &cancel, &mut |_| cancel.cancel(), root.path());
         assert!(matches!(outcome, Err(JobError::Cancelled)), "{outcome:?}");
@@ -520,29 +506,12 @@ mod tests {
         assert!(input.exists());
     }
 
-    /// 4 s of noisy 1080p30 H.264 at 60 Mbit/s plus AAC (over 20 MB), like `fixture_big_h264`.
-    fn big_h264(paths: &FfmpegPaths, dir: &Path) -> PathBuf {
-        let out = dir.join("big_h264.mp4");
-        let status = hidden_command(&paths.ffmpeg)
-            .args(["-y", "-hide_banner", "-loglevel", "error"])
-            .args(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
-            .args(["-vf", "noise=alls=60:allf=t"])
-            .args(["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "60M"])
-            .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", "-t", "4"])
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        out
-    }
-
     #[test]
     fn encode_to_limit_writes_to_the_given_output() {
         let paths = FfmpegPaths::resolve().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let input = big_h264(&paths, dir.path());
+        let input = test_clips::big(&paths, dir.path(), "big_h264.mp4");
         let before = fs::read(&input).unwrap();
         let info = probe(&paths, &input).unwrap();
         let CompressDecision::Encode(plan) = plan_compress(&info).unwrap() else {

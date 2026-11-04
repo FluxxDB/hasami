@@ -11,6 +11,8 @@ pub mod convert;
 pub mod export;
 mod output;
 pub mod queue;
+#[cfg(test)]
+mod test_clips;
 
 use std::path::PathBuf;
 
