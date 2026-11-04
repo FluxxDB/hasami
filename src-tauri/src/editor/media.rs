@@ -358,6 +358,8 @@ pub fn thumb_interval(duration_s: f64) -> f64 {
 struct PeakAccumulator {
     samples_per_value: f64,
     values: Vec<f32>,
+    /// Windows closed so far, including any past [`MAX_PEAKS`] that weren't kept.
+    windows: u64,
     seen: u64,
     window_max: u32,
     window_has_samples: bool,
@@ -368,6 +370,7 @@ impl PeakAccumulator {
         Self {
             samples_per_value: f64::from(PEAKS_SAMPLE_RATE) / rate,
             values: Vec::new(),
+            windows: 0,
             seen: 0,
             window_max: 0,
             window_has_samples: false,
@@ -378,13 +381,18 @@ impl PeakAccumulator {
         self.window_max = self.window_max.max(i32::from(sample).unsigned_abs());
         self.window_has_samples = true;
         self.seen += 1;
-        if self.seen as f64 >= (self.values.len() + 1) as f64 * self.samples_per_value {
+        if self.seen as f64 >= (self.windows + 1) as f64 * self.samples_per_value {
             self.close_window();
         }
     }
 
+    /// Ends the current window. Values past [`MAX_PEAKS`] are dropped as they come, so a decoder
+    /// that returns more audio than expected can't grow the list without bound.
     fn close_window(&mut self) {
-        self.values.push(self.window_max as f32 / 32768.0);
+        if self.values.len() < MAX_PEAKS {
+            self.values.push(self.window_max as f32 / 32768.0);
+        }
+        self.windows += 1;
         self.window_max = 0;
         self.window_has_samples = false;
     }
@@ -395,7 +403,6 @@ impl PeakAccumulator {
         if self.window_has_samples {
             self.close_window();
         }
-        self.values.truncate(MAX_PEAKS);
         self.values
     }
 }
@@ -624,6 +631,16 @@ mod tests {
         for _ in 0..=MAX_PEAKS {
             acc.push(1);
         }
+        assert_eq!(acc.finish().len(), MAX_PEAKS);
+    }
+
+    #[test]
+    fn a_decoder_that_overruns_never_grows_the_values_past_the_cap() {
+        let mut acc = PeakAccumulator::new(8000.0);
+        for _ in 0..3 * MAX_PEAKS {
+            acc.push(1);
+        }
+        assert!(acc.values.len() <= MAX_PEAKS, "{} values held", acc.values.len());
         assert_eq!(acc.finish().len(), MAX_PEAKS);
     }
 
