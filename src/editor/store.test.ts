@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api';
 import { media } from './fixtures';
 import { EditorStore } from './store.svelte';
@@ -36,7 +36,8 @@ describe('EditorStore queue and exports', () => {
   let nextJob = 100;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    // Every test starts from these answers: one test's own mock implementations never leak into the next.
+    vi.resetAllMocks();
     nextJob = 100;
     vi.mocked(api.open).mockImplementation(async (path) =>
       media({ session: sessionOf(path), path, file_name: path.split('\\').pop()!, modified_ms: modifiedOf(path) }),
@@ -51,6 +52,11 @@ describe('EditorStore queue and exports', () => {
     vi.mocked(api.close).mockResolvedValue(undefined);
     vi.mocked(api.peaks).mockResolvedValue({ rate: 10, values: [] });
     vi.mocked(api.thumbs).mockResolvedValue([]);
+  });
+
+  // Puts back spies such as a silenced console.error, even when a test fails.
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   /** A store with `files` queued and the first one open. */
@@ -739,7 +745,7 @@ describe('EditorStore queue and exports', () => {
     await s.start();
     expect(s.error).toMatch(/couldn't start/i);
     expect(api.ready).not.toHaveBeenCalled();
-    logged.mockRestore();
+    expect(logged).toHaveBeenCalledWith('The editor could not start', expect.any(Error));
   });
 
   it('a Files event whose merge fails is logged, not left as an unhandled rejection', async () => {
@@ -748,8 +754,8 @@ describe('EditorStore queue and exports', () => {
     vi.spyOn(s, 'addFiles').mockRejectedValueOnce(new Error('boom'));
     s.applyEvent({ type: 'Files', paths: [FILES[1]] });
     await settle();
-    expect(logged).toHaveBeenCalled();
-    logged.mockRestore();
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith('Adding files failed', expect.objectContaining({ message: 'boom' }));
   });
 
   // --- more files, and the results list ----------------------------------------------------
