@@ -145,7 +145,7 @@ pub(crate) fn encode_to_limit(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(JobProgress),
 ) -> Result<MediaInfo, JobError> {
-    let work = RemoveOnDrop::dir(create_work_dir(work_root, "hasami-2pass")?);
+    let work = RemoveOnDrop::dir(create_work_dir(work_root)?);
     let passlog = work.path().join("x264");
 
     encode_until_fits(|scale| {
@@ -307,13 +307,17 @@ impl Args {
     }
 }
 
-/// Create a new, uniquely named folder `<prefix>-…` under `root` for an encode's scratch files.
-pub(super) fn create_work_dir(root: &Path, prefix: &str) -> Result<PathBuf, JobError> {
+/// Name prefix of the two-pass log folders, `hasami-2pass-<pid>-<nanos>-<n>`. One left behind by
+/// a crash is removed on a later start (see [`crate::editor::session::sweep_stale`]).
+pub(crate) const PASSLOG_DIR_PREFIX: &str = "hasami-2pass-";
+
+/// Create a new, uniquely named pass-log folder (see [`PASSLOG_DIR_PREFIX`]) under `root`.
+fn create_work_dir(root: &Path) -> Result<PathBuf, JobError> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
     for _ in 0..100 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = root.join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+        let dir = root.join(format!("{PASSLOG_DIR_PREFIX}{}-{nanos}-{n}", std::process::id()));
         match fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,

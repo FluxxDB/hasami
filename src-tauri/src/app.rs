@@ -108,7 +108,7 @@ pub fn run(action: Action) {
     let first = resolve_paths(action, &cwd);
 
     let paths = FfmpegPaths::resolve().map_err(|e| eprintln!("hasami: {e}")).ok();
-    // Editor work folders left by a crashed or killed Hasami.
+    // Editor work folders and Compress pass logs left by a crashed or killed Hasami.
     let _ = thread::Builder::new()
         .name("hasami-sweep".into())
         .spawn(|| sweep_stale(&std::env::temp_dir(), process_running));
