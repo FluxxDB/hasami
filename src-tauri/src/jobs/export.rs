@@ -251,8 +251,12 @@ impl Job<'_> {
                 let software = software_h264(bitrate);
                 match self.attempt(&h264_args(input, self.graph, &first, self.temp), cancel, on_progress) {
                     // Nothing is committed yet: a failed hardware render is done once more in
-                    // software, from a clean temp file.
-                    Err(e) if first.codec != software.codec && !matches!(e, JobError::Cancelled) => {
+                    // software, from a clean temp file, unless the user cancelled meanwhile.
+                    Err(e)
+                        if first.codec != software.codec
+                            && !matches!(e, JobError::Cancelled)
+                            && !cancel.is_cancelled() =>
+                    {
                         eprintln!("hasami: {} export failed, retrying with {}: {e}", first.codec, software.codec);
                         let _ = fs::remove_file(self.temp);
                         self.attempt(&h264_args(input, self.graph, &software, self.temp), cancel, on_progress)?
@@ -682,8 +686,7 @@ mod tests {
         let req = ExportRequest { input: input.clone(), fit_20mb: false, ..fit_request(&input) };
         let lookup = || -> Result<PathBuf, FsError> { panic!("no copy without an export") };
         let mut ran = false;
-        let err =
-            export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
+        let err = export_work(&paths, &req, &lookup, &CancelToken::new(), &mut |_| ran = true, dir.path()).unwrap_err();
         assert_eq!(err.to_string(), SOURCE_HAS_NO_VIDEO);
         assert!(!ran, "ffmpeg must not run");
         assert_eq!(names(dir.path()), ["sound.mkv"]);
