@@ -14,6 +14,7 @@ import { api, type EditorEvent, type EditorMedia, type Peaks, type Thumb } from 
 import { estimateExportBytes } from './estimate';
 import { SNAP_PX, zoomAround } from './geometry';
 import { initHistory, isEdited, push, redo, undo, type History } from './history';
+import { folderStep, queueStep, type Current, type Direction, type Queue } from './navigation';
 import type { Command } from './keys';
 import { STOPPED, nextCut, prevCut, shuttle, stepFrames, type Shuttle } from './playbackModel';
 import {
@@ -51,9 +52,6 @@ type LogEntry =
   | { action: 'discard'; input: string; state: 'waiting' | 'done' | 'kept'; message?: string };
 /** What the unsaved-edits dialog is asking about: closing, moving on (Prev / Next), or Discard. */
 export type ConfirmKind = 'close' | 'move' | 'discard';
-/** Next video goes to the next newer clip, Prev to the next older one. */
-export type Direction = 'next' | 'prev';
-
 /** One line of the results list: something done to a file, and how it stands. */
 export interface Result {
   input: string;
@@ -72,16 +70,6 @@ export interface Result {
   originalIntact?: boolean;
 }
 
-/**
- * The file that's open (or opening, or failed to open). `at` is its place in the queue, null for
- * one from the folder; `side` says which end of the queue such a folder clip lies past.
- */
-export interface Current {
-  path: string;
-  at: number | null;
-  side?: 'older' | 'newer';
-}
-
 // Shown when a command fails without a message of its own.
 const START_FAILED = "The editor couldn't start. Close this window and try Quick Trim again.";
 const OPEN_FAILED = "Couldn't open this clip.";
@@ -97,9 +85,6 @@ const plain = (err: unknown, fallback: string): string => (typeof err === 'strin
 
 /** Keyboard commands that change the timeline, refused while the clip is locked. */
 const EDITS = new Set<Command>(['cut', 'delete', 'undo', 'redo']);
-/** How many clips on their way out the folder walk passes over before it gives up. */
-const MAX_PASSED = 50;
-
 const DEFAULT_FPS = 30; // for audio-only files, which have no frame rate of their own
 const PLAY_1X: Shuttle = { dir: 1, speed: 1 };
 /** Room kept after the end of the material when panning, so the last edge stays grabbable. */
@@ -160,7 +145,7 @@ export class EditorStore {
    * The files Hasami was asked to trim, oldest first. `next` is the first not opened yet; the
    * files from there on are re-sorted when more arrive.
    */
-  queue = $state<{ files: string[]; next: number }>({ files: [], next: 0 });
+  queue = $state<Queue>({ files: [], next: 0 });
   /** The file on screen; null before the first and after the last (nothing left to trim). */
   current = $state<Current | null>(null);
   /** Counts the stays on a clip: each open of one is a new visit, and its exports belong to it. */
@@ -700,52 +685,17 @@ export class EditorStore {
     return this.queueStep(from, dir) ?? (await this.folderStep(from, dir));
   }
 
-  /**
-   * The queued file Prev / Next go to from `from`, passing over files on their way out or gone;
-   * null when that way leads into the folder. From a queued file the step is to its neighbour.
-   * From a folder clip past the newer end, Next goes to the first queued file not opened yet
-   * (more arrived meanwhile); every other folder step is the folder's.
-   */
   private queueStep(from: Current, dir: Direction): Current | null {
-    const q = this.queue;
-    let at: number;
-    if (from.at !== null) at = from.at;
-    else if (dir === 'next' && from.side === 'newer') at = q.next - 1;
-    else return null;
-    const skip = this.unavailable();
-    const by = dir === 'next' ? 1 : -1;
-    for (let i = at + by; i >= 0 && i < q.files.length; i += by) {
-      const p = q.files[i];
-      if (p !== from.path && !skip.has(p)) return { path: p, at: i };
-    }
-    return null;
+    return queueStep(this.queue, from, dir, this.unavailable());
   }
 
-  /**
-   * The folder's next newer (Next) or older (Prev) video from `from`, passing over clips on their
-   * way out (a Quick / Save raw export or a discard still to finish). One that's queued takes its
-   * place in the queue, so walking back from the folder carries on through the queue. Null when
-   * there's nothing that way, or nothing known about `from` (it never opened).
-   */
-  private async folderStep(from: Current, dir: Direction): Promise<Current | null> {
-    const newer = dir === 'next';
-    const leaving = this.leaving();
-    let path = from.path;
-    for (let i = 0; i < MAX_PASSED; i++) {
-      const ms = this.modified.get(path);
-      if (ms === undefined) return null;
-      const found = await api.adjacentFile(path, ms, newer);
-      if (found === null) return null;
-      if (!leaving.has(found)) {
-        const files = this.queue.files;
-        const at = newer ? files.indexOf(found) : files.lastIndexOf(found);
-        if (at >= 0) return { path: found, at };
-        // Past the queue's newer or older end; a folder clip stays on the side it was on.
-        return { path: found, at: null, side: from.at === null ? from.side : newer ? 'newer' : 'older' };
-      }
-      path = found;
-    }
-    return null;
+  private folderStep(from: Current, dir: Direction): Promise<Current | null> {
+    return folderStep(from, dir, {
+      files: this.queue.files,
+      modified: this.modified,
+      leaving: this.leaving(),
+      adjacentFile: (path, ms, newer) => api.adjacentFile(path, ms, newer),
+    });
   }
 
   /** Files Prev / Next pass over in the queue: on their way out, or gone. */

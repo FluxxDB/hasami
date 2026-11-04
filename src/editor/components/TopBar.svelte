@@ -1,7 +1,8 @@
 <script lang="ts">
   import { formatPercent } from '../../progress/format';
   import { fileName, metaLine } from '../display';
-  import type { Current, Direction, EditorStore, Result } from '../store.svelte';
+  import type { Current, Direction } from '../navigation';
+  import type { EditorStore, Result } from '../store.svelte';
   import { RESULTS_ID } from './Summary.svelte';
 
   interface Props {
