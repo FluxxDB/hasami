@@ -253,11 +253,7 @@ impl Job<'_> {
                 match self.attempt(&h264_args(input, self.graph, &first, self.temp), cancel, on_progress) {
                     // Nothing is committed yet: a failed hardware render is done once more in
                     // software, from a clean temp file, unless the user cancelled meanwhile.
-                    Err(e)
-                        if first.codec != software.codec
-                            && !matches!(e, JobError::Cancelled)
-                            && !cancel.is_cancelled() =>
-                    {
+                    Err(e) if retry_in_software(&first, &software, &e, cancel) => {
                         eprintln!("hasami: {} export failed, retrying with {}: {e}", first.codec, software.codec);
                         let _ = fs::remove_file(self.temp);
                         self.attempt(&h264_args(input, self.graph, &software, self.temp), cancel, on_progress)?
@@ -296,6 +292,12 @@ impl Job<'_> {
         let verified = verify_output(self.paths, self.temp, self.req.duration_s, None).map_err(plain_verify_error)?;
         Ok(verified.size_bytes)
     }
+}
+
+/// Whether a render with `first` that failed with `error` is done once more with `software`: only
+/// when `first` was a hardware encoder and the user hasn't cancelled meanwhile.
+fn retry_in_software(first: &VideoEncoder, software: &VideoEncoder, error: &JobError, cancel: &CancelToken) -> bool {
+    first.codec != software.codec && !matches!(error, JobError::Cancelled) && !cancel.is_cancelled()
 }
 
 /// `Saved "<name>", but couldn't move the original into the Raw folder.`, plus that the 20 MB
@@ -602,6 +604,22 @@ mod tests {
         assert_eq!(info.video.as_ref().unwrap().codec, "h264");
         assert!((info.duration_s - 1.5).abs() < 0.1, "duration was {}", info.duration_s);
         assert_eq!(names(dir.path()), ["Raw", "[CLIPPED] clip.mp4"], "no temp file left behind");
+    }
+
+    #[test]
+    fn a_failed_hardware_render_is_retried_only_while_not_cancelled() {
+        let hardware = VideoEncoder { codec: "h264_amf", args: Vec::new() };
+        let software = software_h264(1_000_000);
+        let failed = JobError::Message(DIDNT_CHECK_OUT.to_owned());
+        let running = CancelToken::new();
+        assert!(retry_in_software(&hardware, &software, &failed, &running));
+        // Cancelled while the hardware render was failing: its error isn't `Cancelled`, but no
+        // retry starts.
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(!retry_in_software(&hardware, &software, &failed, &cancelled));
+        assert!(!retry_in_software(&hardware, &software, &JobError::Cancelled, &running));
+        assert!(!retry_in_software(&software, &software, &failed, &running), "software isn't retried");
     }
 
     #[test]
