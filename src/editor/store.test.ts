@@ -1322,6 +1322,49 @@ describe('EditorStore queue and exports', () => {
     expect(s.discardFailure).toBeNull();
   });
 
+  // --- starting the window -----------------------------------------------------------------
+
+  it('start listens for events before telling Rust it is ready, then opens the oldest file', async () => {
+    const order: string[] = [];
+    vi.mocked(api.onEvent).mockImplementation(async () => {
+      order.push('listen');
+      return () => {};
+    });
+    vi.mocked(api.files).mockImplementation(async () => {
+      order.push('files');
+      return [FILES[1], FILES[0]];
+    });
+    vi.mocked(api.ready).mockImplementation(async () => {
+      order.push('ready');
+    });
+    const s = new EditorStore();
+    await s.start();
+    expect(order).toEqual(['listen', 'files', 'ready']);
+    expect(s.current).toEqual({ path: FILES[0], at: 0 });
+    expect(s.error).toBeNull();
+  });
+
+  it("start says so when it can't get the files to trim", async () => {
+    vi.mocked(api.onEvent).mockResolvedValue(() => {});
+    vi.mocked(api.files).mockRejectedValue(new Error('ipc down'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const s = new EditorStore();
+    await s.start();
+    expect(s.error).toMatch(/couldn't start/i);
+    expect(api.ready).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it('a Files event whose merge fails is logged, not left as an unhandled rejection', async () => {
+    const s = await queued(FILES.slice(0, 1));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(s, 'addFiles').mockRejectedValueOnce(new Error('boom'));
+    s.applyEvent({ type: 'Files', paths: [FILES[1]] });
+    await settle();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
   // --- more files, and the results list ----------------------------------------------------
 
   it('Files events merge into the queue, once per path, ordered by date', async () => {

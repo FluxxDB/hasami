@@ -82,6 +82,7 @@ export interface Current {
 }
 
 // Shown when a command fails without a message of its own.
+const START_FAILED = "The editor couldn't start. Close this window and try Quick Trim again.";
 const OPEN_FAILED = "Couldn't open this clip.";
 const EXPORT_FAILED = "Couldn't start the export.";
 const DISCARD_FAILED = "Couldn't send this clip to the Recycle Bin.";
@@ -375,6 +376,25 @@ export class EditorStore {
   // --- queue -------------------------------------------------------------------------------
 
   /**
+   * Starts the window: listens for the Rust side's events, tells it so (it holds them until then),
+   * and opens the files it was asked to trim; later batches arrive as `Files` events.
+   */
+  async start(): Promise<void> {
+    let files: string[];
+    try {
+      await api.onEvent((e) => this.applyEvent(e));
+      files = await api.files();
+    } catch (err) {
+      console.error('The editor could not start', err);
+      this.error = START_FAILED;
+      return;
+    }
+    const opening = this.addFiles(files);
+    api.ready().catch((err) => console.error('editor_ready failed', err));
+    await opening.catch((err) => console.error('Opening the first clip failed', err));
+  }
+
+  /**
    * Merges files into the part of the queue not opened yet and sorts that part by date, oldest
    * first; the files already opened keep their places. Each path goes in once among those not
    * dealt with yet (a file already exported, moved on from, kept or failed can be trimmed again;
@@ -562,7 +582,7 @@ export class EditorStore {
     const x = this.exports;
     switch (e.type) {
       case 'Files':
-        void this.addFiles(e.paths);
+        this.addFiles(e.paths).catch((err) => console.error('Adding files failed', err));
         return;
       case 'ExportStarted':
         this.track(e.id);
